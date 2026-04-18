@@ -2,6 +2,64 @@
 
 Bu proje Streamlit tabanli duplicate tespit uygulamasidir.
 
+## React Frontend (Yeni)
+
+Mevcut Streamlit uygulamasi korunur. React tabanli yeni veri yukleme arayuzu `frontend` klasorune eklendi.
+
+1. Frontend bagimliliklarini yukle:
+
+```bash
+cd frontend
+npm install
+```
+
+2. React uygulamasini calistir:
+
+```bash
+cd frontend
+npm run dev
+```
+
+3. Sayfa adresleri:
+
+- Home: `http://localhost:5173`
+- Veri Yukleme: `http://localhost:5173/veri-yukleme`
+
+Not: Streamlit arayuzunde "React Veri Yukleme Panelini Ac" butonu ile yeni sayfaya gecis yapabilirsin.
+
+## Backend API (FastAPI)
+
+React tarafinin cagiracagi backend API baslangici eklendi.
+
+1. Bagimliliklari yukle:
+
+```bash
+pip install -r requirements.txt
+```
+
+2. API servisini calistir:
+
+```bash
+uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+3. Endpointler:
+
+- `GET /health`
+- `POST /api/v1/normalize`
+- `POST /api/v1/detect`
+- `POST /api/v1/detect-file` (Excel/CSV upload)
+- `POST /api/v1/detect-from-url` (harici API'den veri cekip tespit)
+
+Frontend varsayilan olarak `http://localhost:8000` adresine istek atar.
+
+React Veri Yukleme sayfasinda su akıslar canli backend ile calisir:
+
+- Excel/CSV dosya yukleme -> `detect-file`
+- API URL'den veri cekme -> `detect-from-url`
+- Manuel kayit girisi -> `detect`
+- "Sonuclari PostgreSQL'e kaydet" secenegi ile DB insert
+
 ## PostgreSQL + Docker Kurulumu
 
 Ana proje klasoru altinda `devops` klasoru olusturuldu.
