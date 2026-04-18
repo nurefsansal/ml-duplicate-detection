@@ -7,7 +7,7 @@ import pandas as pd
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
-DEFAULT_DATABASE_URL = "postgresql+psycopg2://ml_duplicate_user:1234@localhost:5433/ml_duplicate_db"
+DEFAULT_DATABASE_URL = "postgresql+psycopg2://ml_duplicate_user:1234@localhost:5434/ml_duplicate_db"
 
 
 def get_database_url() -> str:
@@ -53,6 +53,9 @@ def ensure_tables(engine: Engine) -> None:
         payload JSONB
     );
     """
+
+    DEFAULT_DATABASE_URL = "postgresql+psycopg2://ml_duplicate_user:1234@localhost:5434/ml_duplicate_db"
+
 
     with engine.begin() as conn:
         conn.execute(text(ddl))
