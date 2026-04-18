@@ -1,6 +1,7 @@
 import pandas as pd
 import streamlit as st
 
+from src.db import create_db_engine, save_duplicates, test_connection
 from src.matching import EntityMatcher
 from src.preprocess import DataCleaner
 
@@ -14,6 +15,19 @@ st.set_page_config(
 st.title("Dedupli-AI: Akıllı Kayıt Tekilleştirme Platformu")
 st.caption("Excel yükle → veri temizle → olası duplicate kayıtları bul → sonuçları incele")
 
+if "db_engine" not in st.session_state:
+    st.session_state.db_engine = create_db_engine()
+
+if "session_id" not in st.session_state:
+    st.session_state.session_id = str(pd.Timestamp.utcnow().value)
+
+db_ok, db_message = test_connection(st.session_state.db_engine)
+if db_ok:
+    st.success(db_message)
+else:
+    st.error(db_message)
+    st.caption("Docker PostgreSQL ayağa kalkmadıysa önce devops klasöründe docker compose up -d komutunu çalıştır.")
+
 uploaded = st.file_uploader("Excel dosyanı yükle (.xlsx)", type=["xlsx"])
 
 if uploaded is None:
@@ -24,6 +38,10 @@ with st.spinner("Excel okunuyor..."):
     df_raw = pd.read_excel(uploaded)
 
 st.success(f"Dosya yüklendi. Kayıt sayısı: {len(df_raw):,}".replace(",", "."))
+
+if df_raw.empty:
+    st.warning("Yüklenen dosyada kayıt yok. Lütfen en az 1 satır veri içeren bir Excel yükle.")
+    st.stop()
 
 with st.spinner("Veri temizleniyor (clean_* sütunları üretiliyor)..."):
     cleaner = DataCleaner()
@@ -49,6 +67,14 @@ if duplicates_view.empty:
     st.warning("Bu kurallara göre duplicate bulunamadı.")
 else:
     st.dataframe(duplicates_view, use_container_width=True, height=520)
+
+    if st.button("Duplicate sonuçlarını PostgreSQL'e kaydet", type="primary"):
+        if not db_ok:
+            st.error("Kayıt yapılamadı: PostgreSQL bağlantısı yok.")
+        else:
+            with st.spinner("Sonuçlar PostgreSQL'e kaydediliyor..."):
+                inserted = save_duplicates(st.session_state.db_engine, duplicates_view, st.session_state.session_id)
+            st.success(f"Kayıt tamamlandı. Eklenen satır sayısı: {inserted}")
 
 with st.expander("Kural çıktıları (debug amaçlı)", expanded=False):
     st.write(

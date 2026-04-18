@@ -4,4 +4,6 @@ recordlinkage
 streamlit
 fuzzywuzzy
 python-Levenshtein
+SQLAlchemy
+psycopg2-binary
 
