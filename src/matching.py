@@ -52,6 +52,15 @@ class EntityMatcher:
         """
         df = self._ensure_columns(df)
 
+        # recordlinkage indexer raises ZeroDivisionError for completely empty inputs.
+        if df.empty:
+            empty_pairs = pd.MultiIndex.from_arrays([[], []], names=["left_index", "right_index"])
+            empty_features = pd.DataFrame(
+                columns=["name_jw", "tc_exact", "phone_exact", "email_exact"],
+                index=empty_pairs,
+            )
+            return empty_pairs, empty_features, empty_features.copy()
+
         # 1) Candidate generation (blocking by city for performance).
         indexer = recordlinkage.Index()
         indexer.block("clean_city")
@@ -71,6 +80,25 @@ class EntityMatcher:
         compare.exact("clean_email", "clean_email", label="email_exact")
 
         features = compare.compute(candidate_links, df)
+
+        # Exact comparisons should not count as a match when both sides are empty.
+        left_index = features.index.get_level_values(0)
+        right_index = features.index.get_level_values(1)
+
+        for source_col, feature_col in [
+            ("clean_tc", "tc_exact"),
+            ("clean_phone", "phone_exact"),
+            ("clean_email", "email_exact"),
+        ]:
+            left_vals = df.loc[left_index, source_col].reset_index(drop=True)
+            right_vals = df.loc[right_index, source_col].reset_index(drop=True)
+
+            left_empty = left_vals.fillna("").astype(str).str.strip().eq("")
+            right_empty = right_vals.fillna("").astype(str).str.strip().eq("")
+            both_empty = left_empty & right_empty
+
+            if both_empty.any():
+                features.loc[both_empty.to_numpy(), feature_col] = 0.0
 
         # 3) Filter: at least N rules must match.
         rule_sum = features.sum(axis=1)
