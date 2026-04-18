@@ -1,7 +1,7 @@
 import pandas as pd
 import streamlit as st
 
-from src.db import create_db_engine, save_duplicates, test_connection
+from src.db import create_db_engine, get_database_url, save_duplicates, test_connection
 from src.matching import EntityMatcher
 from src.preprocess import DataCleaner
 
@@ -15,8 +15,10 @@ st.set_page_config(
 st.title("Dedupli-AI: Akıllı Kayıt Tekilleştirme Platformu")
 st.caption("Excel yükle → veri temizle → olası duplicate kayıtları bul → sonuçları incele")
 
-if "db_engine" not in st.session_state:
+current_db_url = get_database_url()
+if "db_engine" not in st.session_state or st.session_state.get("db_url") != current_db_url:
     st.session_state.db_engine = create_db_engine()
+    st.session_state.db_url = current_db_url
 
 if "session_id" not in st.session_state:
     st.session_state.session_id = str(pd.Timestamp.utcnow().value)
