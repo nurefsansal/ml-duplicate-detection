@@ -15,6 +15,8 @@ st.set_page_config(
 st.title("Dedupli-AI: Akıllı Kayıt Tekilleştirme Platformu")
 st.caption("Excel yükle → veri temizle → olası duplicate kayıtları bul → sonuçları incele")
 
+st.link_button("React Veri Yükleme Panelini Aç", "http://localhost:5173/veri-yukleme")
+
 current_db_url = get_database_url()
 if "db_engine" not in st.session_state or st.session_state.get("db_url") != current_db_url:
     st.session_state.db_engine = create_db_engine()

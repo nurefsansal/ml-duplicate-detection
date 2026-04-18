@@ -6,4 +6,8 @@ fuzzywuzzy
 python-Levenshtein
 SQLAlchemy
 psycopg2-binary
+fastapi
+uvicorn[standard]
+httpx
+python-multipart
 
