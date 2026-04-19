@@ -1,5 +1,11 @@
 import { Link, Navigate, Route, Routes } from "react-router-dom";
 import VeriYukleme from "./pages/VeriYukleme/index";
+import VeriNormalizasyon from "./pages/VeriNormalizasyon/index";
+import MukerrerTespit from "./pages/MukerrerTespit/index";
+import MukerrerKayitlar from "./pages/MukerrerKayitlar/index";
+import YoneticiOnayi from "./pages/YoneticiOnayi/index";
+import Ayarlar from "./pages/Ayarlar/index";
+import Raporlar from "./pages/Raporlar/index";
 
 function PlaceholderPage({ title }: { title: string }) {
   return (
@@ -60,22 +66,22 @@ export default function App() {
       <Route path="/veri-yukleme" element={<VeriYukleme />} />
       <Route
         path="/veri-normalizasyon"
-        element={<PlaceholderPage title="Veri Normalizasyon" />}
+        element={<VeriNormalizasyon />}
       />
       <Route
         path="/mukerrer-tespit"
-        element={<PlaceholderPage title="Mukerrer Tespit" />}
+        element={<MukerrerTespit />}
       />
       <Route
         path="/mukerrer-kayitlar"
-        element={<PlaceholderPage title="Mukerrer Kayitlar" />}
+        element={<MukerrerKayitlar />}
       />
       <Route
         path="/yonetici-onayi"
-        element={<PlaceholderPage title="Yonetici Onayi" />}
+        element={<YoneticiOnayi />}
       />
-      <Route path="/ayarlar" element={<PlaceholderPage title="Ayarlar" />} />
-      <Route path="/raporlar" element={<PlaceholderPage title="Raporlar" />} />
+      <Route path="/ayarlar" element={<Ayarlar />} />
+      <Route path="/raporlar" element={<Raporlar />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );

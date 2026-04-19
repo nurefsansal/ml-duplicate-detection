@@ -1,7 +1,15 @@
+
+# Python bytecode ve test cache dosyaları
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.pyo
 .env
 devops/.env
+# Cython debug symbols
+cython_debug/
+# pytest cache
+.pytest_cache/
 
 # Node modules
 node_modules/
@@ -21,6 +29,9 @@ frontend/*.d.ts
 .venv/
 venv/
 env/
+
+# Jupyter notebook checkpoint dosyaları
+.ipynb_checkpoints/
 
 # IDE
 .vscode/

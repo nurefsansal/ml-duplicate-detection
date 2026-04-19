@@ -199,6 +199,106 @@ def normalize(payload: NormalizeRequest) -> dict:
     }
 
 
+@app.post("/api/v1/normalize-file")
+async def normalize_file(
+    file: UploadFile = File(...),
+) -> dict:
+    """Normalize records from an uploaded Excel/CSV file."""
+    filename = (file.filename or "").lower()
+    content = await file.read()
+
+    try:
+        if filename.endswith(".xlsx") or filename.endswith(".xls"):
+            df_raw = pd.read_excel(content)
+        elif filename.endswith(".csv"):
+            df_raw = pd.read_csv(io.StringIO(content.decode("utf-8")))
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Sadece .xlsx, .xls ve .csv dosyaları destekleniyor",
+            )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Dosya okunamadı: {exc}")
+
+    # Map common column names
+    column_map = {
+        "ad soyad": "Ad Soyad",
+        "ad": "Ad Soyad",
+        "soyad": "Ad Soyad",
+        "name": "Ad Soyad",
+        "tc kimlik no": "TC",
+        "tc": "TC",
+        "tckn": "TC",
+        "telefon": "Telefon",
+        "phone": "Telefon",
+        "tel": "Telefon",
+        "email": "E-mail",
+        "e-posta": "E-mail",
+        "mail": "E-mail",
+        "sehir": "Şehir",
+        "city": "Şehir",
+        "il": "Şehir",
+    }
+    df_raw.columns = [column_map.get(col.lower().strip(), col) for col in df_raw.columns]
+
+    # Ensure required columns exist
+    required_cols = ["Ad Soyad"]
+    missing = [c for c in required_cols if c not in df_raw.columns]
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Eksik zorunlu kolon: {', '.join(missing)}",
+        )
+
+    # Fill missing optional columns
+    for col in ["TC", "Telefon", "E-mail", "Şehir"]:
+        if col not in df_raw.columns:
+            df_raw[col] = ""
+
+    # Convert to RecordIn format
+    records = []
+    for _, row in df_raw.iterrows():
+        records.append(
+            RecordIn(
+                adSoyad=str(row.get("Ad Soyad", "")),
+                tcKimlikNo=str(row.get("TC", "")),
+                telefon=str(row.get("Telefon", "")),
+                email=str(row.get("E-mail", "")),
+                sehir=str(row.get("Şehir", "")),
+            )
+        )
+
+    # Normalize
+    cleaner = DataCleaner()
+    normalized = cleaner.process(df_raw)
+    normalized["canonical_name"] = normalized["clean_name"].apply(_canonical_name)
+    normalized["name_phonetic_key"] = normalized["canonical_name"].apply(_phonetic_name_key)
+    normalized["email_normalized_key"] = normalized["clean_email"].apply(_normalize_email_key)
+
+    selected_cols = [
+        "Ad Soyad",
+        "Şehir",
+        "Telefon",
+        "TC",
+        "E-mail",
+        "clean_name",
+        "canonical_name",
+        "name_phonetic_key",
+        "clean_city",
+        "clean_phone",
+        "clean_tc",
+        "clean_email",
+        "email_normalized_key",
+    ]
+
+    selected = normalized[[col for col in selected_cols if col in normalized.columns]]
+
+    return {
+        "totalRecords": len(df_raw),
+        "normalizedRecords": _json_rows(selected),
+    }
+
+
 @app.post("/api/v1/detect")
 def detect(payload: DetectRequest) -> dict:
     return _detect_core(
