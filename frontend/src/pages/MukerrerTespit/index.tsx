@@ -80,11 +80,19 @@ export default function MukerrerTespit() {
         algorithms: selectedAlgo,
         threshold: threshold,
       });
+
+      if (typeof result.uploadId === "number") {
+        localStorage.setItem("lastDetectUploadId", String(result.uploadId));
+      }
       
       setRealResults(result);
       setProgress(100);
       setDone(true);
-      setStatusMessage(`Tespit tamamlandı — ${result.duplicatePairs} mükerrer grup bulundu`);
+      setStatusMessage(
+        `Tespit tamamlandı — ${result.duplicatePairs} mükerrer grup bulundu${
+          typeof result.uploadId === "number" ? ` (Upload ID: ${result.uploadId})` : ""
+        }`,
+      );
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Tespit sırasında hata oluştu");
       setProgress(0);

@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.api.routes.detect import router as detect_router
+from backend.api.routes.admin import router as admin_router
 from backend.api.routes.health import router as health_router
 from backend.api.routes.normalize import router as normalize_router
 
@@ -27,4 +28,5 @@ app.add_middleware(
 
 app.include_router(health_router)
 app.include_router(detect_router, prefix="/api/v1")
+app.include_router(admin_router, prefix="/api/v1")
 app.include_router(normalize_router, prefix="/api/v1")

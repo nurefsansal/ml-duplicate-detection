@@ -28,11 +28,17 @@ def _fallback_probability(features: dict) -> float:
     score += 1.2 * features.get("email_exact_match", 0)
     score += 0.7 * features.get("city_exact_match", 0)
     score += 1.0 * features.get("phonetic_exact_match", 0)
+    score += 0.7 * features.get("metaphone_exact_match", 0)
+    score += 0.6 * features.get("phonetic_close_match", 0)
 
     score += 2.5 * features.get("name_similarity", 0.0)
+    score += 1.0 * features.get("name_jaro_winkler", 0.0)
+    score += 0.8 * features.get("name_levenshtein_similarity", 0.0)
     score += 1.2 * features.get("email_similarity", 0.0)
     score += 1.8 * features.get("first_name_similarity", 0.0)
     score += 1.2 * features.get("surname_similarity", 0.0)
+    score += 0.5 * features.get("first_name_jaro_winkler", 0.0)
+    score += 0.4 * features.get("surname_jaro_winkler", 0.0)
 
     score += 0.7 * features.get("first_name_exact_match", 0)
     score += 0.6 * features.get("surname_exact_match", 0)
@@ -62,7 +68,33 @@ def predict_match_probability(features: dict) -> float:
     if model is None:
         return _fallback_probability(features)
 
-    feature_order = [
+    feature_order_v2 = [
+        "tc_exact_match",
+        "tc_conflict",
+        "phone_exact_match",
+        "phone_last7_match",
+        "email_exact_match",
+        "city_exact_match",
+        "phonetic_exact_match",
+        "metaphone_exact_match",
+        "phonetic_close_match",
+        "name_similarity",
+        "name_jaro_winkler",
+        "name_levenshtein_similarity",
+        "email_similarity",
+        "first_name_similarity",
+        "surname_similarity",
+        "first_name_jaro_winkler",
+        "surname_jaro_winkler",
+        "first_name_exact_match",
+        "surname_exact_match",
+        "shared_contact_flag",
+        "shared_contact_name_conflict",
+        "household_risk_flag",
+        "common_non_empty_fields",
+    ]
+
+    feature_order_v1 = [
         "tc_exact_match",
         "tc_conflict",
         "phone_exact_match",
@@ -81,6 +113,11 @@ def predict_match_probability(features: dict) -> float:
         "household_risk_flag",
         "common_non_empty_fields",
     ]
+
+    n_features = getattr(model, "n_features_in_", None)
+    feature_order = feature_order_v2
+    if isinstance(n_features, int) and n_features == len(feature_order_v1):
+        feature_order = feature_order_v1
 
     row = [[features.get(col, 0) for col in feature_order]]
 

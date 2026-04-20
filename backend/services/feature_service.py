@@ -1,5 +1,10 @@
 from difflib import SequenceMatcher
 
+from backend.services.advanced_matching_service import (
+    jaro_winkler_similarity,
+    levenshtein_similarity,
+)
+
 
 def _safe_str(value) -> str:
     if value is None:
@@ -11,6 +16,13 @@ def _similarity(a: str, b: str) -> float:
     if not a or not b:
         return 0.0
     return SequenceMatcher(None, a, b).ratio()
+
+
+def _max_similarity(a: str, b: str) -> float:
+    seq_sim = _similarity(a, b)
+    jw_sim = jaro_winkler_similarity(a, b)
+    lev_sim = levenshtein_similarity(a, b)
+    return round(max(seq_sim, jw_sim, lev_sim), 4)
 
 
 def _last_n_match(a: str, b: str, n: int) -> int:
@@ -61,11 +73,20 @@ def build_pair_features(left: dict, right: dict) -> dict:
     left_phonetic = _safe_str(left.get("name_phonetic_key"))
     right_phonetic = _safe_str(right.get("name_phonetic_key"))
 
+    left_metaphone = _safe_str(left.get("name_metaphone_key"))
+    right_metaphone = _safe_str(right.get("name_metaphone_key"))
+
     left_first, left_surname = _split_name_parts(left_name)
     right_first, right_surname = _split_name_parts(right_name)
 
-    first_name_similarity = round(_similarity(left_first, right_first), 4)
-    surname_similarity = round(_similarity(left_surname, right_surname), 4)
+    first_name_similarity = _max_similarity(left_first, right_first)
+    surname_similarity = _max_similarity(left_surname, right_surname)
+
+    first_name_jw = jaro_winkler_similarity(left_first, right_first)
+    surname_jw = jaro_winkler_similarity(left_surname, right_surname)
+
+    name_jaro_winkler = jaro_winkler_similarity(left_name, right_name)
+    name_levenshtein_similarity = levenshtein_similarity(left_name, right_name)
 
     first_name_exact_match = int(bool(left_first and right_first and left_first == right_first))
     surname_exact_match = int(bool(left_surname and right_surname and left_surname == right_surname))
@@ -75,6 +96,8 @@ def build_pair_features(left: dict, right: dict) -> dict:
     email_exact_match = int(bool(left_email and right_email and left_email == right_email))
     city_exact_match = int(bool(left_city and right_city and left_city == right_city))
     phonetic_exact_match = int(bool(left_phonetic and right_phonetic and left_phonetic == right_phonetic))
+    metaphone_exact_match = int(bool(left_metaphone and right_metaphone and left_metaphone == right_metaphone))
+    phonetic_close_match = int(bool(phonetic_exact_match or metaphone_exact_match))
 
     shared_contact_flag = int(bool(phone_exact_match or email_exact_match))
 
@@ -104,10 +127,16 @@ def build_pair_features(left: dict, right: dict) -> dict:
         "email_exact_match": email_exact_match,
         "city_exact_match": city_exact_match,
         "phonetic_exact_match": phonetic_exact_match,
-        "name_similarity": round(_similarity(left_name, right_name), 4),
+        "metaphone_exact_match": metaphone_exact_match,
+        "phonetic_close_match": phonetic_close_match,
+        "name_similarity": _max_similarity(left_name, right_name),
+        "name_jaro_winkler": name_jaro_winkler,
+        "name_levenshtein_similarity": name_levenshtein_similarity,
         "email_similarity": round(_similarity(left_email, right_email), 4),
         "first_name_similarity": first_name_similarity,
         "surname_similarity": surname_similarity,
+        "first_name_jaro_winkler": first_name_jw,
+        "surname_jaro_winkler": surname_jw,
         "first_name_exact_match": first_name_exact_match,
         "surname_exact_match": surname_exact_match,
         "shared_contact_flag": shared_contact_flag,
