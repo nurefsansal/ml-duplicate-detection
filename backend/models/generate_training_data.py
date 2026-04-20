@@ -7,6 +7,7 @@ from src.preprocess import DataCleaner
 from backend.services.normalization_service import (
     canonical_name,
     phonetic_name_key,
+    metaphone_name_key,
     normalize_email_key,
 )
 from backend.services.feature_service import build_pair_features
@@ -53,6 +54,7 @@ def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
 
     clean["clean_name"] = clean["clean_name"].fillna("").astype(str).apply(canonical_name)
     clean["name_phonetic_key"] = clean["clean_name"].fillna("").astype(str).apply(phonetic_name_key)
+    clean["name_metaphone_key"] = clean["clean_name"].fillna("").astype(str).apply(metaphone_name_key)
     clean["email_normalized_key"] = clean["clean_email"].fillna("").astype(str).apply(normalize_email_key)
 
     clean["clean_first_name"] = clean["clean_first_name"].fillna("").astype(str).str.strip()

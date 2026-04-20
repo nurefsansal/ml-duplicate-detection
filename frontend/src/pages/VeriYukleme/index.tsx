@@ -86,8 +86,13 @@ export default function VeriYukleme() {
     try {
       const response = await detectDuplicatesFromFile(file, { saveToDb });
       setResult(response);
+      if (typeof response.uploadId === "number") {
+        localStorage.setItem("lastDetectUploadId", String(response.uploadId));
+      }
       setStatusMessage(
-        `Analiz tamamlandı. Aday: ${response.candidatePairs}, Mükerrer: ${response.duplicatePairs}, DB'ye yazılan: ${response.insertedRows}`,
+        `Analiz tamamlandı. Aday: ${response.candidatePairs}, Mükerrer: ${response.duplicatePairs}, DB'ye yazılan: ${response.insertedRows}${
+          typeof response.uploadId === "number" ? `, Upload ID: ${response.uploadId}` : ""
+        }`,
       );
       setProgress(100);
     } catch (error) {
@@ -123,8 +128,13 @@ export default function VeriYukleme() {
         saveToDb,
       });
       setResult(response);
+      if (typeof response.uploadId === "number") {
+        localStorage.setItem("lastDetectUploadId", String(response.uploadId));
+      }
       setStatusMessage(
-        `API verisi işlendi. Mükerrer çift: ${response.duplicatePairs}. DB'ye yazılan: ${response.insertedRows}`,
+        `API verisi işlendi. Mükerrer çift: ${response.duplicatePairs}. DB'ye yazılan: ${response.insertedRows}${
+          typeof response.uploadId === "number" ? `, Upload ID: ${response.uploadId}` : ""
+        }`,
       );
     } catch (error) {
       setErrorMessage(getError(error));
@@ -163,8 +173,13 @@ export default function VeriYukleme() {
     try {
       const response = await detectDuplicates(manualRecords, { saveToDb });
       setResult(response);
+      if (typeof response.uploadId === "number") {
+        localStorage.setItem("lastDetectUploadId", String(response.uploadId));
+      }
       setStatusMessage(
-        `Manuel kayıt analizi tamamlandı. Mükerrer çift: ${response.duplicatePairs}. DB'ye yazılan: ${response.insertedRows}`,
+        `Manuel kayıt analizi tamamlandı. Mükerrer çift: ${response.duplicatePairs}. DB'ye yazılan: ${response.insertedRows}${
+          typeof response.uploadId === "number" ? `, Upload ID: ${response.uploadId}` : ""
+        }`,
       );
     } catch (error) {
       setErrorMessage(getError(error));

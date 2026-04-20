@@ -2,6 +2,7 @@ import pandas as pd
 import re
 
 from backend.schemas.requests import RecordIn
+from backend.services.advanced_matching_service import build_name_keys
 
 
 def canonical_name(value: str) -> str:
@@ -12,11 +13,11 @@ def canonical_name(value: str) -> str:
 
 
 def phonetic_name_key(value: str) -> str:
-    if not value:
-        return ""
-    text = re.sub(r"[^A-Z]", "", str(value).upper())
-    no_vowels = re.sub(r"[AEIIOOUU]", "", text)
-    return re.sub(r"(.)\1+", r"\1", no_vowels)[:16]
+    return build_name_keys(value).get("soundex_key", "")
+
+
+def metaphone_name_key(value: str) -> str:
+    return build_name_keys(value).get("metaphone_key", "")
 
 
 def normalize_email_key(value: str) -> str:

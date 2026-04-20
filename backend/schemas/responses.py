@@ -13,6 +13,7 @@ class NormalizeResponse(BaseModel):
 
 class DetectResponse(BaseModel):
     sessionId: str
+    uploadId: int | None = None
     candidatePairs: int
     duplicatePairs: int
     insertedRows: int

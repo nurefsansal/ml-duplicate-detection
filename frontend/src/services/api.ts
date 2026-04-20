@@ -18,6 +18,7 @@ export type NormalizedRecord = {
 
 export type DetectResponse = {
   sessionId: string;
+  uploadId?: number | null;
   candidatePairs: number;
   duplicatePairs: number;
   insertedRows: number;
@@ -116,6 +117,7 @@ export async function healthCheck() {
 
 export type DetectDuplicateResponse = {
   sessionId: string;
+  uploadId?: number | null;
   candidatePairs: number;
   duplicatePairs: number;
   insertedRows: number;
@@ -168,6 +170,90 @@ export async function detectDuplicatesFromFileWithOptions(
     headers: {
       "Content-Type": "multipart/form-data",
     },
+  });
+  return response.data;
+}
+
+export type AdminPendingMatch = {
+  id: number;
+  donor1_id: number;
+  donor2_id: number;
+  donor1_name: string;
+  donor1_email?: string | null;
+  donor1_phone?: string | null;
+  donor2_name: string;
+  donor2_email?: string | null;
+  donor2_phone?: string | null;
+  ml_score: number;
+  confidence?: number | null;
+  decision_reason?: string | null;
+  features: Record<string, unknown>;
+  created_at?: string | null;
+};
+
+export type AdminPendingMatchesResponse = {
+  success: boolean;
+  count: number;
+  matches: AdminPendingMatch[];
+};
+
+export type AdminApproveResponse = {
+  success: boolean;
+  match_id: number;
+  status: string;
+  approved_by?: string;
+  approved_at?: string;
+  entity_id?: number;
+  entity_name?: string;
+  donor_count?: number;
+};
+
+export type AdminRejectResponse = {
+  success: boolean;
+  match_id: number;
+  status: string;
+  rejected_by?: string;
+  rejected_at?: string;
+  reason?: string;
+};
+
+export async function getPendingMatches(options?: {
+  uploadId?: number;
+  limit?: number;
+}): Promise<AdminPendingMatchesResponse> {
+  const response = await apiClient.get("/api/v1/admin/pending-matches", {
+    params: {
+      upload_id: options?.uploadId,
+      limit: options?.limit ?? 50,
+    },
+  });
+  return response.data;
+}
+
+export async function approvePendingMatch(payload: {
+  matchId: number;
+  approvedBy?: string;
+  mergeIntoEntity?: boolean;
+  canonicalName?: string;
+}): Promise<AdminApproveResponse> {
+  const response = await apiClient.post("/api/v1/admin/approve-match", {
+    match_id: payload.matchId,
+    approved_by: payload.approvedBy ?? "frontend_admin",
+    merge_into_entity: payload.mergeIntoEntity ?? true,
+    canonical_name: payload.canonicalName,
+  });
+  return response.data;
+}
+
+export async function rejectPendingMatch(payload: {
+  matchId: number;
+  rejectedBy?: string;
+  reason?: string;
+}): Promise<AdminRejectResponse> {
+  const response = await apiClient.post("/api/v1/admin/reject-match", {
+    match_id: payload.matchId,
+    rejected_by: payload.rejectedBy ?? "frontend_admin",
+    reason: payload.reason,
   });
   return response.data;
 }

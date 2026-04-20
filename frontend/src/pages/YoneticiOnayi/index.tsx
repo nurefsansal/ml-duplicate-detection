@@ -3,90 +3,137 @@ import DashboardLayout from "../../components/feature/DashboardLayout";
 import Header from "../../components/feature/Header";
 import { mockDuplicateGroups, type DuplicateGroup } from "../../mocks/records";
 import { auditLog, yoneticiler, type AuditLogItem } from "../../mocks/approval";
-import { detectDuplicatesFromFileWithOptions } from "../../services/api";
+import {
+  approvePendingMatch,
+  getPendingMatches,
+  rejectPendingMatch,
+  type AdminPendingMatch,
+} from "../../services/api";
 
 type TabType = "bekleyen" | "onaylandi" | "reddedildi";
+type UiDuplicateGroup = DuplicateGroup & {
+  backendMatchId?: number;
+  decisionReason?: string;
+};
+
+function scoreFromFraction(value: unknown, fallback = 0): number {
+  const num = Number(value);
+  if (Number.isNaN(num)) {
+    return fallback;
+  }
+  return Math.max(0, Math.min(100, Math.round(num * 100)));
+}
+
+function formatPendingToGroup(match: AdminPendingMatch, index: number): UiDuplicateGroup {
+  const details = {
+    adSoyad: scoreFromFraction(match.features?.name_similarity, 0),
+    telefon: Number(match.features?.phone_exact_match) === 1 ? 100 : 0,
+    email: Number(match.features?.email_similarity ?? 0),
+    sehir: Number(match.features?.city_exact_match) === 1 ? 100 : 0,
+  };
+
+  return {
+    id: `MG-${String(index + 1).padStart(3, "0")}`,
+    backendMatchId: match.id,
+    decisionReason: match.decision_reason ?? undefined,
+    records: [
+      {
+        adSoyad: String(match.donor1_name || ""),
+        tcKimlikNo: "",
+        telefon: String(match.donor1_phone || ""),
+        email: String(match.donor1_email || ""),
+        sehir: "",
+        muhatapNo: String(match.donor1_id),
+      },
+      {
+        adSoyad: String(match.donor2_name || ""),
+        tcKimlikNo: "",
+        telefon: String(match.donor2_phone || ""),
+        email: String(match.donor2_email || ""),
+        sehir: "",
+        muhatapNo: String(match.donor2_id),
+      },
+    ],
+    score: scoreFromFraction(match.ml_score, 85),
+    decision: "bekleyen",
+    matchDetails: details,
+  };
+}
 
 export default function YoneticiOnayi() {
   const [tab, setTab] = useState<TabType>("bekleyen");
-  const [detailGroup, setDetailGroup] = useState<DuplicateGroup | null>(null);
+  const [detailGroup, setDetailGroup] = useState<UiDuplicateGroup | null>(null);
   const [searchAudit, setSearchAudit] = useState("");
   const [filterYonetici, setFilterYonetici] = useState("Tümü");
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
-  const [realData, setRealData] = useState<DuplicateGroup[]>([]);
+  const [realData, setRealData] = useState<UiDuplicateGroup[]>([]);
   const [realAuditLog, setRealAuditLog] = useState<AuditLogItem[]>([]);
   const [decisionNote, setDecisionNote] = useState("");
+  const [apiError, setApiError] = useState("");
+  const [lastUploadId, setLastUploadId] = useState<number | null>(null);
   const [backendHealthy, setBackendHealthy] = useState<boolean | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const isMountedRef = useRef(true);
+
+  const refreshPendingMatches = async (uploadId?: number) => {
+    setLoading(true);
+    setApiError("");
+
+    try {
+      const response = await getPendingMatches({
+        uploadId,
+        limit: 100,
+      });
+      const mapped = (response.matches || []).map(formatPendingToGroup);
+
+      if (!isMountedRef.current) {
+        return;
+      }
+
+      setRealData(mapped);
+    } catch (error) {
+      if (!isMountedRef.current) {
+        return;
+      }
+      setApiError(error instanceof Error ? error.message : "Pending kayıtlar alınamadı.");
+    } finally {
+      if (isMountedRef.current) {
+        setLoading(false);
+      }
+    }
+  };
 
   // Backend health check
   useEffect(() => {
-    let mounted = true;
+    isMountedRef.current = true;
+
     import("../../services/api")
       .then(({ healthCheck }) => healthCheck())
       .then(() => {
-        if (mounted) setBackendHealthy(true);
+        if (!isMountedRef.current) {
+          return;
+        }
+        setBackendHealthy(true);
+
+        const storedUpload = localStorage.getItem("lastDetectUploadId");
+        const parsedUpload = storedUpload ? Number(storedUpload) : NaN;
+        const uploadId = Number.isFinite(parsedUpload) ? parsedUpload : undefined;
+        setLastUploadId(uploadId ?? null);
+        refreshPendingMatches(uploadId);
       })
       .catch(() => {
-        if (mounted) setBackendHealthy(false);
+        if (isMountedRef.current) {
+          setBackendHealthy(false);
+        }
       });
+
     return () => {
-      mounted = false;
+      isMountedRef.current = false;
     };
   }, []);
 
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      setSelectedFile(file);
-      loadDataFromFile(file);
-    }
-  };
-
-  const loadDataFromFile = async (file: File) => {
-    setLoading(true);
-    try {
-      const result = await detectDuplicatesFromFileWithOptions(file, {
-        minRulesToMatch: 2,
-        saveToDb: true,
-      });
-      
-      const groups: DuplicateGroup[] = (result.duplicates || []).map((d, i) => ({
-        id: `MG-${String(i + 1).padStart(3, "0")}`,
-        records: [
-          {
-            adSoyad: String(d["L_Ad Soyad"] || ""),
-            tcKimlikNo: String(d["L_TC"] || ""),
-            telefon: String(d["L_Telefon"] || ""),
-            email: String(d["L_E-mail"] || ""),
-            sehir: String(d["L_Şehir"] || ""),
-            muhatapNo: String(d["L_Telefon"] || "").slice(-4),
-          },
-          {
-            adSoyad: String(d["R_Ad Soyad"] || ""),
-            tcKimlikNo: String(d["R_TC"] || ""),
-            telefon: String(d["R_Telefon"] || ""),
-            email: String(d["R_E-mail"] || ""),
-            sehir: String(d["R_Şehir"] || ""),
-            muhatapNo: String(d["R_Telefon"] || "").slice(-4),
-          },
-        ],
-        score: (d.score as number) || 85,
-        decision: "bekleyen" as const,
-        matchDetails: { adSoyad: 85, tcKimlikNo: 85, telefon: 85, email: 85, sehir: 85 },
-      }));
-      
-      setRealData(groups);
-    } catch (error) {
-      console.error("Error loading data:", error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
   // Use real data if available, otherwise mock
-  const data = realData.length > 0 ? realData : mockDuplicateGroups;
+  const data: UiDuplicateGroup[] =
+    realData.length > 0 ? realData : (mockDuplicateGroups as UiDuplicateGroup[]);
   const logData = realAuditLog.length > 0 ? realAuditLog : auditLog;
 
   const bekleyen = data.filter((g) => g.decision === "bekleyen");
@@ -99,51 +146,89 @@ export default function YoneticiOnayi() {
     return matchSearch && matchYonetici;
   });
 
-  const handleApprove = (groupId: string) => {
+  const handleApprove = async (groupId: string) => {
+    const target = data.find((g) => g.id === groupId);
+    if (!target?.backendMatchId) {
+      return;
+    }
+
+    setLoading(true);
+    setApiError("");
+
     const now = new Date().toLocaleString("tr-TR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
-    
-    // Update data
-    setRealData((prev) =>
-      prev.map((g) => (g.id === groupId ? { ...g, decision: "onaylandi" as const } : g))
-    );
-    
-    // Add to audit log
-    const newLog: AuditLogItem = {
-      id: `LOG-${String(realAuditLog.length + auditLog.length + 1).padStart(3, "0")}`,
-      grup: groupId,
-      yonetici: "Ahmet Yılmaz", // Current user
-      islem: "Onaylandı",
-      tarih: now,
-      not: decisionNote || "Onaylandı",
-    };
-    setRealAuditLog((prev) => [newLog, ...prev]);
-    
-    setDetailGroup(null);
-    setDecisionNote("");
+
+    try {
+      await approvePendingMatch({
+        matchId: target.backendMatchId,
+        approvedBy: "Ahmet Yılmaz",
+        mergeIntoEntity: true,
+      });
+
+      // Update local UI state
+      setRealData((prev) => prev.filter((g) => g.id !== groupId));
+
+      // Add to audit log
+      const newLog: AuditLogItem = {
+        id: `LOG-${String(realAuditLog.length + auditLog.length + 1).padStart(3, "0")}`,
+        grup: groupId,
+        yonetici: "Ahmet Yılmaz",
+        islem: "Onaylandı",
+        tarih: now,
+        not: decisionNote || "Onaylandı",
+      };
+      setRealAuditLog((prev) => [newLog, ...prev]);
+
+      setDetailGroup(null);
+      setDecisionNote("");
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "Onay işlemi başarısız.");
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const handleReject = (groupId: string) => {
+  const handleReject = async (groupId: string) => {
+    const target = data.find((g) => g.id === groupId);
+    if (!target?.backendMatchId) {
+      return;
+    }
+
+    setLoading(true);
+    setApiError("");
+
     const now = new Date().toLocaleString("tr-TR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
-    
-    // Update data
-    setRealData((prev) =>
-      prev.map((g) => (g.id === groupId ? { ...g, decision: "reddedildi" as const } : g))
-    );
-    
-    // Add to audit log
-    const newLog: AuditLogItem = {
-      id: `LOG-${String(realAuditLog.length + auditLog.length + 1).padStart(3, "0")}`,
-      grup: groupId,
-      yonetici: "Ahmet Yılmaz", // Current user
-      islem: "Reddedildi",
-      tarih: now,
-      not: decisionNote || "Reddedildi",
-    };
-    setRealAuditLog((prev) => [newLog, ...prev]);
-    
-    setDetailGroup(null);
-    setDecisionNote("");
+
+    try {
+      await rejectPendingMatch({
+        matchId: target.backendMatchId,
+        rejectedBy: "Ahmet Yılmaz",
+        reason: decisionNote || "Reddedildi",
+      });
+
+      // Update local UI state
+      setRealData((prev) => prev.filter((g) => g.id !== groupId));
+
+      // Add to audit log
+      const newLog: AuditLogItem = {
+        id: `LOG-${String(realAuditLog.length + auditLog.length + 1).padStart(3, "0")}`,
+        grup: groupId,
+        yonetici: "Ahmet Yılmaz",
+        islem: "Reddedildi",
+        tarih: now,
+        not: decisionNote || "Reddedildi",
+      };
+      setRealAuditLog((prev) => [newLog, ...prev]);
+
+      setDetailGroup(null);
+      setDecisionNote("");
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "Reddetme işlemi başarısız.");
+    } finally {
+      setLoading(false);
+    }
   };
+
+  const refreshLabel = lastUploadId ? `Yenile (Upload ${lastUploadId})` : "Tümünü Yenile";
 
   const tabs: { key: TabType; label: string; count: number; color: string }[] = [
     { key: "bekleyen", label: "Bekleyen", count: bekleyen.length, color: "text-yellow-700 bg-yellow-50 border-yellow-200" },
@@ -163,30 +248,40 @@ export default function YoneticiOnayi() {
                 Backend: Erişilemiyor
               </span>
             )}
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".xlsx,.xls,.csv"
-              onChange={handleFileSelect}
-              className="hidden"
-            />
             <button
-              onClick={() => fileInputRef.current?.click()}
+              onClick={() => refreshPendingMatches(lastUploadId ?? undefined)}
+              disabled={loading || backendHealthy === false}
               className="flex items-center gap-2 text-sm text-gray-600 border border-gray-200 px-4 py-2 rounded-lg hover:bg-gray-50 cursor-pointer transition-colors"
             >
-              <i className="ri-folder-open-line"></i>
-              {selectedFile ? selectedFile.name : "Veri Yükle"}
+              <i className={loading ? "ri-loader-4-line animate-spin" : "ri-refresh-line"}></i>
+              {refreshLabel}
             </button>
           </div>
         }
       />
 
       <div className="flex-1 overflow-y-auto p-6 space-y-5">
+        {lastUploadId && (
+          <div className="rounded-xl p-4 border bg-amber-50 border-amber-100 flex items-center gap-3">
+            <i className="ri-information-line text-amber-600 text-lg"></i>
+            <p className="text-sm text-amber-700">
+              Yönetici onayı son detect çalışması üzerinden filtreleniyor. Upload ID: {lastUploadId}
+            </p>
+          </div>
+        )}
+
+        {apiError && (
+          <div className="rounded-xl p-4 border bg-red-50 border-red-100 flex items-center gap-3">
+            <i className="ri-error-warning-fill text-red-600 text-lg"></i>
+            <p className="text-sm text-red-700">{apiError}</p>
+          </div>
+        )}
+
         {/* Loading indicator */}
         {loading && (
           <div className="rounded-xl p-4 border bg-blue-50 border-blue-100 flex items-center gap-3">
             <i className="ri-loader-4-line text-blue-600 text-lg animate-spin"></i>
-            <p className="text-sm text-blue-700">Veriler yükleniyor...</p>
+            <p className="text-sm text-blue-700">Backend verileri yükleniyor...</p>
           </div>
         )}
 
@@ -227,8 +322,9 @@ export default function YoneticiOnayi() {
                       <span className="text-xs text-gray-500">{g.records[0].adSoyad} / {g.records[1].adSoyad}</span>
                     </div>
                     <p className="text-xs text-gray-400 mt-0.5">
-                      TC: {g.records[0].tcKimlikNo} · Skor: %{g.score.toFixed(1)}
+                      Match ID: {g.backendMatchId} · Skor: %{g.score.toFixed(1)}
                     </p>
+                    {g.decisionReason && <p className="text-xs text-gray-500 mt-0.5">Karar nedeni: {g.decisionReason}</p>}
                   </div>
                   <div className="flex items-center gap-2">
                     <button

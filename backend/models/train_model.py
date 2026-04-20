@@ -24,10 +24,16 @@ FEATURE_COLS = [
     "email_exact_match",
     "city_exact_match",
     "phonetic_exact_match",
+    "metaphone_exact_match",
+    "phonetic_close_match",
     "name_similarity",
+    "name_jaro_winkler",
+    "name_levenshtein_similarity",
     "email_similarity",
     "first_name_similarity",
     "surname_similarity",
+    "first_name_jaro_winkler",
+    "surname_jaro_winkler",
     "first_name_exact_match",
     "surname_exact_match",
     "shared_contact_flag",
@@ -38,31 +44,93 @@ FEATURE_COLS = [
 
 
 def load_data(csv_path: str) -> pd.DataFrame:
-    df = pd.read_csv(csv_path)
+    path = Path(csv_path)
+    if not path.exists():
+        alt_path = Path("backend/models/training_candidates.csv")
+        if alt_path.exists():
+            path = alt_path
+        else:
+            raise ValueError(f"Egitim veri dosyasi bulunamadi: {csv_path}")
+
+    df = pd.read_csv(path)
 
     if "label" not in df.columns:
-        raise ValueError("training_data.csv içinde 'label' kolonu yok.")
+        df["label"] = ""
 
     return df
 
 
+def _derive_weak_labels(df: pd.DataFrame) -> pd.Series:
+    def _int_col(col: str) -> pd.Series:
+        if col in df.columns:
+            return df[col].fillna(0).astype(int)
+        return pd.Series([0] * len(df), index=df.index)
+
+    def _float_col(col: str) -> pd.Series:
+        if col in df.columns:
+            return df[col].fillna(0).astype(float)
+        return pd.Series([0.0] * len(df), index=df.index)
+
+    tc_exact = _int_col("tc_exact_match")
+    tc_conflict = _int_col("tc_conflict")
+    phone_exact = _int_col("phone_exact_match")
+    email_exact = _int_col("email_exact_match")
+    shared_contact = _int_col("shared_contact_flag")
+    shared_contact_name_conflict = _int_col("shared_contact_name_conflict")
+    household_risk = _int_col("household_risk_flag")
+
+    name_similarity = _float_col("name_similarity")
+    phonetic_exact = _int_col("phonetic_exact_match")
+    metaphone_exact = _int_col("metaphone_exact_match")
+
+    weak = pd.Series([-1] * len(df), index=df.index)
+
+    positive_rule = (
+        (tc_exact == 1)
+        | ((email_exact == 1) & (name_similarity >= 0.85))
+        | ((phone_exact == 1) & (name_similarity >= 0.88))
+        | ((name_similarity >= 0.97) & ((phonetic_exact == 1) | (metaphone_exact == 1)))
+    )
+
+    negative_rule = (
+        (tc_conflict == 1)
+        | ((household_risk == 1) & (shared_contact_name_conflict == 1) & (tc_exact == 0))
+        | ((name_similarity < 0.55) & (shared_contact == 1))
+    )
+
+    weak.loc[positive_rule] = 1
+    weak.loc[negative_rule] = 0
+
+    return weak
+
+
 def prepare_training_data(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
     # Label boş olanları çıkar
+    source_df = df.copy()
     df = df.copy()
     df["label"] = df["label"].astype(str).str.strip()
 
     df = df[df["label"].isin(["0", "1", 0, 1])].copy()
 
     if df.empty:
-        raise ValueError("Eğitim için geçerli label bulunamadı. Label kolonunu 0/1 olarak doldurmalısın.")
+        weak_labels = _derive_weak_labels(df=source_df)
+        use_idx = weak_labels[weak_labels.isin([0, 1])].index
+
+        if len(use_idx) == 0:
+            raise ValueError("Egitim icin ne manuel ne de guvenilir otomatik etiket bulunamadi.")
+
+        df = source_df.copy()
+        df.loc[use_idx, "label"] = weak_labels.loc[use_idx].astype(int)
+        df = df.loc[use_idx].copy()
+        print(f"[INFO] Manuel etiket yok. Weak-label fallback kullanildi: {len(df)} satir")
 
     # Label'ı int'e çevir
     df["label"] = df["label"].astype(int)
 
-    # Feature kolonlarını kontrol et
+    # Eski datasetlerle geriye donuk uyumluluk: eksik yeni feature kolonlarini 0 ile tamamla.
     missing_cols = [col for col in FEATURE_COLS if col not in df.columns]
-    if missing_cols:
-        raise ValueError(f"Eksik feature kolonları var: {missing_cols}")
+    for col in missing_cols:
+        df[col] = 0
 
     X = df[FEATURE_COLS].copy()
     y = df["label"].copy()

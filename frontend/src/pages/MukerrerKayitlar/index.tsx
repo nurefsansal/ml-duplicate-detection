@@ -46,6 +46,10 @@ export default function MukerrerKayitlar() {
         minRulesToMatch: 2,
         saveToDb: true,
       });
+
+      if (typeof result.uploadId === "number") {
+        localStorage.setItem("lastDetectUploadId", String(result.uploadId));
+      }
       
       // Convert API response to DuplicateGroup format
       const groups: DuplicateGroup[] = (result.duplicates || []).map((d, i) => ({
