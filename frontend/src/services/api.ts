@@ -16,6 +16,37 @@ export type NormalizedRecord = {
   sehir: string;
 };
 
+export type FieldComparison = {
+  rawLeftValue?: string | null;
+  rawRightValue?: string | null;
+  normalizedLeftValue?: string | null;
+  normalizedRightValue?: string | null;
+  comparisonMethod: string;
+  comparisonResult: string;
+  score0To100: number;
+  exactMatch: boolean;
+  notes: string;
+};
+
+export type DetectDuplicatePair = {
+  pairId: string;
+  left_index: number;
+  right_index: number;
+  record1: Record<string, unknown>;
+  record2: Record<string, unknown>;
+  features: Record<string, unknown>;
+  fieldComparisons: Record<string, FieldComparison>;
+  riskFlags: string[];
+  ruleReasons: string[];
+  reasons: string[];
+  splinkMatchProbability?: number | null;
+  splinkMatchWeight?: number | null;
+  ml_probability?: number | null;
+  decision: string;
+  finalDecision: string;
+  decisionSource: string;
+};
+
 export type DetectResponse = {
   sessionId: string;
   uploadId?: number | null;
@@ -23,7 +54,7 @@ export type DetectResponse = {
   duplicatePairs: number;
   insertedRows: number;
   totalRecords?: number;
-  duplicates: Array<Record<string, unknown>>;
+  duplicates: DetectDuplicatePair[];
 };
 
 export type DetectOptions = {
@@ -115,30 +146,7 @@ export async function healthCheck() {
   return response.data;
 }
 
-export type DetectDuplicateResponse = {
-  sessionId: string;
-  uploadId?: number | null;
-  candidatePairs: number;
-  duplicatePairs: number;
-  insertedRows: number;
-  totalRecords?: number;
-  duplicates: Array<{
-    id?: string;
-    score?: number;
-    decision?: string;
-    "L_Ad Soyad"?: string;
-    "R_Ad Soyad"?: string;
-    "L_TC"?: string;
-    "R_TC"?: string;
-    "L_Telefon"?: string;
-    "R_Telefon"?: string;
-    "L_E-mail"?: string;
-    "R_E-mail"?: string;
-    "L_Şehir"?: string;
-    "R_Şehir"?: string;
-    [key: string]: unknown;
-  }>;
-};
+export type DetectDuplicateResponse = DetectResponse;
 
 export type DetectDuplicateOptions = {
   minRulesToMatch?: number;
@@ -181,13 +189,24 @@ export type AdminPendingMatch = {
   donor1_name: string;
   donor1_email?: string | null;
   donor1_phone?: string | null;
+  donor1_city?: string | null;
+  donor1_tc?: string | null;
   donor2_name: string;
   donor2_email?: string | null;
   donor2_phone?: string | null;
+  donor2_city?: string | null;
+  donor2_tc?: string | null;
   ml_score: number;
   confidence?: number | null;
   decision_reason?: string | null;
   features: Record<string, unknown>;
+  fieldComparisons?: Record<string, FieldComparison>;
+  riskFlags?: string[];
+  ruleReasons?: string[];
+  decisionSource?: string;
+  finalDecision?: string | null;
+  splinkMatchProbability?: number | null;
+  splinkMatchWeight?: number | null;
   created_at?: string | null;
 };
 

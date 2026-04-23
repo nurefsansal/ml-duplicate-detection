@@ -1,39 +1,212 @@
 from __future__ import annotations
 
-from datetime import datetime, UTC
+import logging
+import os
+import re
+from datetime import UTC, datetime
+from typing import Any
+
+import pandas as pd
 from fastapi import HTTPException
+from sqlalchemy import create_engine
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import sessionmaker
 
-from src.db import create_db_engine
-from src.matching import EntityMatcher, MatchConfig
-from src.preprocess import DataCleaner
-
 from backend.schemas.requests import RecordIn
-from backend.services.normalization_service import (
-    to_dataframe,
-    json_rows,
-    canonical_name,
-    phonetic_name_key,
-    metaphone_name_key,
-    normalize_email_key,
-)
+from backend.services.blocking_service import generate_candidate_pairs
 from backend.services.feature_service import build_pair_features
 from backend.services.ml_service import predict_match_probability
+from backend.services.normalization_service import (
+    canonical_name,
+    metaphone_name_key,
+    normalize_email_key,
+    phonetic_name_key,
+    to_dataframe,
+)
 from backend.services.resolution_service import resolve_match_decision
 from backend.services.database_service import (
-    UploadService,
-    RawDonorService,
-    NormalizedDonorService,
     MatchService,
+    NormalizedDonorService,
+    RawDonorService,
+    UploadService,
+)
+from backend.services.splink_service import DetectionResults, run_splink_detection
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_DATABASE_URL = "postgresql+psycopg2://ml_duplicate_user:1234@localhost:5434/ml_duplicate_db"
+
+_TR_MAP = str.maketrans(
+    {
+        "İ": "I",
+        "I": "I",
+        "Ğ": "G",
+        "Ü": "U",
+        "Ş": "S",
+        "Ö": "O",
+        "Ç": "C",
+        "ı": "I",
+        "ğ": "G",
+        "ü": "U",
+        "ş": "S",
+        "ö": "O",
+        "ç": "C",
+        "Þ": "S",
+        "þ": "S",
+    }
 )
 
 
-def _prepare_clean_dataframe(records: list[RecordIn]):
-    df_raw = to_dataframe(records)
+def _safe_str(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float) and pd.isna(value):
+        return ""
+    return str(value).strip()
 
-    cleaner = DataCleaner()
-    df_clean = cleaner.process(df_raw)
-    df_clean["clean_name"] = df_clean["clean_name"].apply(canonical_name)
+
+def _normalise_mapping_key(value: str) -> str:
+    text = str(value or "")
+    for source, target in {
+        "Å": "S",
+        "ÅŸ": "s",
+        "Ã": "S",
+        "Ã¾": "s",
+        "Ä": "G",
+        "ÄŸ": "g",
+        "Ãœ": "U",
+        "Ã¼": "u",
+        "Ã–": "O",
+        "Ã¶": "o",
+        "Ã‡": "C",
+        "Ã§": "c",
+        "Ä°": "I",
+        "Ä±": "i",
+    }.items():
+        text = text.replace(source, target)
+    return "".join(ch for ch in text.casefold() if ch.isalnum())
+
+
+def _pick_mapping_value(mapping: dict[str, Any], *aliases: str) -> str:
+    actual_keys = {_normalise_mapping_key(key): key for key in mapping.keys()}
+    for alias in aliases:
+        actual_key = actual_keys.get(_normalise_mapping_key(alias))
+        if actual_key is None:
+            continue
+        value = _safe_str(mapping.get(actual_key))
+        if value:
+            return value
+    return ""
+
+
+def _normalise_column_name(value: str) -> str:
+    text = str(value or "")
+    for source, target in {
+        "Ş": "S",
+        "ş": "s",
+        "Þ": "S",
+        "þ": "s",
+        "Ğ": "G",
+        "ğ": "g",
+        "Ü": "U",
+        "ü": "u",
+        "Ö": "O",
+        "ö": "o",
+        "Ç": "C",
+        "ç": "c",
+        "İ": "I",
+        "ı": "i",
+    }.items():
+        text = text.replace(source, target)
+    return re.sub(r"[^a-z0-9]+", "", text.casefold())
+
+
+def _series_or_blank(df: pd.DataFrame, *aliases: str) -> pd.Series:
+    normalised_to_actual = {
+        _normalise_column_name(column): column for column in df.columns
+    }
+    for alias in aliases:
+        actual = normalised_to_actual.get(_normalise_column_name(alias))
+        if actual is not None:
+            return df[actual]
+    return pd.Series([""] * len(df), index=df.index, dtype="object")
+
+
+def _pick_row_value(row: pd.Series, *aliases: str) -> str:
+    normalised_to_actual = {
+        _normalise_column_name(column): column for column in row.index
+    }
+    for alias in aliases:
+        actual = normalised_to_actual.get(_normalise_column_name(alias))
+        if actual is None:
+            continue
+        value = row.get(actual)
+        if pd.isna(value):
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
+def _normalise_tr_text(value: object) -> str:
+    if value is None or (isinstance(value, float) and pd.isna(value)) or pd.isna(value):
+        return ""
+
+    text = str(value).strip().upper().translate(_TR_MAP)
+    text = re.sub(r"[^A-Z0-9\s]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _clean_phone(value: object) -> str:
+    if value is None or (isinstance(value, float) and pd.isna(value)) or pd.isna(value):
+        return ""
+
+    digits = re.sub(r"\D", "", str(value))
+    if not digits:
+        return ""
+    if len(digits) >= 10:
+        return digits[-10:]
+    return digits
+
+
+def _clean_tc(value: object) -> str:
+    if value is None or (isinstance(value, float) and pd.isna(value)) or pd.isna(value):
+        return ""
+    return re.sub(r"\D", "", str(value))
+
+
+def _clean_email(value: object) -> str:
+    if value is None or (isinstance(value, float) and pd.isna(value)) or pd.isna(value):
+        return ""
+    return re.sub(r"\s+", "", str(value)).lower()
+
+
+def _prepare_clean_dataframe(records: list[RecordIn]) -> pd.DataFrame:
+    df_raw = to_dataframe(records)
+    df_clean = df_raw.copy()
+
+    name_series = _series_or_blank(df_raw, "Ad Soyad", "adSoyad", "name", "full_name")
+    tc_series = _series_or_blank(df_raw, "TC", "tcKimlikNo", "tc")
+    phone_series = _series_or_blank(df_raw, "Telefon", "telefon", "phone", "mobile")
+    email_series = _series_or_blank(df_raw, "E-mail", "email", "mail")
+    city_series = _series_or_blank(df_raw, "Sehir", "Şehir", "city")
+
+    ordered_names = name_series.apply(_normalise_tr_text)
+
+    df_clean["clean_name_ordered"] = ordered_names
+    df_clean["clean_name"] = ordered_names.apply(canonical_name)
+    df_clean["clean_first_name"] = ordered_names.apply(
+        lambda value: _split_name_parts(value)[0]
+    )
+    df_clean["clean_surname"] = ordered_names.apply(
+        lambda value: _split_name_parts(value)[1]
+    )
+    df_clean["clean_city"] = city_series.apply(_normalise_tr_text)
+    df_clean["clean_phone"] = phone_series.apply(_clean_phone)
+    df_clean["clean_tc"] = tc_series.apply(_clean_tc)
+    df_clean["clean_email"] = email_series.apply(_clean_email)
     df_clean["name_phonetic_key"] = df_clean["clean_name"].apply(phonetic_name_key)
     df_clean["name_metaphone_key"] = df_clean["clean_name"].apply(metaphone_name_key)
     df_clean["email_normalized_key"] = df_clean["clean_email"].apply(normalize_email_key)
@@ -41,49 +214,378 @@ def _prepare_clean_dataframe(records: list[RecordIn]):
     return df_clean
 
 
-def _build_record_pair_payload(df_clean, row):
-    left_idx = row["left_index"]
-    right_idx = row["right_index"]
+# def _build_record_pair_payload(df_clean, row):
+#     Legacy matcher payload builder intentionally kept commented during the
+#     Splink migration. The active pipeline now builds payloads either inside
+#     `run_splink_detection()` or via `_build_legacy_payload()` below.
 
+
+def _build_risk_flags(features: dict[str, Any]) -> list[str]:
+    risk_flags: list[str] = []
+
+    if features.get("tc_conflict", 0):
+        risk_flags.append("tc_conflict")
+    if features.get("shared_contact_flag", 0):
+        risk_flags.append("shared_contact")
+    if features.get("shared_contact_name_conflict", 0):
+        risk_flags.append("shared_contact_name_conflict")
+    if features.get("household_risk_flag", 0):
+        risk_flags.append("household_risk")
+    if int(features.get("common_non_empty_fields", 0) or 0) <= 2:
+        risk_flags.append("sparse_data")
+
+    return risk_flags
+
+
+def _comparison_result_from_score(score: float, exact_match: bool) -> str:
+    if exact_match:
+        return "exact_match"
+    if score >= 0.9:
+        return "strong_match"
+    if score >= 0.7:
+        return "partial_match"
+    if score > 0:
+        return "mismatch"
+    return "missing"
+
+
+def _build_fallback_exact_comparison(
+    *,
+    raw_left_value: str,
+    raw_right_value: str,
+    normalized_left_value: str,
+    normalized_right_value: str,
+    exact_match: bool,
+    comparison_method: str,
+    field_name: str,
+    notes: str,
+    use_conflict_label: bool = False,
+) -> dict[str, Any]:
+    if not normalized_left_value and not normalized_right_value:
+        result = "missing"
+        final_notes = f"{field_name} her iki kayitta da bos."
+        score = 0
+        exact = False
+    elif not normalized_left_value or not normalized_right_value:
+        result = "missing"
+        final_notes = f"{field_name} alanlarindan biri bos."
+        score = 0
+        exact = False
+    else:
+        exact = bool(exact_match)
+        score = 100 if exact else 0
+        if exact:
+            result = "exact_match"
+            final_notes = notes
+        else:
+            result = "conflict" if use_conflict_label else "mismatch"
+            final_notes = f"{field_name} normalize edilmis degerleri farkli."
+
+    return {
+        "rawLeftValue": raw_left_value or None,
+        "rawRightValue": raw_right_value or None,
+        "normalizedLeftValue": normalized_left_value or None,
+        "normalizedRightValue": normalized_right_value or None,
+        "comparisonMethod": comparison_method,
+        "comparisonResult": result,
+        "score0To100": score,
+        "exactMatch": exact,
+        "notes": final_notes,
+    }
+
+
+def _build_fallback_similarity_comparison(
+    *,
+    raw_left_value: str,
+    raw_right_value: str,
+    normalized_left_value: str,
+    normalized_right_value: str,
+    score: float,
+    exact_match: bool,
+    comparison_method: str,
+    field_name: str,
+) -> dict[str, Any]:
+    if not normalized_left_value and not normalized_right_value:
+        result = "missing"
+        score_percent = 0
+        notes = f"{field_name} her iki kayitta da bos."
+        exact = False
+    elif not normalized_left_value or not normalized_right_value:
+        result = "missing"
+        score_percent = 0
+        notes = f"{field_name} alanlarindan biri bos."
+        exact = False
+    else:
+        exact = bool(exact_match)
+        score_percent = int(round(max(0.0, min(1.0, float(score or 0.0))) * 100))
+        result = _comparison_result_from_score(float(score or 0.0), exact)
+        if result == "exact_match":
+            notes = f"{field_name} fallback karsilastirmasinda birebir eslesti."
+        elif result == "strong_match":
+            notes = f"{field_name} fallback karsilastirmasinda guclu benzerlik gosteriyor."
+        elif result == "partial_match":
+            notes = f"{field_name} fallback karsilastirmasinda kismi benzerlik gosteriyor."
+        else:
+            notes = f"{field_name} fallback karsilastirmasinda farkli gorunuyor."
+
+    return {
+        "rawLeftValue": raw_left_value or None,
+        "rawRightValue": raw_right_value or None,
+        "normalizedLeftValue": normalized_left_value or None,
+        "normalizedRightValue": normalized_right_value or None,
+        "comparisonMethod": comparison_method,
+        "comparisonResult": result,
+        "score0To100": score_percent,
+        "exactMatch": exact,
+        "notes": notes,
+    }
+
+
+def _build_legacy_field_comparisons(
+    left_record: dict[str, Any],
+    right_record: dict[str, Any],
+    features: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    raw_left_name = _pick_mapping_value(left_record, "Ad Soyad", "adSoyad", "name", "full_name")
+    raw_right_name = _pick_mapping_value(right_record, "Ad Soyad", "adSoyad", "name", "full_name")
+    raw_left_email = _pick_mapping_value(left_record, "E-mail", "email", "mail")
+    raw_right_email = _pick_mapping_value(right_record, "E-mail", "email", "mail")
+    raw_left_phone = _pick_mapping_value(left_record, "Telefon", "telefon", "phone", "mobile")
+    raw_right_phone = _pick_mapping_value(right_record, "Telefon", "telefon", "phone", "mobile")
+    raw_left_tc = _pick_mapping_value(left_record, "TC", "tcKimlikNo", "tc")
+    raw_right_tc = _pick_mapping_value(right_record, "TC", "tcKimlikNo", "tc")
+    raw_left_city = _pick_mapping_value(left_record, "Sehir", "Şehir", "city")
+    raw_right_city = _pick_mapping_value(right_record, "Sehir", "Şehir", "city")
+
+    left_full_name = _safe_str(left_record.get("clean_name"))
+    right_full_name = _safe_str(right_record.get("clean_name"))
+    left_first_name = _safe_str(left_record.get("clean_first_name"))
+    right_first_name = _safe_str(right_record.get("clean_first_name"))
+    left_surname = _safe_str(left_record.get("clean_surname"))
+    right_surname = _safe_str(right_record.get("clean_surname"))
+
+    return {
+        "fullName": _build_fallback_similarity_comparison(
+            raw_left_value=raw_left_name,
+            raw_right_value=raw_right_name,
+            normalized_left_value=left_full_name,
+            normalized_right_value=right_full_name,
+            score=float(features.get("name_jaro_winkler", 0.0) or 0.0),
+            exact_match=left_full_name == right_full_name and bool(left_full_name),
+            comparison_method="legacy_jaro_winkler(clean_name)",
+            field_name="Ad soyad",
+        ),
+        "firstName": _build_fallback_similarity_comparison(
+            raw_left_value=_split_name_parts(raw_left_name)[0],
+            raw_right_value=_split_name_parts(raw_right_name)[0],
+            normalized_left_value=left_first_name,
+            normalized_right_value=right_first_name,
+            score=float(features.get("first_name_jaro_winkler", 0.0) or 0.0),
+            exact_match=bool(features.get("first_name_exact_match", 0)),
+            comparison_method="legacy_jaro_winkler(clean_first_name)",
+            field_name="Ad",
+        ),
+        "surname": _build_fallback_similarity_comparison(
+            raw_left_value=_split_name_parts(raw_left_name)[1],
+            raw_right_value=_split_name_parts(raw_right_name)[1],
+            normalized_left_value=left_surname,
+            normalized_right_value=right_surname,
+            score=float(features.get("surname_jaro_winkler", 0.0) or 0.0),
+            exact_match=bool(features.get("surname_exact_match", 0)),
+            comparison_method="legacy_jaro_winkler(clean_surname)",
+            field_name="Soyad",
+        ),
+        "tc": _build_fallback_exact_comparison(
+            raw_left_value=raw_left_tc,
+            raw_right_value=raw_right_tc,
+            normalized_left_value=_safe_str(left_record.get("clean_tc")),
+            normalized_right_value=_safe_str(right_record.get("clean_tc")),
+            exact_match=bool(features.get("tc_exact_match", 0)),
+            comparison_method="legacy_exact_match(clean_tc)",
+            field_name="TC Kimlik No",
+            notes="TC Kimlik No fallback karsilastirmasinda eslesti.",
+            use_conflict_label=True,
+        ),
+        "phone": _build_fallback_exact_comparison(
+            raw_left_value=raw_left_phone,
+            raw_right_value=raw_right_phone,
+            normalized_left_value=_safe_str(left_record.get("clean_phone")),
+            normalized_right_value=_safe_str(right_record.get("clean_phone")),
+            exact_match=bool(features.get("phone_exact_match", 0)),
+            comparison_method="legacy_exact_match(clean_phone)",
+            field_name="Telefon",
+            notes="Telefon fallback karsilastirmasinda eslesti.",
+        ),
+        "email": _build_fallback_exact_comparison(
+            raw_left_value=raw_left_email,
+            raw_right_value=raw_right_email,
+            normalized_left_value=_safe_str(left_record.get("email_normalized_key")),
+            normalized_right_value=_safe_str(right_record.get("email_normalized_key")),
+            exact_match=bool(features.get("email_exact_match", 0)),
+            comparison_method="legacy_exact_match(email_normalized_key)",
+            field_name="E-posta",
+            notes="E-posta fallback karsilastirmasinda normalize anahtara gore eslesti.",
+        ),
+        "city": _build_fallback_exact_comparison(
+            raw_left_value=raw_left_city,
+            raw_right_value=raw_right_city,
+            normalized_left_value=_safe_str(left_record.get("clean_city")),
+            normalized_right_value=_safe_str(right_record.get("clean_city")),
+            exact_match=bool(features.get("city_exact_match", 0)),
+            comparison_method="legacy_exact_match(clean_city)",
+            field_name="Sehir",
+            notes="Sehir fallback karsilastirmasinda eslesti.",
+        ),
+        "address": {
+            "rawLeftValue": None,
+            "rawRightValue": None,
+            "normalizedLeftValue": None,
+            "normalizedRightValue": None,
+            "comparisonMethod": "not_available",
+            "comparisonResult": "not_available",
+            "score0To100": 0,
+            "exactMatch": False,
+            "notes": "Fallback modunda adres alanı kullanilmadi.",
+        },
+    }
+
+
+def _build_rule_reasons(
+    *,
+    features: dict[str, Any],
+    field_comparisons: dict[str, dict[str, Any]],
+    probability: float,
+    final_decision: str,
+    source: str,
+) -> list[str]:
+    reasons: list[str] = []
+
+    if features.get("tc_conflict", 0):
+        reasons.append("TC Kimlik No catisiyor; otomatik birlestirme engellendi.")
+    elif features.get("tc_exact_match", 0):
+        reasons.append("TC Kimlik No tam eslesti.")
+
+    if field_comparisons["fullName"]["comparisonResult"] in {"exact_match", "strong_match"}:
+        reasons.append(
+            f"Ad soyad karsilastirmasi {field_comparisons['fullName']['comparisonResult']} olarak degerlendirildi."
+        )
+
+    if features.get("phone_exact_match", 0):
+        reasons.append("Telefon eslesti.")
+    if features.get("email_exact_match", 0):
+        reasons.append("E-posta eslesti.")
+    if features.get("city_exact_match", 0):
+        reasons.append("Sehir eslesti.")
+    if features.get("shared_contact_name_conflict", 0):
+        reasons.append("Ortak iletisim var ancak isim sinyali catismali.")
+    if features.get("household_risk_flag", 0):
+        reasons.append("Household riski tespit edildi.")
+    if int(features.get("common_non_empty_fields", 0) or 0) <= 2:
+        reasons.append("Bos alanlar nedeniyle guven dusuruldu.")
+
+    reasons.append(f"Eslesme olasiligi: {probability:.4f}")
+
+    if source == "fallback_legacy":
+        reasons.append("Splink kullanilamadi; legacy fallback devrede.")
+
+    if final_decision == "review":
+        reasons.append("Nihai karar manuel inceleme olarak birakildi.")
+    elif final_decision == "different_person":
+        reasons.append("Nihai karar farkli kisi yonunde.")
+    elif final_decision == "same_person":
+        reasons.append("Nihai karar ayni kisi yonunde.")
+
+    return reasons
+
+
+def _build_legacy_payload(df_clean: pd.DataFrame, left_idx: int, right_idx: int) -> dict:
     left_record = df_clean.loc[left_idx].to_dict()
     right_record = df_clean.loc[right_idx].to_dict()
 
     features = build_pair_features(left_record, right_record)
     ml_probability = predict_match_probability(features)
-    decision = resolve_match_decision(ml_probability, features)
-
-    reasons = []
-
-    if features["tc_exact_match"]:
-        reasons.append("TC Kimlik No tam eşleşti")
-    if features["phone_exact_match"]:
-        reasons.append("Telefon normalize edilmiş formatta eşleşti")
-    if features["email_exact_match"]:
-        reasons.append("E-posta eşleşti")
-    if features["phonetic_exact_match"]:
-        reasons.append("Fonetik isim anahtarı eşleşti")
-    if features["city_exact_match"]:
-        reasons.append("Şehir eşleşti")
-    if features["name_similarity"] > 0:
-        reasons.append(f"Ad soyad benzerliği: {features['name_similarity']:.2f}")
+    final_decision = resolve_match_decision(ml_probability, features)
+    field_comparisons = _build_legacy_field_comparisons(
+        left_record,
+        right_record,
+        features,
+    )
+    risk_flags = _build_risk_flags(features)
+    rule_reasons = _build_rule_reasons(
+        features=features,
+        field_comparisons=field_comparisons,
+        probability=ml_probability,
+        final_decision=final_decision,
+        source="fallback_legacy",
+    )
 
     return {
+        "pairId": f"{int(left_idx)}-{int(right_idx)}",
         "left_index": int(left_idx),
         "right_index": int(right_idx),
         "record1": left_record,
         "record2": right_record,
         "features": features,
+        "fieldComparisons": field_comparisons,
+        "riskFlags": risk_flags,
+        "ruleReasons": rule_reasons,
+        "reasons": rule_reasons,
+        "splinkMatchProbability": ml_probability,
+        "splinkMatchWeight": None,
         "ml_probability": ml_probability,
-        "decision": decision,
-        "reasons": reasons,
+        "decision": final_decision,
+        "finalDecision": final_decision,
+        "decisionSource": "fallback_legacy",
     }
+
+
+def _legacy_rules_matched(features: dict) -> int:
+    return sum(
+        [
+            int(float(features.get("name_jaro_winkler", 0.0) or 0.0) >= 0.85),
+            int(features.get("tc_exact_match", 0) or 0),
+            int(features.get("phone_exact_match", 0) or 0),
+            int(features.get("email_exact_match", 0) or 0),
+        ]
+    )
+
+
+def _legacy_detection(df_clean: pd.DataFrame, min_rules_to_match: int) -> DetectionResults:
+    candidate_pairs = generate_candidate_pairs(df_clean)
+    duplicates: list[dict] = []
+
+    for left_idx, right_idx in candidate_pairs:
+        payload = _build_legacy_payload(df_clean, int(left_idx), int(right_idx))
+        rules_matched = _legacy_rules_matched(payload["features"])
+
+        if rules_matched >= min_rules_to_match or float(payload["ml_probability"]) >= 0.30:
+            duplicates.append(payload)
+
+    duplicates.sort(
+        key=lambda item: (
+            float(item.get("ml_probability", 0.0) or 0.0),
+            float(item.get("features", {}).get("name_similarity", 0.0) or 0.0),
+        ),
+        reverse=True,
+    )
+
+    return DetectionResults(duplicates, candidate_pairs=len(candidate_pairs))
+
+
+def _get_database_url() -> str:
+    return os.getenv("DATABASE_URL", DEFAULT_DATABASE_URL)
+
+
+def _create_db_engine() -> Engine:
+    return create_engine(_get_database_url(), pool_pre_ping=True)
 
 
 def _split_name_parts(name: str) -> tuple[str, str]:
     value = str(name or "").strip()
     if not value:
         return "", ""
-    parts = [p for p in value.split(" ") if p]
+
+    parts = [part for part in value.split(" ") if part]
     if not parts:
         return "", ""
     if len(parts) == 1:
@@ -94,7 +596,7 @@ def _split_name_parts(name: str) -> tuple[str, str]:
 def _persist_detection_flow(
     *,
     records: list[RecordIn],
-    df_clean,
+    df_clean: pd.DataFrame,
     enriched_duplicates: list[dict],
     session_id: str,
 ) -> tuple[int, int]:
@@ -102,7 +604,7 @@ def _persist_detection_flow(
     Persists detection workflow to normalized schema:
     uploads -> raw_donors -> normalized_donors -> matches
     """
-    engine = create_db_engine()
+    engine = _create_db_engine()
     SessionLocal = sessionmaker(bind=engine)
     db = SessionLocal()
 
@@ -118,23 +620,26 @@ def _persist_detection_flow(
         index_to_norm_id: dict[int, int] = {}
 
         for row_number, (idx, row) in enumerate(df_clean.iterrows(), start=1):
-            first_name, last_name = _split_name_parts(row.get("clean_name", ""))
+            normalized_full_name = str(
+                row.get("clean_name_ordered", row.get("clean_name", "")) or ""
+            )
+            first_name, last_name = _split_name_parts(normalized_full_name)
 
             raw = RawDonorService.create_raw_donor(
                 db,
                 upload_id=upload.id,
                 row_number=row_number,
-                full_name=str(row.get("Ad Soyad", "") or ""),
-                email=str(row.get("E-mail", "") or ""),
-                phone=str(row.get("Telefon", "") or ""),
-                city=str(row.get("Şehir", "") or ""),
+                full_name=_pick_row_value(row, "Ad Soyad", "adSoyad", "name", "full_name"),
+                email=_pick_row_value(row, "E-mail", "email", "mail"),
+                phone=_pick_row_value(row, "Telefon", "telefon", "phone", "mobile"),
+                city=_pick_row_value(row, "Sehir", "Şehir", "city"),
             )
 
             norm = NormalizedDonorService.create_normalized_donor(
                 db,
                 upload_id=upload.id,
                 raw_id=raw.id,
-                full_name=str(row.get("clean_name", "") or ""),
+                full_name=normalized_full_name,
                 first_name=first_name,
                 last_name=last_name,
                 email=str(row.get("clean_email", "") or ""),
@@ -162,15 +667,40 @@ def _persist_detection_flow(
 
             features = payload.get("features", {}) or {}
             ml_prob = float(payload.get("ml_probability", 0.0) or 0.0)
+            persisted_feature_payload = {
+                "features": features,
+                "fieldComparisons": payload.get("fieldComparisons", {}) or {},
+                "riskFlags": payload.get("riskFlags", []) or [],
+                "ruleReasons": payload.get("ruleReasons", payload.get("reasons", [])) or [],
+                "decisionSource": str(payload.get("decisionSource", "fallback_legacy")),
+                "finalDecision": str(payload.get("finalDecision", payload.get("decision", "review"))),
+                "splinkMatchProbability": float(
+                    payload.get("splinkMatchProbability", ml_prob) or ml_prob
+                ),
+                "splinkMatchWeight": payload.get("splinkMatchWeight"),
+                "pairId": str(payload.get("pairId", f"{left_idx}-{right_idx}")),
+                "leftIndex": left_idx,
+                "rightIndex": right_idx,
+            }
+            similarity_value = float(features.get("name_similarity", 0.0) or 0.0)
+            if payload.get("fieldComparisons"):
+                similarity_value = float(
+                    (
+                        (payload.get("fieldComparisons", {}) or {})
+                        .get("fullName", {})
+                        .get("score0To100", 0)
+                    )
+                    or 0
+                ) / 100
 
             matches_data.append(
                 {
                     "donor1_id": left_norm_id,
                     "donor2_id": right_norm_id,
-                    "similarity": float(features.get("name_similarity", 0.0) or 0.0),
+                    "similarity": similarity_value,
                     "ml_score": ml_prob,
                     "confidence": ml_prob,
-                    "features": features,
+                    "features": persisted_feature_payload,
                     "decision_reason": str(payload.get("decision", "review")),
                 }
             )
@@ -198,36 +728,22 @@ def detect_core(
 ):
     df_clean = _prepare_clean_dataframe(records)
 
-    matcher = EntityMatcher(config=MatchConfig(min_rules_to_match=min_rules_to_match))
-    candidate_pairs, _, duplicates_features = matcher.find_duplicates(df_clean)
-    duplicates_view = matcher.duplicates_as_dataframe(df_clean, duplicates_features)
-
     resolved_session_id = session_id or str(int(datetime.now(tz=UTC).timestamp() * 1000))
     inserted = 0
     upload_id: int | None = None
 
-    enriched_duplicates = []
+    try:
+        enriched_duplicates = run_splink_detection(df_clean)
+    except Exception as exc:
+        logger.warning("Splink failed, falling back to legacy: %s", exc)
+        enriched_duplicates = _legacy_detection(df_clean, min_rules_to_match)
 
-    if not duplicates_view.empty:
-        working_df = duplicates_view.copy()
-
-        # eski matcher output isimleri korunamadıysa esnek yaklaşım
-        if "left_index" not in working_df.columns or "right_index" not in working_df.columns:
-            possible_left_cols = ["left_index", "left_id", "record_1_index", "idx_1"]
-            possible_right_cols = ["right_index", "right_id", "record_2_index", "idx_2"]
-
-            left_col = next((c for c in possible_left_cols if c in working_df.columns), None)
-            right_col = next((c for c in possible_right_cols if c in working_df.columns), None)
-
-            if left_col is None or right_col is None:
-                # fallback: eski davranışı koru
-                enriched_duplicates = json_rows(working_df)
-            else:
-                working_df = working_df.rename(columns={left_col: "left_index", right_col: "right_index"})
-
-        if not enriched_duplicates:
-            for _, row in working_df.iterrows():
-                enriched_duplicates.append(_build_record_pair_payload(df_clean, row))
+    candidate_pairs = int(
+        getattr(enriched_duplicates, "candidate_pairs", len(enriched_duplicates))
+    )
+    duplicate_pairs = int(
+        getattr(enriched_duplicates, "duplicate_pairs", len(enriched_duplicates))
+    )
 
     if save_to_db:
         try:
@@ -243,8 +759,8 @@ def detect_core(
     return {
         "sessionId": resolved_session_id,
         "uploadId": upload_id,
-        "candidatePairs": int(len(candidate_pairs)),
-        "duplicatePairs": int(len(duplicates_view)),
+        "candidatePairs": candidate_pairs,
+        "duplicatePairs": duplicate_pairs,
         "insertedRows": inserted,
-        "duplicates": enriched_duplicates,
+        "duplicates": list(enriched_duplicates),
     }
