@@ -1,8 +1,5 @@
 pandas
 openpyxl
-recordlinkage
-streamlit
-fuzzywuzzy
 python-Levenshtein
 SQLAlchemy
 psycopg2-binary
@@ -10,4 +7,6 @@ fastapi
 uvicorn[standard]
 httpx
 python-multipart
+scikit-learn
+splink>=4.0.0
 

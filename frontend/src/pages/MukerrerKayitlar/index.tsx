@@ -1,38 +1,50 @@
-import { useState, useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
+
 import DashboardLayout from "../../components/feature/DashboardLayout";
+import FieldComparisonsPanel from "../../components/feature/FieldComparisonsPanel";
 import Header from "../../components/feature/Header";
-import { mockDuplicateGroups, type DuplicateGroup } from "../../mocks/records";
-import { detectDuplicatesFromFileWithOptions, type DetectDuplicateResponse } from "../../services/api";
+import { mockDuplicateGroups } from "../../mocks/records";
+import { detectDuplicatesFromFileWithOptions } from "../../services/api";
+import {
+  finalDecisionTone,
+  mapDetectPairToView,
+  mapMockGroupToView,
+  type PairWorkflowState,
+  type UiDuplicatePair,
+} from "../../utils/duplicatePairView";
 
 export default function MukerrerKayitlar() {
   const [search, setSearch] = useState("");
   const [filterDecision, setFilterDecision] = useState("tumu");
   const [selected, setSelected] = useState<string[]>([]);
-  const [detailGroup, setDetailGroup] = useState<DuplicateGroup | null>(null);
+  const [detailGroup, setDetailGroup] = useState<UiDuplicatePair | null>(null);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
-  const [realData, setRealData] = useState<DuplicateGroup[]>([]);
+  const [realData, setRealData] = useState<UiDuplicatePair[]>([]);
   const [backendHealthy, setBackendHealthy] = useState<boolean | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Backend health check
   useEffect(() => {
     let mounted = true;
     import("../../services/api")
       .then(({ healthCheck }) => healthCheck())
       .then(() => {
-        if (mounted) setBackendHealthy(true);
+        if (mounted) {
+          setBackendHealthy(true);
+        }
       })
       .catch(() => {
-        if (mounted) setBackendHealthy(false);
+        if (mounted) {
+          setBackendHealthy(false);
+        }
       });
     return () => {
       mounted = false;
     };
   }, []);
 
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
+  const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
     if (file) {
       setSelectedFile(file);
       loadDataFromFile(file);
@@ -50,34 +62,8 @@ export default function MukerrerKayitlar() {
       if (typeof result.uploadId === "number") {
         localStorage.setItem("lastDetectUploadId", String(result.uploadId));
       }
-      
-      // Convert API response to DuplicateGroup format
-      const groups: DuplicateGroup[] = (result.duplicates || []).map((d, i) => ({
-        id: `MG-${String(i + 1).padStart(3, "0")}`,
-        records: [
-          {
-            adSoyad: String(d["L_Ad Soyad"] || ""),
-            tcKimlikNo: String(d["L_TC"] || ""),
-            telefon: String(d["L_Telefon"] || ""),
-            email: String(d["L_E-mail"] || ""),
-            sehir: String(d["L_Şehir"] || ""),
-            muhatapNo: String(d["L_Telefon"] || "").slice(-4),
-          },
-          {
-            adSoyad: String(d["R_Ad Soyad"] || ""),
-            tcKimlikNo: String(d["R_TC"] || ""),
-            telefon: String(d["R_Telefon"] || ""),
-            email: String(d["R_E-mail"] || ""),
-            sehir: String(d["R_Şehir"] || ""),
-            muhatapNo: String(d["R_Telefon"] || "").slice(-4),
-          },
-        ],
-        score: (d.score as number) || 85,
-        decision: "bekleyen" as const,
-        matchDetails: { adSoyad: 85, tcKimlikNo: 85, telefon: 85, email: 85, sehir: 85 },
-      }));
-      
-      setRealData(groups);
+
+      setRealData((result.duplicates || []).map(mapDetectPairToView));
     } catch (error) {
       console.error("Error loading data:", error);
     } finally {
@@ -85,61 +71,63 @@ export default function MukerrerKayitlar() {
     }
   };
 
-  // Use real data if available, otherwise mock
-  const data = realData.length > 0 ? realData : mockDuplicateGroups;
+  const data = realData.length > 0 ? realData : mockDuplicateGroups.map(mapMockGroupToView);
 
-  const filtered = data.filter((g) => {
+  const filtered = data.filter((group) => {
     const matchSearch =
       !search ||
-      g.records.some(
-        (r) =>
-          r.adSoyad.toLowerCase().includes(search.toLowerCase()) ||
-          r.muhatapNo.toLowerCase().includes(search.toLowerCase()) ||
-          r.tcKimlikNo.includes(search)
+      group.records.some(
+        (record) =>
+          record.adSoyad.toLowerCase().includes(search.toLowerCase()) ||
+          record.muhatapNo.toLowerCase().includes(search.toLowerCase()) ||
+          record.tcKimlikNo.includes(search),
       );
-    const matchDecision = filterDecision === "tumu" || g.decision === filterDecision;
+
+    const matchDecision =
+      filterDecision === "tumu" || group.workflowState === filterDecision;
+
     return matchSearch && matchDecision;
   });
 
   const toggleSelect = (id: string) =>
-    setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
-  
+    setSelected((prev) =>
+      prev.includes(id) ? prev.filter((value) => value !== id) : [...prev, id],
+    );
+
   const toggleAll = () =>
-    setSelected(selected.length === filtered.length ? [] : filtered.map((g) => g.id));
+    setSelected(selected.length === filtered.length ? [] : filtered.map((group) => group.id));
 
-  const handleBulkApprove = () => {
+  const updateWorkflowState = (ids: string[], workflowState: PairWorkflowState) => {
     setRealData((prev) =>
-      prev.map((g) => (selected.includes(g.id) ? { ...g, decision: "onaylandi" as const } : g))
+      prev.map((group) =>
+        ids.includes(group.id) ? { ...group, workflowState } : group,
+      ),
     );
-    setSelected([]);
   };
 
-  const handleBulkReject = () => {
-    setRealData((prev) =>
-      prev.map((g) => (selected.includes(g.id) ? { ...g, decision: "reddedildi" as const } : g))
-    );
-    setSelected([]);
+  const decisionBadge: Record<PairWorkflowState, string> = {
+    bekleyen: "border border-yellow-200 bg-yellow-50 text-yellow-700",
+    onaylandi: "border border-green-200 bg-green-50 text-green-700",
+    reddedildi: "border border-red-200 bg-red-50 text-red-600",
   };
 
-  const decisionBadge: Record<string, string> = {
-    bekleyen: "bg-yellow-50 text-yellow-700 border border-yellow-200",
-    onaylandi: "bg-green-50 text-green-700 border border-green-200",
-    reddedildi: "bg-red-50 text-red-600 border border-red-200",
-  };
-  const decisionLabel: Record<string, string> = {
-    bekleyen: "Bekleyen", onaylandi: "Onaylandı", reddedildi: "Reddedildi",
+  const decisionLabel: Record<PairWorkflowState | "tumu", string> = {
+    tumu: "Tumu",
+    bekleyen: "Bekleyen",
+    onaylandi: "Onaylandi",
+    reddedildi: "Reddedildi",
   };
 
   return (
     <DashboardLayout>
       <Header
-        title="Mükerrer Kayıtlar"
-        subtitle="Tespit edilen mükerrer kayıtları yönetin"
+        title="Mukerrer Kayitlar"
+        subtitle="Tespit edilen mukerrer kayitlari alan bazli skorlarla yonetin"
         actions={
           <div className="flex items-center gap-3">
             {backendHealthy === false && (
-              <span className="text-xs text-red-600 bg-red-50 px-2 py-1 rounded">
-                Backend: Erişilemiyor
+              <span className="rounded bg-red-50 px-2 py-1 text-xs text-red-600">
+                Backend: Erisilemiyor
               </span>
             )}
             <input
@@ -151,25 +139,31 @@ export default function MukerrerKayitlar() {
             />
             <button
               onClick={() => fileInputRef.current?.click()}
-              className="flex items-center gap-2 text-sm text-gray-600 border border-gray-200 px-4 py-2 rounded-lg hover:bg-gray-50 cursor-pointer transition-colors"
+              className="flex cursor-pointer items-center gap-2 rounded-lg border border-gray-200 px-4 py-2 text-sm text-gray-600 transition-colors hover:bg-gray-50"
             >
-              <i className="ri-folder-open-line"></i>
-              {selectedFile ? selectedFile.name : "Veri Yükle"}
+              <i className="ri-folder-open-line" />
+              {selectedFile ? selectedFile.name : "Veri Yukle"}
             </button>
             {selected.length > 0 && (
               <div className="flex items-center gap-2">
-                <span className="text-xs text-gray-500">{selected.length} seçildi</span>
-                <button 
-                  onClick={handleBulkApprove}
-                  className="flex items-center gap-1.5 text-xs bg-green-600 text-white px-3 py-2 rounded-lg hover:bg-green-700 cursor-pointer whitespace-nowrap"
+                <span className="text-xs text-gray-500">{selected.length} secildi</span>
+                <button
+                  onClick={() => {
+                    updateWorkflowState(selected, "onaylandi");
+                    setSelected([]);
+                  }}
+                  className="flex cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-lg bg-green-600 px-3 py-2 text-xs text-white hover:bg-green-700"
                 >
-                  <i className="ri-checkbox-circle-line"></i> Toplu Onayla
+                  <i className="ri-checkbox-circle-line" /> Toplu Onayla
                 </button>
-                <button 
-                  onClick={handleBulkReject}
-                  className="flex items-center gap-1.5 text-xs bg-red-600 text-white px-3 py-2 rounded-lg hover:bg-red-700 cursor-pointer whitespace-nowrap"
+                <button
+                  onClick={() => {
+                    updateWorkflowState(selected, "reddedildi");
+                    setSelected([]);
+                  }}
+                  className="flex cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-lg bg-red-600 px-3 py-2 text-xs text-white hover:bg-red-700"
                 >
-                  <i className="ri-close-circle-line"></i> Toplu Reddet
+                  <i className="ri-close-circle-line" /> Toplu Reddet
                 </button>
               </div>
             )}
@@ -177,100 +171,128 @@ export default function MukerrerKayitlar() {
         }
       />
 
-      <div className="flex-1 overflow-y-auto p-6 space-y-4">
-        {/* Loading indicator */}
+      <div className="flex-1 space-y-4 overflow-y-auto p-6">
         {loading && (
-          <div className="rounded-xl p-4 border bg-blue-50 border-blue-100 flex items-center gap-3">
-            <i className="ri-loader-4-line text-blue-600 text-lg animate-spin"></i>
-            <p className="text-sm text-blue-700">Veriler yükleniyor...</p>
+          <div className="flex items-center gap-3 rounded-xl border border-blue-100 bg-blue-50 p-4">
+            <i className="ri-loader-4-line animate-spin text-lg text-blue-600" />
+            <p className="text-sm text-blue-700">Veriler yukleniyor...</p>
           </div>
         )}
 
-        {/* Filters */}
-        <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3">
-          <div className="relative flex-1 w-full">
-            <i className="ri-search-line absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm"></i>
+        <div className="flex flex-col items-start gap-3 sm:flex-row sm:items-center">
+          <div className="relative w-full flex-1">
+            <i className="ri-search-line absolute left-3 top-1/2 -translate-y-1/2 text-sm text-gray-400" />
             <input
               type="text"
               value={search}
-              onChange={(e) => setSearch(e.target.value)}
+              onChange={(event) => setSearch(event.target.value)}
               placeholder="Ad soyad, muhatap no veya TC ile ara..."
-              className="w-full pl-9 pr-4 py-2.5 text-sm border border-gray-200 rounded-lg focus:outline-none focus:border-red-400 focus:ring-1 focus:ring-red-100"
+              className="w-full rounded-lg border border-gray-200 py-2.5 pl-9 pr-4 text-sm focus:border-red-400 focus:outline-none focus:ring-1 focus:ring-red-100"
             />
           </div>
-          <div className="flex gap-2 flex-wrap">
-            {["tumu", "bekleyen", "onaylandi", "reddedildi"].map((v) => (
+          <div className="flex flex-wrap gap-2">
+            {(["tumu", "bekleyen", "onaylandi", "reddedildi"] as const).map((value) => (
               <button
-                key={v}
-                onClick={() => setFilterDecision(v)}
-                className={`text-xs px-4 py-2 rounded-lg cursor-pointer transition-colors whitespace-nowrap ${
-                  filterDecision === v ? "bg-red-600 text-white" : "bg-white border border-gray-200 text-gray-600 hover:bg-gray-50"
+                key={value}
+                onClick={() => setFilterDecision(value)}
+                className={`cursor-pointer rounded-lg px-4 py-2 text-xs transition-colors whitespace-nowrap ${
+                  filterDecision === value
+                    ? "bg-red-600 text-white"
+                    : "border border-gray-200 bg-white text-gray-600 hover:bg-gray-50"
                 }`}
               >
-                {v === "tumu" ? "Tümü" : decisionLabel[v]}
+                {decisionLabel[value]}
               </button>
             ))}
           </div>
         </div>
 
-        {/* Table */}
-        <div className="bg-white rounded-xl border border-gray-100 overflow-hidden">
+        <div className="overflow-hidden rounded-xl border border-gray-100 bg-white">
           <div className="overflow-x-auto">
             <table className="w-full text-xs">
               <thead>
-                <tr className="bg-gray-50/70 border-b border-gray-100">
-                  <th className="px-5 py-3 w-10">
+                <tr className="border-b border-gray-100 bg-gray-50/70">
+                  <th className="w-10 px-5 py-3">
                     <input
                       type="checkbox"
                       checked={selected.length === filtered.length && filtered.length > 0}
                       onChange={toggleAll}
-                      className="accent-red-600 cursor-pointer"
+                      className="cursor-pointer accent-red-600"
                     />
                   </th>
-                  <th className="text-left text-gray-400 font-medium px-4 py-3">Skor</th>
-                  <th className="text-left text-gray-400 font-medium px-4 py-3">Kayıt 1 — Ad Soyad / TC</th>
-                  <th className="text-left text-gray-400 font-medium px-4 py-3">Kayıt 2 — Ad Soyad / TC</th>
-                  <th className="text-left text-gray-400 font-medium px-4 py-3">Telefon</th>
-                  <th className="text-left text-gray-400 font-medium px-4 py-3">Durum</th>
-                  <th className="text-center text-gray-400 font-medium px-4 py-3">İşlem</th>
+                  <th className="px-4 py-3 text-left font-medium text-gray-400">Skor</th>
+                  <th className="px-4 py-3 text-left font-medium text-gray-400">Kayit 1</th>
+                  <th className="px-4 py-3 text-left font-medium text-gray-400">Kayit 2</th>
+                  <th className="px-4 py-3 text-left font-medium text-gray-400">Telefon / E-posta</th>
+                  <th className="px-4 py-3 text-left font-medium text-gray-400">Karar</th>
+                  <th className="px-4 py-3 text-center font-medium text-gray-400">Islem</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-50">
-                {filtered.map((g) => {
-                  const scoreColor = g.score >= 90 ? "text-red-600 bg-red-50" : g.score >= 80 ? "text-orange-500 bg-orange-50" : "text-yellow-600 bg-yellow-50";
+                {filtered.map((group) => {
+                  const scoreColor =
+                    group.score >= 90
+                      ? "bg-red-50 text-red-600"
+                      : group.score >= 80
+                        ? "bg-orange-50 text-orange-500"
+                        : "bg-yellow-50 text-yellow-600";
+
                   return (
-                    <tr key={g.id} className={`hover:bg-gray-50/50 transition-colors ${selected.includes(g.id) ? "bg-red-50/30" : ""}`}>
+                    <tr
+                      key={group.id}
+                      className={`transition-colors hover:bg-gray-50/50 ${
+                        selected.includes(group.id) ? "bg-red-50/30" : ""
+                      }`}
+                    >
                       <td className="px-5 py-3.5">
                         <input
                           type="checkbox"
-                          checked={selected.includes(g.id)}
-                          onChange={() => toggleSelect(g.id)}
-                          className="accent-red-600 cursor-pointer"
+                          checked={selected.includes(group.id)}
+                          onChange={() => toggleSelect(group.id)}
+                          className="cursor-pointer accent-red-600"
                         />
                       </td>
                       <td className="px-4 py-3.5">
-                        <span className={`inline-block px-2.5 py-1 rounded-full font-bold text-sm ${scoreColor}`}>
-                          %{g.score.toFixed(1)}
+                        <span
+                          className={`inline-block rounded-full px-2.5 py-1 text-sm font-bold ${scoreColor}`}
+                        >
+                          %{group.score.toFixed(1)}
                         </span>
                       </td>
                       <td className="px-4 py-3.5">
-                        <p className="font-medium text-gray-800">{g.records[0].adSoyad}</p>
-                        <p className="text-gray-400">{g.records[0].tcKimlikNo} · {g.records[0].muhatapNo}</p>
+                        <p className="font-medium text-gray-800">{group.records[0].adSoyad}</p>
+                        <p className="text-gray-400">
+                          {group.records[0].tcKimlikNo || "-"} - {group.records[0].muhatapNo}
+                        </p>
                       </td>
                       <td className="px-4 py-3.5">
-                        <p className="font-medium text-gray-800">{g.records[1].adSoyad}</p>
-                        <p className="text-gray-400">{g.records[1].tcKimlikNo} · {g.records[1].muhatapNo}</p>
+                        <p className="font-medium text-gray-800">{group.records[1].adSoyad}</p>
+                        <p className="text-gray-400">
+                          {group.records[1].tcKimlikNo || "-"} - {group.records[1].muhatapNo}
+                        </p>
                       </td>
-                      <td className="px-4 py-3.5 text-gray-500">{g.records[0].telefon}</td>
+                      <td className="px-4 py-3.5 text-gray-500">
+                        <p>{group.records[0].telefon || "-"}</p>
+                        <p className="mt-1">{group.records[0].email || "-"}</p>
+                      </td>
                       <td className="px-4 py-3.5">
-                        <span className={`inline-block px-2.5 py-1 rounded-full text-[11px] font-medium ${decisionBadge[g.decision]}`}>
-                          {decisionLabel[g.decision]}
+                        <span
+                          className={`inline-block rounded-full px-2.5 py-1 text-[11px] font-medium ${finalDecisionTone(group.finalDecision)}`}
+                        >
+                          {group.finalDecisionLabel}
                         </span>
+                        <div className="mt-2">
+                          <span
+                            className={`inline-block rounded-full px-2.5 py-1 text-[11px] font-medium ${decisionBadge[group.workflowState]}`}
+                          >
+                            {decisionLabel[group.workflowState]}
+                          </span>
+                        </div>
                       </td>
                       <td className="px-4 py-3.5 text-center">
                         <button
-                          onClick={() => setDetailGroup(g)}
-                          className="text-xs text-red-600 font-medium hover:underline cursor-pointer whitespace-nowrap"
+                          onClick={() => setDetailGroup(group)}
+                          className="cursor-pointer whitespace-nowrap text-xs font-medium text-red-600 hover:underline"
                         >
                           Detay
                         </button>
@@ -281,89 +303,111 @@ export default function MukerrerKayitlar() {
               </tbody>
             </table>
             {filtered.length === 0 && (
-              <div className="text-center py-10 text-gray-400 text-sm">Kayıt bulunamadı.</div>
+              <div className="py-10 text-center text-sm text-gray-400">
+                Kayit bulunamadi.
+              </div>
             )}
           </div>
         </div>
       </div>
 
-      {/* Detail Modal */}
       {detailGroup && (
-        <div className="fixed inset-0 bg-black/30 z-50 flex items-center justify-center p-4" onClick={() => setDetailGroup(null)}>
-          <div className="bg-white rounded-2xl w-full max-w-3xl max-h-[85vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4"
+          onClick={() => setDetailGroup(null)}
+        >
+          <div
+            className="max-h-[85vh] w-full max-w-4xl overflow-y-auto rounded-2xl bg-white"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-gray-100 px-6 py-4">
               <div>
-                <h2 className="text-base font-bold text-gray-900">Kayıt Karşılaştırma — {detailGroup.id}</h2>
-                <p className="text-xs text-gray-400 mt-0.5">Benzerlik skoru: %{detailGroup.score.toFixed(1)}</p>
+                <h2 className="text-base font-bold text-gray-900">
+                  Kayit Karsilastirma - {detailGroup.id}
+                </h2>
+                <p className="mt-0.5 text-xs text-gray-400">
+                  Splink alan karsilastirmalari ve kural gerekceleri
+                </p>
               </div>
-              <button onClick={() => setDetailGroup(null)} className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-gray-100 cursor-pointer text-gray-500">
-                <i className="ri-close-line text-lg"></i>
+              <button
+                onClick={() => setDetailGroup(null)}
+                className="flex h-8 w-8 cursor-pointer items-center justify-center rounded-lg text-gray-500 hover:bg-gray-100"
+              >
+                <i className="ri-close-line text-lg" />
               </button>
             </div>
-            <div className="p-6">
-              {/* Score breakdown */}
-              <div className="mb-5 p-4 bg-gray-50 rounded-xl">
-                <p className="text-xs font-semibold text-gray-600 mb-3">Alan Bazlı Skor Kırılımı</p>
-                <div className="grid grid-cols-5 gap-2">
-                  {Object.entries(detailGroup.matchDetails || {}).map(([field, score]) => (
-                    <div key={field} className="text-center">
-                      <div className={`text-sm font-bold ${score >= 90 ? "text-green-600" : score >= 70 ? "text-yellow-600" : "text-red-500"}`}>
-                        %{score}
-                      </div>
-                      <div className="text-[10px] text-gray-400 mt-0.5 capitalize">{field}</div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-              {/* Side by side */}
-              <div className="grid grid-cols-2 gap-4">
-                {detailGroup.records.map((rec, i) => (
-                  <div key={i} className={`rounded-xl p-4 border-2 ${i === 0 ? "border-gray-200" : "border-red-200 bg-red-50/20"}`}>
-                    <div className="flex items-center gap-2 mb-3">
-                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${i === 0 ? "bg-gray-100 text-gray-600" : "bg-red-100 text-red-600"}`}>
-                        Kayıt {i + 1}
+
+            <div className="space-y-5 p-6">
+              <FieldComparisonsPanel
+                fieldComparisons={detailGroup.fieldComparisons}
+                overallScore={detailGroup.score}
+                finalDecision={detailGroup.finalDecision}
+                finalDecisionLabel={detailGroup.finalDecisionLabel}
+                riskFlags={detailGroup.riskFlags}
+                ruleReasons={detailGroup.ruleReasons}
+              />
+
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                {detailGroup.records.map((record, index) => (
+                  <div
+                    key={`${detailGroup.id}-${record.muhatapNo}`}
+                    className={`rounded-xl border-2 p-4 ${
+                      index === 0
+                        ? "border-gray-200"
+                        : "border-red-200 bg-red-50/20"
+                    }`}
+                  >
+                    <div className="mb-3 flex items-center gap-2">
+                      <span
+                        className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${
+                          index === 0
+                            ? "bg-gray-100 text-gray-600"
+                            : "bg-red-100 text-red-600"
+                        }`}
+                      >
+                        Kayit {index + 1}
                       </span>
-                      <span className="text-xs text-gray-500">{rec.muhatapNo}</span>
+                      <span className="text-xs text-gray-500">{record.muhatapNo}</span>
                     </div>
                     {[
-                      ["Ad Soyad", rec.adSoyad],
-                      ["TC Kimlik", rec.tcKimlikNo],
-                      ["Telefon", rec.telefon],
-                      ["E-posta", rec.email],
-                      ["Şehir", rec.sehir],
-                      ["Doğum Tarihi", rec.dogumTarihi || "-"],
-                      ["Adres", rec.adres || "-"],
-                    ].map(([label, val]) => (
+                      ["Ad Soyad", record.adSoyad],
+                      ["TC Kimlik", record.tcKimlikNo],
+                      ["Telefon", record.telefon],
+                      ["E-posta", record.email],
+                      ["Sehir", record.sehir],
+                      ["Adres", record.adres || "-"],
+                    ].map(([label, value]) => (
                       <div key={label} className="mb-2">
                         <p className="text-[10px] text-gray-400">{label}</p>
-                        <p className="text-xs font-medium text-gray-800 break-words">{val}</p>
+                        <p className="break-words text-xs font-medium text-gray-800">
+                          {value}
+                        </p>
                       </div>
                     ))}
                   </div>
                 ))}
               </div>
-              <div className="flex gap-3 mt-5">
-                <button 
+
+              <div className="flex gap-3">
+                <button
                   onClick={() => {
-                    setRealData((prev) =>
-                      prev.map((g) => (g.id === detailGroup.id ? { ...g, decision: "onaylandi" as const } : g))
-                    );
+                    updateWorkflowState([detailGroup.id], "onaylandi");
                     setDetailGroup(null);
                   }}
-                  className="flex-1 bg-green-600 text-white text-sm font-medium py-2.5 rounded-lg hover:bg-green-700 cursor-pointer whitespace-nowrap"
+                  className="flex-1 cursor-pointer whitespace-nowrap rounded-lg bg-green-600 py-2.5 text-sm font-medium text-white hover:bg-green-700"
                 >
-                  <i className="ri-checkbox-circle-line mr-1.5"></i>Mükerrer Onayla
+                  <i className="ri-checkbox-circle-line mr-1.5" />
+                  Mukerrer Onayla
                 </button>
-                <button 
+                <button
                   onClick={() => {
-                    setRealData((prev) =>
-                      prev.map((g) => (g.id === detailGroup.id ? { ...g, decision: "reddedildi" as const } : g))
-                    );
+                    updateWorkflowState([detailGroup.id], "reddedildi");
                     setDetailGroup(null);
                   }}
-                  className="flex-1 border border-red-200 text-red-600 text-sm font-medium py-2.5 rounded-lg hover:bg-red-50 cursor-pointer whitespace-nowrap"
+                  className="flex-1 cursor-pointer whitespace-nowrap rounded-lg border border-red-200 py-2.5 text-sm font-medium text-red-600 hover:bg-red-50"
                 >
-                  <i className="ri-close-circle-line mr-1.5"></i>Reddet
+                  <i className="ri-close-circle-line mr-1.5" />
+                  Reddet
                 </button>
               </div>
             </div>
