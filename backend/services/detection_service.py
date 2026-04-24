@@ -13,6 +13,20 @@ from backend.schemas.requests import RecordIn
 from backend.services.matching_service import (
     DEFAULT_MODEL_VERSION,
     extract_confidence,
+    infer_match_type,
+    run_matching,
+)
+from backend.services.normalization_persistence_service import (
+    persist_normalization_pipeline,
+)
+from backend.services.normalization_service import (
+    ADDRESS_COLUMN,
+    CITY_COLUMN,
+    EMAIL_COLUMN,
+    NAME_COLUMN,
+    PHONE_COLUMN,
+    TC_COLUMN,
+    build_column_mapping_definitions,
     canonicalize_upload_dataframe,
     metaphone_name_key,
     normalize_email_key,
