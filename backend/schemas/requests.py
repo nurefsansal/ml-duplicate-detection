@@ -11,9 +11,12 @@ class RecordIn(BaseModel):
 
 class NormalizeRequest(BaseModel):
     records: list[RecordIn] = Field(default_factory=list, min_length=1)
+    uploadId: int | None = None
 
 class DetectRequest(BaseModel):
-    records: list[RecordIn] = Field(default_factory=list, min_length=1)
+    records: list[RecordIn] = Field(default_factory=list)
+    uploadId: int | None = None
+    normalizationRunId: int | None = None
     minRulesToMatch: int = Field(default=2, ge=1, le=4)
     saveToDb: bool = False
     sessionId: str | None = None

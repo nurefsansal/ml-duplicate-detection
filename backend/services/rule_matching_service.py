@@ -726,41 +726,11 @@ def detect_core(
     save_to_db: bool,
     session_id: str | None,
 ):
-    df_clean = _prepare_clean_dataframe(records)
+    from backend.services.detection_service import detect_core as detect_via_database
 
-    resolved_session_id = session_id or str(int(datetime.now(tz=UTC).timestamp() * 1000))
-    inserted = 0
-    upload_id: int | None = None
-
-    try:
-        enriched_duplicates = run_splink_detection(df_clean)
-    except Exception as exc:
-        logger.warning("Splink failed, falling back to legacy: %s", exc)
-        enriched_duplicates = _legacy_detection(df_clean, min_rules_to_match)
-
-    candidate_pairs = int(
-        getattr(enriched_duplicates, "candidate_pairs", len(enriched_duplicates))
+    return detect_via_database(
+        records=records,
+        min_rules_to_match=min_rules_to_match,
+        save_to_db=save_to_db,
+        session_id=session_id,
     )
-    duplicate_pairs = int(
-        getattr(enriched_duplicates, "duplicate_pairs", len(enriched_duplicates))
-    )
-
-    if save_to_db:
-        try:
-            upload_id, inserted = _persist_detection_flow(
-                records=records,
-                df_clean=df_clean,
-                enriched_duplicates=enriched_duplicates,
-                session_id=resolved_session_id,
-            )
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"DB save failed: {exc}") from exc
-
-    return {
-        "sessionId": resolved_session_id,
-        "uploadId": upload_id,
-        "candidatePairs": candidate_pairs,
-        "duplicatePairs": duplicate_pairs,
-        "insertedRows": inserted,
-        "duplicates": list(enriched_duplicates),
-    }
