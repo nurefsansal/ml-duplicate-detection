@@ -2,6 +2,7 @@
 Admin API Routes - Operatorun match'leri onaylamasi/reddetmesi
 """
 
+from datetime import datetime
 from typing import Any, Optional
 import os
 
@@ -10,12 +11,16 @@ from pydantic import BaseModel, Field
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from backend.models.database import Entity
-from backend.services.database_service import (
-    CompositeService,
-    EntityMapService,
-    EntityService,
-    MatchService,
+from backend.models.database import Entity, EntityMap
+from backend.services.database_service import EntityMapService
+from backend.services.review_service import (
+    approve_match_candidate,
+    get_entity_memberships,
+    get_match_candidate_statistics,
+    get_pending_match_candidates,
+    reject_match_candidate,
+    remove_entity_membership,
+    serialize_match_candidate,
 )
 
 DATABASE_URL = os.getenv(
@@ -42,6 +47,11 @@ class PendingMatchResponse(BaseModel):
     """Beklemede olan match detaylari."""
 
     id: int
+    left_id: int
+    right_id: int
+    score: float
+    match_type: str
+    confidence: Optional[float]
     donor1_id: int
     donor2_id: int
     donor1_name: str
@@ -55,7 +65,6 @@ class PendingMatchResponse(BaseModel):
     donor2_city: Optional[str] = None
     donor2_tc: Optional[str] = None
     ml_score: float
-    confidence: Optional[float]
     decision_reason: Optional[str]
     features: dict[str, Any]
     fieldComparisons: dict[str, Any] = Field(default_factory=dict)
@@ -88,35 +97,6 @@ class RejectMatchRequest(BaseModel):
     reason: Optional[str] = None
 
 
-def _safe_dict(value: Any) -> dict[str, Any]:
-    return value if isinstance(value, dict) else {}
-
-
-def _unwrap_match_payload(value: Any) -> dict[str, Any]:
-    payload = _safe_dict(value)
-    if "features" in payload or "fieldComparisons" in payload:
-        return payload
-    return {"features": payload}
-
-
-def _pick_donor_display_value(
-    normalized_donor: Any,
-    attribute: str,
-    *,
-    raw_attribute: str | None = None,
-) -> Optional[str]:
-    raw_donor = getattr(normalized_donor, "raw_donor", None)
-    if raw_donor is not None and raw_attribute:
-        raw_value = getattr(raw_donor, raw_attribute, None)
-        if raw_value not in (None, ""):
-            return str(raw_value)
-
-    value = getattr(normalized_donor, attribute, None)
-    if value in (None, ""):
-        return None
-    return str(value)
-
-
 @router.get("/admin/pending-matches")
 def get_pending_matches(
     upload_id: Optional[int] = None,
@@ -131,81 +111,13 @@ def get_pending_matches(
     - limit: Kac adet goster (default 50)
     """
     try:
-        pending_matches = MatchService.get_pending_matches(
+        pending_matches = get_pending_match_candidates(
             db,
             upload_id=upload_id,
             limit=limit,
         )
 
-        result = []
-        for match in pending_matches:
-            payload = _unwrap_match_payload(match.features)
-            features = _safe_dict(payload.get("features"))
-            field_comparisons = _safe_dict(payload.get("fieldComparisons"))
-            risk_flags = payload.get("riskFlags") if isinstance(payload.get("riskFlags"), list) else []
-            rule_reasons = payload.get("ruleReasons") if isinstance(payload.get("ruleReasons"), list) else []
-
-            result.append(
-                {
-                    "id": match.id,
-                    "donor1_id": match.donor1_id,
-                    "donor2_id": match.donor2_id,
-                    "donor1_name": (
-                        _pick_donor_display_value(match.donor1, "full_name", raw_attribute="full_name")
-                        if match.donor1
-                        else "N/A"
-                    ),
-                    "donor1_email": (
-                        _pick_donor_display_value(match.donor1, "email", raw_attribute="email")
-                        if match.donor1
-                        else None
-                    ),
-                    "donor1_phone": (
-                        _pick_donor_display_value(match.donor1, "phone", raw_attribute="phone")
-                        if match.donor1
-                        else None
-                    ),
-                    "donor1_city": (
-                        _pick_donor_display_value(match.donor1, "city", raw_attribute="city")
-                        if match.donor1
-                        else None
-                    ),
-                    "donor1_tc": str(match.donor1.clean_tc) if match.donor1 and match.donor1.clean_tc else None,
-                    "donor2_name": (
-                        _pick_donor_display_value(match.donor2, "full_name", raw_attribute="full_name")
-                        if match.donor2
-                        else "N/A"
-                    ),
-                    "donor2_email": (
-                        _pick_donor_display_value(match.donor2, "email", raw_attribute="email")
-                        if match.donor2
-                        else None
-                    ),
-                    "donor2_phone": (
-                        _pick_donor_display_value(match.donor2, "phone", raw_attribute="phone")
-                        if match.donor2
-                        else None
-                    ),
-                    "donor2_city": (
-                        _pick_donor_display_value(match.donor2, "city", raw_attribute="city")
-                        if match.donor2
-                        else None
-                    ),
-                    "donor2_tc": str(match.donor2.clean_tc) if match.donor2 and match.donor2.clean_tc else None,
-                    "ml_score": match.ml_score,
-                    "confidence": match.confidence,
-                    "decision_reason": match.decision_reason,
-                    "features": features,
-                    "fieldComparisons": field_comparisons,
-                    "riskFlags": risk_flags,
-                    "ruleReasons": rule_reasons,
-                    "decisionSource": str(payload.get("decisionSource", "fallback_legacy")),
-                    "finalDecision": payload.get("finalDecision", match.decision_reason),
-                    "splinkMatchProbability": payload.get("splinkMatchProbability", match.ml_score),
-                    "splinkMatchWeight": payload.get("splinkMatchWeight"),
-                    "created_at": match.created_at.isoformat() if match.created_at else None,
-                }
-            )
+        result = [serialize_match_candidate(match) for match in pending_matches]
 
         return {
             "success": True,
@@ -225,10 +137,12 @@ def approve_match(
     Match'i onayla ve opsiyonel olarak entity'ye birlestir.
     """
     try:
-        match = MatchService.approve_match(
+        match, entity = approve_match_candidate(
             db,
-            request.match_id,
-            request.approved_by,
+            match_id=request.match_id,
+            approved_by=request.approved_by,
+            merge_into_entity=request.merge_into_entity,
+            canonical_name=request.canonical_name,
         )
 
         if not match:
@@ -237,25 +151,12 @@ def approve_match(
         result = {
             "success": True,
             "match_id": match.id,
-            "status": match.status,
-            "approved_by": match.approved_by,
-            "approved_at": match.approved_at.isoformat() if match.approved_at else None,
+            "status": match.decision,
+            "approved_by": request.approved_by,
+            "approved_at": datetime.utcnow().isoformat(),
         }
 
-        if request.merge_into_entity:
-            canonical_name = request.canonical_name or f"{match.donor1.full_name} (Merged)"
-
-            entity = CompositeService.merge_donors_to_entity(
-                db,
-                donor_ids=[match.donor1_id, match.donor2_id],
-                canonical_name=canonical_name,
-                canonical_email=match.donor1.email or match.donor2.email,
-                canonical_phone=match.donor1.phone or match.donor2.phone,
-                canonical_city=match.donor1.city or match.donor2.city,
-                merged_by=request.approved_by,
-                match_id=match.id,
-            )
-
+        if entity is not None:
             result["entity_id"] = entity.id
             result["entity_name"] = entity.canonical_name
             result["donor_count"] = entity.donor_count
@@ -263,6 +164,9 @@ def approve_match(
         db.commit()
         return result
 
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except HTTPException:
         raise
     except Exception as e:
@@ -279,11 +183,11 @@ def reject_match(
     Match'i reddet.
     """
     try:
-        match = MatchService.reject_match(
+        match = reject_match_candidate(
             db,
-            request.match_id,
-            request.reason,
-            request.rejected_by,
+            match_id=request.match_id,
+            rejected_by=request.rejected_by,
+            reason=request.reason,
         )
 
         if not match:
@@ -294,11 +198,14 @@ def reject_match(
         return {
             "success": True,
             "match_id": match.id,
-            "status": match.status,
-            "rejected_by": match.approved_by,
-            "rejected_at": match.rejected_at.isoformat() if match.rejected_at else None,
-            "reason": match.rejected_reason,
+            "status": match.decision,
+            "rejected_by": request.rejected_by,
+            "rejected_at": datetime.utcnow().isoformat(),
+            "reason": request.reason,
         }
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except HTTPException:
         raise
     except Exception as e:
@@ -315,7 +222,7 @@ def get_match_statistics(
     Upload'in match istatistikleri.
     """
     try:
-        stats = MatchService.get_match_statistics(db, upload_id)
+        stats = get_match_candidate_statistics(db, upload_id)
         return {
             "success": True,
             "upload_id": upload_id,
@@ -372,24 +279,41 @@ def get_entity_donors(
     Entity'ye bagli tum donor'lari goster.
     """
     try:
-        entity = EntityService.get_entity(db, entity_id)
+        entity = db.query(Entity).filter(Entity.id == entity_id).first()
         if not entity:
             raise HTTPException(status_code=404, detail="Entity not found")
 
-        donors = EntityMapService.get_entity_donors(db, entity_id)
-
         donor_list = []
-        for donor in donors:
-            donor_list.append(
-                {
-                    "id": donor.id,
-                    "full_name": donor.full_name,
-                    "email": donor.email,
-                    "phone": donor.phone,
-                    "city": donor.city,
-                    "upload_id": donor.upload_id,
-                }
-            )
+        memberships = get_entity_memberships(db, entity_id)
+        if memberships:
+            for membership in memberships:
+                donor = membership.normalized_record
+                if donor is None:
+                    continue
+                donor_list.append(
+                    {
+                        "id": donor.id,
+                        "full_name": donor.clean_name,
+                        "email": donor.clean_email,
+                        "phone": donor.clean_phone,
+                        "city": donor.clean_city,
+                        "upload_id": donor.upload_id,
+                        "tc": donor.clean_tc,
+                    }
+                )
+        else:
+            donors = EntityMapService.get_entity_donors(db, entity_id)
+            for donor in donors:
+                donor_list.append(
+                    {
+                        "id": donor.id,
+                        "full_name": donor.full_name,
+                        "email": donor.email,
+                        "phone": donor.phone,
+                        "city": donor.city,
+                        "upload_id": donor.upload_id,
+                    }
+                )
 
         return {
             "success": True,
@@ -416,27 +340,38 @@ def delete_entity_mapping(
     Donor'i entity'den cikar (soft delete).
     """
     try:
-        from backend.models.database import EntityMap
+        removed_membership = remove_entity_membership(
+            db,
+            entity_id=entity_id,
+            normalized_record_id=donor_id,
+        )
 
-        entity_maps = db.query(EntityMap).filter(
-            EntityMap.entity_id == entity_id,
-            EntityMap.donor_id == donor_id,
-        ).all()
+        removed_legacy = 0
+        if not removed_membership:
+            entity_maps = db.query(EntityMap).filter(
+                EntityMap.entity_id == entity_id,
+                EntityMap.donor_id == donor_id,
+            ).all()
 
-        if not entity_maps:
-            raise HTTPException(
-                status_code=404,
-                detail="Entity-Donor mapping not found",
-            )
+            if not entity_maps:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Entity-Donor mapping not found",
+                )
 
-        for entity_map in entity_maps:
-            EntityMapService.deactivate_entity_map(db, entity_map.id)
+            for entity_map in entity_maps:
+                EntityMapService.deactivate_entity_map(db, entity_map.id)
+                removed_legacy += 1
 
         db.commit()
 
         return {
             "success": True,
-            "message": f"Removed {len(entity_maps)} mapping(s)",
+            "message": (
+                "Removed 1 mapping(s)"
+                if removed_membership
+                else f"Removed {removed_legacy} mapping(s)"
+            ),
         }
     except HTTPException:
         raise

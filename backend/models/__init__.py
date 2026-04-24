@@ -7,8 +7,17 @@ from backend.models.database import (
     RawDonor,
     NormalizedDonor,
     Match,
+    RawRecord,
+    ColumnMapping,
+    NormalizationRun,
+    NormalizedRecord,
+    DetectionRun,
+    MatchCandidate,
+    ReviewAction,
     Entity,
     EntityMap,
+    EntityMembership,
+    AuditLog,
 )
 
 __all__ = [
@@ -17,6 +26,15 @@ __all__ = [
     "RawDonor",
     "NormalizedDonor",
     "Match",
+    "RawRecord",
+    "ColumnMapping",
+    "NormalizationRun",
+    "NormalizedRecord",
+    "DetectionRun",
+    "MatchCandidate",
+    "ReviewAction",
     "Entity",
     "EntityMap",
+    "EntityMembership",
+    "AuditLog",
 ]

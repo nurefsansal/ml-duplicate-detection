@@ -31,6 +31,8 @@ export type UiDuplicatePair = {
   id: string;
   pairId: string;
   backendMatchId?: number;
+  matchType?: string;
+  backendDecision?: string;
   records: [UiPairRecord, UiPairRecord];
   score: number;
   workflowState: PairWorkflowState;
@@ -45,6 +47,9 @@ export type UiDuplicatePair = {
   splinkMatchWeight?: number | null;
   decisionReason?: string;
   createdAt?: string | null;
+  reviewedAt?: string | null;
+  reviewNote?: string;
+  reviewedBy?: string | null;
 };
 
 export const FIELD_ORDER: FieldComparisonKey[] = [
@@ -78,6 +83,17 @@ function toPercent(value: unknown, fallback = 0): number {
     return Math.max(0, Math.min(100, Math.round(num * 100)));
   }
   return Math.max(0, Math.min(100, Math.round(num)));
+}
+
+function toPercentValue(value: unknown, fallback = 0): number {
+  const num = Number(value);
+  if (Number.isNaN(num)) {
+    return fallback;
+  }
+  if (num >= 0 && num <= 1) {
+    return Math.max(0, Math.min(100, Math.round(num * 10000) / 100));
+  }
+  return Math.max(0, Math.min(100, Math.round(num * 100) / 100));
 }
 
 function toText(value: unknown): string {
@@ -232,7 +248,7 @@ export function mapDetectPairToView(
   index: number,
 ): UiDuplicatePair {
   const fieldComparisons = pair.fieldComparisons || {};
-  const score = toPercent(
+  const score = toPercentValue(
     pair.splinkMatchProbability ?? pair.ml_probability ?? 0,
     0,
   );
@@ -262,20 +278,28 @@ export function mapDetectPairToView(
 
 export function mapPendingMatchToView(
   match: AdminPendingMatch,
-  index: number,
 ): UiDuplicatePair {
   const fieldComparisons = match.fieldComparisons || {};
-  const finalDecision = match.finalDecision || match.decision_reason || "review";
+  const finalDecision =
+    match.finalDecision || match.decision || match.decision_reason || "review";
+  const rawScore =
+    match.score ??
+    match.confidence ??
+    match.splinkMatchProbability ??
+    match.ml_score ??
+    0;
 
   return {
-    id: `MG-${String(index + 1).padStart(3, "0")}`,
-    pairId: `pending-${match.id}`,
+    id: String(match.id),
+    pairId: `match-${match.id}`,
     backendMatchId: match.id,
+    matchType: match.match_type || match.decisionSource || "unknown",
+    backendDecision: match.decision || "pending",
     records: [
       buildRecordFromPendingMatch(match, "left"),
       buildRecordFromPendingMatch(match, "right"),
     ],
-    score: toPercent(match.splinkMatchProbability ?? match.ml_score, 0),
+    score: toPercentValue(rawScore, 0),
     workflowState: "bekleyen",
     finalDecision,
     finalDecisionLabel: finalDecisionLabel(finalDecision),
@@ -284,7 +308,7 @@ export function mapPendingMatchToView(
     riskFlags: match.riskFlags || [],
     ruleReasons: match.ruleReasons || [],
     decisionSource: match.decisionSource || "fallback_legacy",
-    splinkMatchProbability: Number(match.splinkMatchProbability ?? match.ml_score ?? 0),
+    splinkMatchProbability: Number(rawScore),
     splinkMatchWeight: match.splinkMatchWeight ?? null,
     decisionReason: match.decision_reason || undefined,
     createdAt: match.created_at,

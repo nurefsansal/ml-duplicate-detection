@@ -10,6 +10,20 @@ class HealthResponse(BaseModel):
 class NormalizeResponse(BaseModel):
     totalRecords: int
     normalizedRecords: list[dict[str, Any]]
+    uploadId: int | None = None
+    normalizationRunId: int | None = None
+    totalProcessed: int | None = None
+    successCount: int | None = None
+    failedCount: int | None = None
+    previewRows: list[dict[str, Any]] = Field(default_factory=list)
+    validationWarnings: list[str] = Field(default_factory=list)
+    upload_id: int | None = None
+    normalization_run_id: int | None = None
+    total_processed: int | None = None
+    success_count: int | None = None
+    failed_count: int | None = None
+    preview_rows: list[dict[str, Any]] = Field(default_factory=list)
+    validation_warnings: list[str] = Field(default_factory=list)
 
 
 class FieldComparisonResponse(BaseModel):
@@ -46,6 +60,8 @@ class DuplicatePairResponse(BaseModel):
 class DetectResponse(BaseModel):
     sessionId: str
     uploadId: int | None = None
+    normalizationRunId: int | None = None
+    detectionRunId: int | None = None
     candidatePairs: int
     duplicatePairs: int
     insertedRows: int
