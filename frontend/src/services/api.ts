@@ -75,7 +75,51 @@ export type DetectFromUrlPayload = {
 export type NormalizeResponse = {
   totalRecords: number;
   normalizedRecords: Array<Record<string, unknown>>;
+  uploadId?: number | null;
+  normalizationRunId?: number | null;
+  totalProcessed?: number;
+  successCount?: number;
+  failedCount?: number;
+  previewRows?: Array<Record<string, unknown>>;
+  validationWarnings?: string[];
 };
+
+export type MappingTargetFieldsResponse = {
+  fields: string[];
+};
+
+export type ColumnMappingSuggestion = {
+  sourceColumnName: string;
+  targetFieldName: string;
+  confidence: number;
+  mappingType: string;
+};
+
+export type ColumnMappingResponse = {
+  uploadId: number;
+  sourceColumns: string[];
+  suggestions: ColumnMappingSuggestion[];
+};
+
+export type FileUploadIngestResponse = {
+  uploadId: number;
+  fileName: string;
+  totalRecords: number;
+  sourceColumns: string[];
+};
+
+export async function uploadSpreadsheetForMapping(
+  file: File,
+): Promise<FileUploadIngestResponse> {
+  const formData = new FormData();
+  formData.append("file", file);
+  const response = await apiClient.post("/api/v1/uploads/file", formData, {
+    headers: {
+      "Content-Type": "multipart/form-data",
+    },
+  });
+  return response.data;
+}
 
 export async function normalizeRecords(records: NormalizedRecord[]) {
   const response = await apiClient.post("/api/v1/normalize", { records });
@@ -90,6 +134,42 @@ export async function normalizeFromFile(file: File): Promise<NormalizeResponse> 
     headers: {
       "Content-Type": "multipart/form-data",
     },
+  });
+  return response.data;
+}
+
+export async function normalizeFromUpload(uploadId: number): Promise<NormalizeResponse> {
+  const response = await apiClient.post("/api/v1/normalize/from-upload", { uploadId });
+  return response.data;
+}
+
+export async function getTargetFields(): Promise<MappingTargetFieldsResponse> {
+  const response = await apiClient.get("/api/v1/mappings/target-fields");
+  return response.data;
+}
+
+export async function getMappings(uploadId: number): Promise<ColumnMappingResponse> {
+  const response = await apiClient.get(`/api/v1/mappings/${uploadId}`);
+  return response.data;
+}
+
+export async function suggestMappings(uploadId: number): Promise<ColumnMappingResponse> {
+  const response = await apiClient.post(`/api/v1/mappings/${uploadId}/suggest`);
+  return response.data;
+}
+
+export async function saveMappings(
+  uploadId: number,
+  mappings: Array<{
+    sourceColumnName: string;
+    targetFieldName: string;
+    confidence?: number;
+    mappingType?: string;
+  }>,
+): Promise<ColumnMappingResponse> {
+  const response = await apiClient.post(`/api/v1/mappings/${uploadId}`, {
+    mappings,
+    replaceExisting: true,
   });
   return response.data;
 }

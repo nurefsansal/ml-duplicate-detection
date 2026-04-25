@@ -7,6 +7,13 @@ class HealthResponse(BaseModel):
     status: str
 
 
+class FileUploadIngestResponse(BaseModel):
+    uploadId: int
+    fileName: str
+    totalRecords: int
+    sourceColumns: list[str]
+
+
 class NormalizeResponse(BaseModel):
     totalRecords: int
     normalizedRecords: list[dict[str, Any]]
@@ -67,3 +74,20 @@ class DetectResponse(BaseModel):
     insertedRows: int
     totalRecords: int | None = None
     duplicates: list[DuplicatePairResponse]
+
+
+class ColumnMappingSuggestion(BaseModel):
+    sourceColumnName: str
+    targetFieldName: str
+    confidence: float
+    mappingType: str = "direct"
+
+
+class ColumnMappingResponse(BaseModel):
+    uploadId: int
+    sourceColumns: list[str]
+    suggestions: list[ColumnMappingSuggestion] = Field(default_factory=list)
+
+
+class TargetFieldResponse(BaseModel):
+    fields: list[str]
