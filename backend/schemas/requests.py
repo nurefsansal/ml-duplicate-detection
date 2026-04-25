@@ -9,9 +9,6 @@ class RecordIn(BaseModel):
     email: str = ""
     sehir: str = ""
 
-class NormalizeRequest(BaseModel):
-    records: list[RecordIn] = Field(default_factory=list, min_length=1)
-
 class DetectRequest(BaseModel):
     records: list[RecordIn] = Field(default_factory=list, min_length=1)
     minRulesToMatch: int = Field(default=2, ge=1, le=4)
@@ -25,3 +22,25 @@ class DetectFromUrlRequest(BaseModel):
     minRulesToMatch: int = 2
     saveToDb: bool = False
     sessionId: str | None = None
+
+
+class ColumnMappingItem(BaseModel):
+    sourceColumnName: str
+    targetFieldName: str
+    confidence: float | None = None
+    mappingType: str | None = None
+
+
+class SaveColumnMappingsRequest(BaseModel):
+    mappings: list[ColumnMappingItem] = Field(default_factory=list)
+    replaceExisting: bool = True
+
+
+class NormalizeRequest(BaseModel):
+    records: list[RecordIn] = Field(default_factory=list)
+    uploadId: int | None = None
+    mappings: list[ColumnMappingItem] | None = None
+
+
+class NormalizeFromUploadRequest(BaseModel):
+    uploadId: int = Field(ge=1)

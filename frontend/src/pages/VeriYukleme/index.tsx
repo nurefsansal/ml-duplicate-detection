@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { useNavigate } from "react-router-dom";
 import DashboardLayout from "../../components/feature/DashboardLayout";
 import Header from "../../components/feature/Header";
 import DropZone from "./components/DropZone";
@@ -7,16 +8,19 @@ import UploadProgress from "./components/UploadProgress";
 import UploadHistoryTable from "./components/UploadHistoryTable";
 import {
   type DetectResponse,
+  type FileUploadIngestResponse,
   type NormalizedRecord,
   detectDuplicates,
   detectDuplicatesFromFile,
   detectDuplicatesFromUrl,
   healthCheck,
+  uploadSpreadsheetForMapping,
 } from "../../services/api";
 
 type SourceType = "excel" | "csv" | "api" | "manuel";
 
 export default function VeriYukleme() {
+  const navigate = useNavigate();
   const [source, setSource] = useState<SourceType>("excel");
   const [uploading, setUploading] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -30,6 +34,7 @@ export default function VeriYukleme() {
   const [statusMessage, setStatusMessage] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
   const [result, setResult] = useState<DetectResponse | null>(null);
+  const [ingestResult, setIngestResult] = useState<FileUploadIngestResponse | null>(null);
   const [manualRecords, setManualRecords] = useState<NormalizedRecord[]>([]);
   const [manuelForm, setManuelForm] = useState({
     adSoyad: "",
@@ -57,6 +62,12 @@ export default function VeriYukleme() {
     };
   }, []);
 
+  useEffect(() => {
+    if (source !== "excel" && source !== "csv") {
+      setIngestResult(null);
+    }
+  }, [source]);
+
   const getError = (error: unknown) => {
     if (typeof error === "object" && error && "response" in error) {
       const response = (error as { response?: { data?: { detail?: string } } })
@@ -78,26 +89,50 @@ export default function VeriYukleme() {
     setLoadingAction(true);
     setErrorMessage("");
     setStatusMessage("");
+    setIngestResult(null);
+    setResult(null);
 
     const timer = setInterval(() => {
       setProgress((p) => Math.min(p + 8, 92));
     }, 180);
 
     try {
-      const response = await detectDuplicatesFromFile(file, { saveToDb });
-      setResult(response);
-      if (typeof response.uploadId === "number") {
-        localStorage.setItem("lastDetectUploadId", String(response.uploadId));
+      const ingest = await uploadSpreadsheetForMapping(file);
+      if (!ingest.totalRecords || ingest.totalRecords < 1) {
+        setErrorMessage("Ham kayıt oluşturulamadı, dosya yeniden yüklenmeli.");
+        setProgress(0);
+        return;
       }
-      setStatusMessage(
-        `Analiz tamamlandı. Aday: ${response.candidatePairs}, Mükerrer: ${response.duplicatePairs}, DB'ye yazılan: ${response.insertedRows}${
-          typeof response.uploadId === "number" ? `, Upload ID: ${response.uploadId}` : ""
-        }`,
-      );
+      setIngestResult(ingest);
+      localStorage.setItem("lastIngestUploadId", String(ingest.uploadId));
+
+      try {
+        const response = await detectDuplicatesFromFile(file, { saveToDb });
+        setResult(response);
+        if (typeof response.uploadId === "number") {
+          localStorage.setItem("lastDetectUploadId", String(response.uploadId));
+        }
+        setErrorMessage("");
+        setStatusMessage(
+          `Ham kayıt yüklendi (upload ${ingest.uploadId}, ${ingest.totalRecords} satır). Analiz: aday ${response.candidatePairs}, mükerrer ${response.duplicatePairs}, DB eşleşme yazımı: ${response.insertedRows}${
+            typeof response.uploadId === "number"
+              ? ` (tespit upload: ${response.uploadId})`
+              : ""
+          }`,
+        );
+      } catch (detectErr) {
+        setResult(null);
+        setErrorMessage(getError(detectErr));
+        setStatusMessage(
+          `Ham kayıt yüklendi (upload ${ingest.uploadId}, ${ingest.totalRecords} satır). Kolon eşlemesine geçebilirsiniz; tespit adımı başarısız oldu.`,
+        );
+      }
       setProgress(100);
     } catch (error) {
       setErrorMessage(getError(error));
       setProgress(0);
+      setIngestResult(null);
+      setResult(null);
     } finally {
       clearInterval(timer);
       setLoadingAction(false);
@@ -192,6 +227,15 @@ export default function VeriYukleme() {
   const previewKeys =
     previewRows.length > 0 ? Object.keys(previewRows[0]).slice(0, 8) : [];
 
+  const columnMappingUploadId =
+    (source === "excel" || source === "csv") &&
+    ingestResult &&
+    ingestResult.totalRecords > 0
+      ? ingestResult.uploadId
+      : typeof result?.uploadId === "number"
+        ? result.uploadId
+        : null;
+
   return (
     <DashboardLayout>
       <Header
@@ -244,6 +288,18 @@ export default function VeriYukleme() {
         {statusMessage ? (
           <div className="rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-700">
             {statusMessage}
+            {columnMappingUploadId != null ? (
+              <div className="mt-2">
+                <button
+                  onClick={() =>
+                    navigate(`/column-mapping?uploadId=${columnMappingUploadId}`)
+                  }
+                  className="text-xs px-3 py-1.5 rounded bg-white border border-green-200 text-green-700 hover:bg-green-100"
+                >
+                  Kolon Eşleme Adımına Git
+                </button>
+              </div>
+            ) : null}
           </div>
         ) : null}
         {errorMessage ? (

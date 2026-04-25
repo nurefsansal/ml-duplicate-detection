@@ -6,6 +6,7 @@ import MukerrerKayitlar from "./pages/MukerrerKayitlar/index";
 import YoneticiOnayi from "./pages/YoneticiOnayi/index";
 import Ayarlar from "./pages/Ayarlar/index";
 import Raporlar from "./pages/Raporlar/index";
+import ColumnMappingPage from "./pages/ColumnMapping/index";
 
 function PlaceholderPage({ title }: { title: string }) {
   return (
@@ -82,6 +83,7 @@ export default function App() {
       />
       <Route path="/ayarlar" element={<Ayarlar />} />
       <Route path="/raporlar" element={<Raporlar />} />
+      <Route path="/column-mapping" element={<ColumnMappingPage />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );
