@@ -3,10 +3,9 @@ import io
 import pandas as pd
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
-from backend.schemas.requests import DetectRequest, RecordIn
+from backend.schemas.requests import DetectRequest
 from backend.schemas.responses import DetectResponse
-from backend.services.normalization_service import dict_records_from_df
-from backend.services.rule_matching_service import detect_core
+from backend.services.detection_service import detect_core, detect_file_dataframe
 
 router = APIRouter()
 
@@ -18,6 +17,8 @@ def detect(payload: DetectRequest):
         min_rules_to_match=payload.minRulesToMatch,
         save_to_db=payload.saveToDb,
         session_id=payload.sessionId,
+        upload_id=payload.uploadId,
+        normalization_run_id=payload.normalizationRunId,
     )
 
 
@@ -27,29 +28,33 @@ async def detect_file(
     minRulesToMatch: int = Form(default=2),
     saveToDb: bool = Form(default=False),
     sessionId: str | None = Form(default=None),
+    uploadId: int | None = Form(default=None),
 ):
     filename = (file.filename or "").lower()
     content = await file.read()
 
     if filename.endswith(".csv"):
         df = pd.read_csv(io.BytesIO(content))
+        source_type = "csv"
     elif filename.endswith(".xlsx") or filename.endswith(".xls"):
         df = pd.read_excel(io.BytesIO(content))
+        source_type = "excel"
     else:
         raise HTTPException(
             status_code=400,
             detail="Unsupported file format. Use .xlsx, .xls or .csv",
         )
 
-    records = [RecordIn(**row) for row in dict_records_from_df(df)]
-    if not records:
+    if df.empty:
         raise HTTPException(status_code=400, detail="File has no usable rows")
 
-    result = detect_core(
-        records=records,
+    result = detect_file_dataframe(
+        df_original=df,
+        file_name=file.filename or "uploaded_file",
+        source_type=source_type,
         min_rules_to_match=minRulesToMatch,
         save_to_db=saveToDb,
         session_id=sessionId,
+        upload_id=uploadId,
     )
-    result["totalRecords"] = len(records)
     return result

@@ -264,6 +264,11 @@ export async function detectDuplicatesFromFileWithOptions(
 
 export type AdminPendingMatch = {
   id: number;
+  left_id: number;
+  right_id: number;
+  score?: number | null;
+  match_type?: string | null;
+  decision?: string | null;
   donor1_id: number;
   donor2_id: number;
   donor1_name: string;
@@ -335,12 +340,18 @@ export async function approvePendingMatch(payload: {
   mergeIntoEntity?: boolean;
   canonicalName?: string;
 }): Promise<AdminApproveResponse> {
-  const response = await apiClient.post("/api/v1/admin/approve-match", {
+  const requestBody: Record<string, unknown> = {
     match_id: payload.matchId,
-    approved_by: payload.approvedBy ?? "frontend_admin",
     merge_into_entity: payload.mergeIntoEntity ?? true,
-    canonical_name: payload.canonicalName,
-  });
+  };
+  if (payload.approvedBy) {
+    requestBody.approved_by = payload.approvedBy;
+  }
+  if (payload.canonicalName) {
+    requestBody.canonical_name = payload.canonicalName;
+  }
+
+  const response = await apiClient.post("/api/v1/admin/approve-match", requestBody);
   return response.data;
 }
 
@@ -349,10 +360,16 @@ export async function rejectPendingMatch(payload: {
   rejectedBy?: string;
   reason?: string;
 }): Promise<AdminRejectResponse> {
-  const response = await apiClient.post("/api/v1/admin/reject-match", {
+  const requestBody: Record<string, unknown> = {
     match_id: payload.matchId,
-    rejected_by: payload.rejectedBy ?? "frontend_admin",
-    reason: payload.reason,
-  });
+  };
+  if (payload.rejectedBy) {
+    requestBody.rejected_by = payload.rejectedBy;
+  }
+  if (payload.reason) {
+    requestBody.reason = payload.reason;
+  }
+
+  const response = await apiClient.post("/api/v1/admin/reject-match", requestBody);
   return response.data;
 }

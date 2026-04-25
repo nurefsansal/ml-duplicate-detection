@@ -14,13 +14,17 @@ from backend.services.mapping_service import (
     get_raw_record_rows_for_upload,
     get_raw_rows_for_upload,
     persist_upload_normalization_results,
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+
+from backend.schemas.requests import NormalizeRequest
+from backend.schemas.responses import NormalizeResponse
+from backend.services.normalization_persistence_service import (
+    persist_normalization_pipeline,
 )
 from backend.services.normalization_service import (
+    build_column_mapping_definitions,
+    canonicalize_upload_dataframe,
     to_dataframe,
-    json_rows,
-    canonical_name,
-    phonetic_name_key,
-    normalize_email_key,
 )
 
 router = APIRouter()
@@ -195,53 +199,69 @@ def normalize_from_upload(payload: NormalizeFromUploadRequest, db: Session = Dep
         "previewRows": preview_rows,
         "validationWarnings": validation_warnings,
     }
+@router.post("/normalize", response_model=NormalizeResponse)
+def normalize(payload: NormalizeRequest):
+    df_raw = to_dataframe(payload.records)
+    mapping_definitions = build_column_mapping_definitions(list(df_raw.columns))
+
+    return persist_normalization_pipeline(
+        original_df=df_raw.copy(),
+        processing_df=df_raw,
+        source_type="api",
+        source_name="normalize_api",
+        file_name="normalize_request.json",
+        created_by="api_normalize",
+        upload_id=payload.uploadId,
+        mapping_definitions=mapping_definitions,
+    )
 
 
 @router.post("/normalize-file", response_model=NormalizeResponse)
-async def normalize_file(file: UploadFile = File(...)):
+async def normalize_file(
+    file: UploadFile = File(...),
+    uploadId: int | None = Form(default=None),
+):
     filename = (file.filename or "").lower()
     content = await file.read()
 
     try:
         if filename.endswith(".xlsx") or filename.endswith(".xls"):
-            df_raw = pd.read_excel(io.BytesIO(content))
+            df_original = pd.read_excel(io.BytesIO(content))
+            source_type = "excel"
         elif filename.endswith(".csv"):
-            df_raw = pd.read_csv(io.StringIO(content.decode("utf-8")))
+            df_original = pd.read_csv(io.StringIO(content.decode("utf-8")))
+            source_type = "csv"
         else:
             raise HTTPException(
                 status_code=400,
-                detail="Sadece .xlsx, .xls ve .csv dosyaları destekleniyor",
+                detail="Sadece .xlsx, .xls ve .csv dosyalari destekleniyor",
             )
+    except HTTPException:
+        raise
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Dosya okunamadı: {exc}")
+        raise HTTPException(status_code=400, detail=f"Dosya okunamadi: {exc}") from exc
 
-    column_map = {
-        "ad soyad": "Ad Soyad",
-        "ad": "Ad Soyad",
-        "soyad": "Ad Soyad",
-        "name": "Ad Soyad",
-        "tc kimlik no": "TC",
-        "tc": "TC",
-        "tckn": "TC",
-        "telefon": "Telefon",
-        "phone": "Telefon",
-        "tel": "Telefon",
-        "email": "E-mail",
-        "e-posta": "E-mail",
-        "mail": "E-mail",
-        "sehir": "Şehir",
-        "şehir": "Şehir",
-        "city": "Şehir",
-        "il": "Şehir",
-    }
-
-    df_raw.columns = [column_map.get(str(col).lower().strip(), col) for col in df_raw.columns]
-
-    if "Ad Soyad" not in df_raw.columns:
-        raise HTTPException(status_code=400, detail="Eksik zorunlu kolon: Ad Soyad")
+    mapping_definitions = build_column_mapping_definitions(
+        [str(column) for column in df_original.columns]
+    )
 
     for col in ["TC", "Telefon", "E-mail", "Şehir"]:
         if col not in df_raw.columns:
             df_raw[col] = ""
 
     return _normalize_dataframe(df_raw)
+    try:
+        df_processing = canonicalize_upload_dataframe(df_original)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return persist_normalization_pipeline(
+        original_df=df_original,
+        processing_df=df_processing,
+        source_type=source_type,
+        source_name=file.filename or "uploaded_file",
+        file_name=file.filename or "uploaded_file",
+        created_by="api_normalize_file",
+        upload_id=uploadId,
+        mapping_definitions=mapping_definitions,
+    )
