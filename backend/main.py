@@ -5,8 +5,6 @@ from backend.api.routes.detect import router as detect_router
 from backend.api.routes.admin import router as admin_router
 from backend.api.routes.health import router as health_router
 from backend.api.routes.normalize import router as normalize_router
-from backend.api.routes.mappings import router as mappings_router
-from backend.api.routes.uploads import router as uploads_router
 
 app = FastAPI(title="Dedupli-AI API", version="0.1.0")
 
@@ -32,5 +30,3 @@ app.include_router(health_router)
 app.include_router(detect_router, prefix="/api/v1")
 app.include_router(admin_router, prefix="/api/v1")
 app.include_router(normalize_router, prefix="/api/v1")
-app.include_router(mappings_router, prefix="/api/v1")
-app.include_router(uploads_router, prefix="/api/v1")
