@@ -635,7 +635,7 @@ export default function YoneticiOnayi() {
                       ["Telefon", record.telefon],
                       ["E-posta", record.email],
                       ["Sehir", record.sehir],
-                      ["Adres", record.adres || "-"],
+                      ["Muhatap Kodu", record.muhatapNo || "-"],
                     ].map(([label, value]) => (
                       <div key={label} className="mb-2">
                         <p className="text-[10px] text-gray-400">{label}</p>

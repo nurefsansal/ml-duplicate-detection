@@ -400,48 +400,53 @@ def _build_address_field_comparison(
     left_record: dict[str, Any],
     right_record: dict[str, Any],
 ) -> dict[str, Any]:
-    raw_left_value = _pick_mapping_value(left_record, "Adres", "address")
-    raw_right_value = _pick_mapping_value(right_record, "Adres", "address")
+    raw_left_value = _safe_str(left_record.get("clean_muhatap_no")) or _pick_mapping_value(
+        left_record, "Muhatap No", "muhatap_no", "muhatap kodu", "customer_id"
+    )
+    raw_right_value = _safe_str(right_record.get("clean_muhatap_no")) or _pick_mapping_value(
+        right_record, "Muhatap No", "muhatap_no", "muhatap kodu", "customer_id"
+    )
 
-    if raw_left_value or raw_right_value:
-        similarity = _similarity_score(raw_left_value, raw_right_value)
-        score = _score_to_percent(similarity)
-        exact_match = bool(raw_left_value and raw_right_value and raw_left_value == raw_right_value)
-        if exact_match:
-            result = "exact_match"
-            notes = "Adres bilgisi birebir eslesti; destekleyici alan olarak gosteriliyor."
-            score = 100
-        elif similarity >= 0.85:
-            result = "strong_match"
-            notes = "Adres bilgisi yuksek benzerlik gosteriyor; tek basina merge sebebi degil."
-        elif similarity >= 0.65:
-            result = "partial_match"
-            notes = "Adres bilgisi kisimsel benzerlik gosteriyor; destekleyici alan olarak degerlendirilir."
-        else:
-            result = "mismatch"
-            notes = "Adres bilgisi farkli gorunuyor."
+    if not raw_left_value and not raw_right_value:
+        return {
+            "rawLeftValue": None,
+            "rawRightValue": None,
+            "normalizedLeftValue": None,
+            "normalizedRightValue": None,
+            "comparisonMethod": "not_available",
+            "comparisonResult": "not_available",
+            "score0To100": 0,
+            "exactMatch": False,
+            "notes": "Bu veri setinde muhatap kodu bulunmuyor.",
+        }
+    if not raw_left_value or not raw_right_value:
         return {
             "rawLeftValue": raw_left_value or None,
             "rawRightValue": raw_right_value or None,
             "normalizedLeftValue": raw_left_value or None,
             "normalizedRightValue": raw_right_value or None,
-            "comparisonMethod": "supporting_text_similarity",
-            "comparisonResult": result,
-            "score0To100": score,
-            "exactMatch": exact_match,
-            "notes": notes,
+            "comparisonMethod": "exact_match(clean_muhatap_no)",
+            "comparisonResult": "missing",
+            "score0To100": 0,
+            "exactMatch": False,
+            "notes": "Muhatap Kodu alanlarindan biri bos.",
         }
 
+    exact_match = raw_left_value == raw_right_value
     return {
-        "rawLeftValue": None,
-        "rawRightValue": None,
-        "normalizedLeftValue": None,
-        "normalizedRightValue": None,
-        "comparisonMethod": "not_available",
-        "comparisonResult": "not_available",
-        "score0To100": 0,
-        "exactMatch": False,
-        "notes": "Bu veri setinde adres alanı bulunmuyor; merge karari icin kullanilmadi.",
+        "rawLeftValue": raw_left_value,
+        "rawRightValue": raw_right_value,
+        "normalizedLeftValue": raw_left_value,
+        "normalizedRightValue": raw_right_value,
+        "comparisonMethod": "exact_match(clean_muhatap_no)",
+        "comparisonResult": "exact_match" if exact_match else "conflict",
+        "score0To100": 100 if exact_match else 0,
+        "exactMatch": exact_match,
+        "notes": (
+            "Muhatap Kodu birebir eslesti; guclu eslesme sinyali."
+            if exact_match
+            else "Muhatap Kodu catisiyor; farkli kisi olabilir."
+        ),
     }
 
 
@@ -572,7 +577,7 @@ def _build_field_comparisons(
             gamma_value=row.get("gamma_clean_city"),
             field_name="Sehir",
         ),
-        "address": _build_address_field_comparison(left_record, right_record),
+        "muhatapNo": _build_address_field_comparison(left_record, right_record),
     }
 
     email_comparison = field_comparisons["email"]
@@ -602,6 +607,8 @@ def _derive_features_from_field_comparisons(
     right_email_key = _safe_str(right_record.get("email_normalized_key"))
     left_city = _safe_str(left_record.get("clean_city"))
     right_city = _safe_str(right_record.get("clean_city"))
+    left_muhatap = _safe_str(left_record.get("clean_muhatap_no"))
+    right_muhatap = _safe_str(right_record.get("clean_muhatap_no"))
     left_name = _safe_str(left_record.get("clean_name"))
     right_name = _safe_str(right_record.get("clean_name"))
     left_first = _safe_str(left_record.get("clean_first_name"))
@@ -648,6 +655,12 @@ def _derive_features_from_field_comparisons(
     return {
         "tc_exact_match": int(field_comparisons["tc"]["exactMatch"]),
         "tc_conflict": int(bool(left_tc and right_tc and left_tc != right_tc)),
+        "muhatap_no_exact_match": int(
+            bool(left_muhatap and right_muhatap and left_muhatap == right_muhatap)
+        ),
+        "muhatap_no_conflict": int(
+            bool(left_muhatap and right_muhatap and left_muhatap != right_muhatap)
+        ),
         "phone_exact_match": phone_exact,
         "phone_last7_match": int(
             bool(left_phone and right_phone and left_phone[-7:] == right_phone[-7:])
@@ -689,6 +702,7 @@ def _derive_features_from_field_comparisons(
                 int(bool(left_email_key and right_email_key)),
                 int(bool(left_name and right_name)),
                 int(bool(left_city and right_city)),
+                int(bool(left_muhatap and right_muhatap)),
             ]
         ),
     }
@@ -699,6 +713,8 @@ def _build_risk_flags(features: dict[str, Any]) -> list[str]:
 
     if features.get("tc_conflict", 0):
         risk_flags.append("tc_conflict")
+    if features.get("muhatap_no_conflict", 0):
+        risk_flags.append("muhatap_no_conflict")
     if features.get("shared_contact_flag", 0):
         risk_flags.append("shared_contact")
     if features.get("shared_contact_name_conflict", 0):
@@ -736,6 +752,10 @@ def _build_rule_reasons(
         reasons.append("E-posta normalize edilmis anahtara gore eslesti.")
     if features.get("city_exact_match", 0):
         reasons.append("Sehir bilgisi eslesti.")
+    if features.get("muhatap_no_exact_match", 0):
+        reasons.append("Muhatap Kodu tam eslesti; guclu eslesme sinyali.")
+    if features.get("muhatap_no_conflict", 0):
+        reasons.append("Muhatap Kodu catisiyor; farkli kisi olabilir.")
     if features.get("shared_contact_name_conflict", 0):
         reasons.append("Ortak iletisim bilgisi var ancak isim sinyali catismali.")
     if features.get("household_risk_flag", 0):

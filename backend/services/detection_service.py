@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import logging
+import time
 from datetime import UTC, datetime
 from typing import Any
 
 import pandas as pd
 from fastapi import HTTPException
 from sqlalchemy.orm import joinedload, sessionmaker
+
+logger = logging.getLogger(__name__)
 
 from src.db import create_db_engine
 from backend.models.database import DetectionRun, MatchCandidate, NormalizationRun, NormalizedRecord
@@ -23,6 +27,7 @@ from backend.services.normalization_service import (
     ADDRESS_COLUMN,
     CITY_COLUMN,
     EMAIL_COLUMN,
+    MUHATAP_NO_COLUMN,
     NAME_COLUMN,
     PHONE_COLUMN,
     TC_COLUMN,
@@ -158,6 +163,11 @@ def _normalized_record_to_matching_row(record: NormalizedRecord) -> dict[str, An
             raw_payload,
             aliases=(ADDRESS_COLUMN, "adres", "address"),
         ),
+        MUHATAP_NO_COLUMN: _pick_mapping_value(
+            normalized_payload,
+            raw_payload,
+            aliases=(MUHATAP_NO_COLUMN, "muhatap_no", "muhatap kodu", "customer_id", "donor_id"),
+        ),
         "clean_name": clean_name,
         "clean_name_ordered": clean_name_ordered,
         "clean_first_name": clean_first_name,
@@ -169,6 +179,10 @@ def _normalized_record_to_matching_row(record: NormalizedRecord) -> dict[str, An
         "clean_email": clean_email,
         "clean_city": _safe_str(
             normalized_payload.get("clean_city") or record.clean_city
+        ),
+        "clean_muhatap_no": _safe_str(
+            normalized_payload.get("clean_muhatap_no")
+            or (record.clean_muhatap_no if hasattr(record, "clean_muhatap_no") else "")
         ),
         "name_phonetic_key": _safe_str(
             normalized_payload.get("name_phonetic_key")
@@ -234,9 +248,14 @@ def _resolve_detection_scope(
         if normalization_run is None:
             raise HTTPException(
                 status_code=404,
-                detail=f"Normalization run not found: {resolved_normalization_run_id}",
+                detail=f"Normalizasyon çalışması bulunamadı: ID={resolved_normalization_run_id}",
             )
         resolved_upload_id = int(normalization_run.upload_id)
+        logger.info(
+            "[detect] normalizationRunId=%s → upload_id=%s",
+            resolved_normalization_run_id,
+            resolved_upload_id,
+        )
     elif resolved_upload_id is not None:
         latest_run = (
             session.query(NormalizationRun)
@@ -246,28 +265,97 @@ def _resolve_detection_scope(
         )
         if latest_run is not None:
             resolved_normalization_run_id = int(latest_run.id)
+            logger.info(
+                "[detect] uploadId=%s → latest normalizationRunId=%s",
+                resolved_upload_id,
+                resolved_normalization_run_id,
+            )
+        else:
+            logger.info(
+                "[detect] uploadId=%s → no normalization run found, filtering by upload_id directly",
+                resolved_upload_id,
+            )
     else:
         raise HTTPException(
             status_code=400,
-            detail="Either uploadId, normalizationRunId or records must be provided",
+            detail="uploadId, normalizationRunId veya records alanlarından en az biri sağlanmalıdır.",
         )
 
+    # Explicitly scoped query — never scans full normalized_records table
     query = session.query(NormalizedRecord).options(joinedload(NormalizedRecord.raw_record))
     if resolved_normalization_run_id is not None:
         query = query.filter(
             NormalizedRecord.normalization_run_id == resolved_normalization_run_id
         )
+        logger.info(
+            "[detect] Scope: normalized_records WHERE normalization_run_id=%s",
+            resolved_normalization_run_id,
+        )
     else:
         query = query.filter(NormalizedRecord.upload_id == resolved_upload_id)
+        logger.info(
+            "[detect] Scope: normalized_records WHERE upload_id=%s",
+            resolved_upload_id,
+        )
 
     normalized_records = query.order_by(NormalizedRecord.id.asc()).all()
+    logger.info("[detect] Kapsam içi normalize kayıt sayısı: %d", len(normalized_records))
+
     if not normalized_records:
         raise HTTPException(
             status_code=404,
-            detail="No normalized records found for the requested scope",
+            detail=(
+                "Bu yükleme için normalize edilmiş kayıt bulunamadı. "
+                "Önce Veri Normalizasyon adımını tamamlayın."
+            ),
         )
 
     return int(resolved_upload_id), resolved_normalization_run_id, normalized_records
+
+
+def _compute_duplicate_groups(
+    duplicates: list[dict[str, Any]],
+    index_to_normalized_id: dict[int, int],
+) -> tuple[int, int]:
+    """Union-Find over the duplicate pairs to compute connected components.
+
+    Returns (duplicate_group_count, affected_record_count).
+
+    Example: pairs A-B, A-C, B-C → 1 group, 3 affected records.
+    """
+    parent: dict[int, int] = {}
+
+    def find(x: int) -> int:
+        parent.setdefault(x, x)
+        if parent[x] != x:
+            parent[x] = find(parent[x])
+        return parent[x]
+
+    def union(a: int, b: int) -> None:
+        parent.setdefault(a, a)
+        parent.setdefault(b, b)
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for payload in duplicates:
+        left_index = int(payload.get("left_index", -1))
+        right_index = int(payload.get("right_index", -1))
+        left_id = index_to_normalized_id.get(left_index)
+        right_id = index_to_normalized_id.get(right_index)
+        if left_id is not None and right_id is not None and left_id != right_id:
+            union(left_id, right_id)
+
+    if not parent:
+        return 0, 0
+
+    groups: dict[int, set[int]] = {}
+    for node in list(parent):
+        root = find(node)
+        groups.setdefault(root, set()).add(node)
+
+    real_groups = {root: members for root, members in groups.items() if len(members) >= 2}
+    return len(real_groups), sum(len(m) for m in real_groups.values())
 
 
 def _persist_match_candidates(
@@ -314,6 +402,15 @@ def run_detection_from_database(
 ) -> dict[str, Any]:
     resolved_session_id = _resolve_session_id(session_id)
     session = SessionLocal()
+    t_start = time.monotonic()
+
+    logger.info(
+        "[detect] Başlatıldı — uploadId=%s normalizationRunId=%s minRules=%s sessionId=%s",
+        upload_id,
+        normalization_run_id,
+        min_rules_to_match,
+        resolved_session_id,
+    )
 
     try:
         resolved_upload_id, resolved_normalization_run_id, normalized_records = (
@@ -324,6 +421,13 @@ def run_detection_from_database(
             )
         )
 
+        logger.info(
+            "[detect] Analiz edilecek kayıt sayısı: %d (upload_id=%s, normalization_run_id=%s)",
+            len(normalized_records),
+            resolved_upload_id,
+            resolved_normalization_run_id,
+        )
+
         detection_run = DetectionRun(
             upload_id=resolved_upload_id,
             normalization_run_id=resolved_normalization_run_id,
@@ -332,13 +436,26 @@ def run_detection_from_database(
         )
         session.add(detection_run)
         session.flush()
+        logger.info("[detect] DetectionRun oluşturuldu: id=%s", detection_run.id)
 
+        t_match = time.monotonic()
         df_clean, index_to_normalized_id = _build_matching_dataframe(normalized_records)
         duplicates, resolved_model_version = run_matching(
             df_clean=df_clean,
             min_rules_to_match=min_rules_to_match,
         )
+        t_match_elapsed = time.monotonic() - t_match
         detection_run.model_version = resolved_model_version
+
+        candidate_pairs = int(getattr(duplicates, "candidate_pairs", len(duplicates)))
+        duplicate_pairs = int(getattr(duplicates, "duplicate_pairs", len(duplicates)))
+        logger.info(
+            "[detect] Eşleştirme tamamlandı: %.2fs — model=%s — candidatePairs=%d duplicatePairs=%d",
+            t_match_elapsed,
+            resolved_model_version,
+            candidate_pairs,
+            duplicate_pairs,
+        )
 
         inserted = _persist_match_candidates(
             session=session,
@@ -346,20 +463,36 @@ def run_detection_from_database(
             duplicates=list(duplicates),
             index_to_normalized_id=index_to_normalized_id,
         )
+        logger.info("[detect] MatchCandidate kaydedildi: %d satır", inserted)
+
+        # Connected-components: collapse pairs into groups (A-B + A-C + B-C = 1 group, 3 records)
+        duplicate_group_count, affected_record_count = _compute_duplicate_groups(
+            list(duplicates), index_to_normalized_id
+        )
+        logger.info(
+            "[detect] Grup analizi: %d grup, %d etkilenen kayıt",
+            duplicate_group_count,
+            affected_record_count,
+        )
+
+        # Persist group metrics on the DetectionRun row
+        detection_run.duplicate_group_count = duplicate_group_count
+        detection_run.affected_record_count = affected_record_count
 
         session.commit()
+
+        t_total = time.monotonic() - t_start
+        logger.info("[detect] Toplam süre: %.2fs", t_total)
 
         return {
             "sessionId": resolved_session_id,
             "uploadId": resolved_upload_id,
             "normalizationRunId": resolved_normalization_run_id,
             "detectionRunId": int(detection_run.id),
-            "candidatePairs": int(
-                getattr(duplicates, "candidate_pairs", len(duplicates))
-            ),
-            "duplicatePairs": int(
-                getattr(duplicates, "duplicate_pairs", len(duplicates))
-            ),
+            "candidatePairs": candidate_pairs,
+            "duplicatePairs": duplicate_pairs,
+            "duplicateGroupCount": duplicate_group_count,
+            "affectedRecordCount": affected_record_count,
             "insertedRows": inserted,
             "totalRecords": len(normalized_records),
             "duplicates": list(duplicates),
@@ -369,7 +502,10 @@ def run_detection_from_database(
         raise
     except Exception as exc:
         session.rollback()
-        raise HTTPException(status_code=500, detail=f"Detection failed: {exc}") from exc
+        logger.exception("[detect] Hata: %s", exc)
+        raise HTTPException(
+            status_code=500, detail=f"Tespit sırasında hata oluştu: {exc}"
+        ) from exc
     finally:
         session.close()
 

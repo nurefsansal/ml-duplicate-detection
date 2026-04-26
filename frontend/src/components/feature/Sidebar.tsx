@@ -3,31 +3,12 @@ import { NavLink, useLocation } from "react-router-dom";
 
 const navItems = [
   { path: "/", icon: "ri-dashboard-3-line", label: "Dashboard" },
-  {
-    path: "/veri-yukleme",
-    icon: "ri-upload-cloud-2-line",
-    label: "Veri Yükleme",
-  },
-  {
-    path: "/veri-normalizasyon",
-    icon: "ri-filter-3-line",
-    label: "Veri Normalizasyon",
-  },
-  {
-    path: "/mukerrer-tespit",
-    icon: "ri-search-eye-line",
-    label: "Mükerrer Tespit",
-  },
-  {
-    path: "/mukerrer-kayitlar",
-    icon: "ri-file-copy-2-line",
-    label: "Mükerrer Kayıtlar",
-  },
-  {
-    path: "/yonetici-onayi",
-    icon: "ri-checkbox-circle-line",
-    label: "Yönetici Onayı",
-  },
+  { path: "/veri-yukleme", icon: "ri-upload-cloud-2-line", label: "Veri Yükleme" },
+  { path: "/veri-normalizasyon", icon: "ri-filter-3-line", label: "Veri Normalizasyon" },
+  { path: "/temiz-veri-seti", icon: "ri-table-line", label: "Temiz Veri Seti" },
+  { path: "/mukerrer-tespit", icon: "ri-search-eye-line", label: "Mükerrer Tespit" },
+  { path: "/mukerrer-kayitlar", icon: "ri-file-copy-2-line", label: "Mükerrer Kayıtlar" },
+  { path: "/yonetici-onayi", icon: "ri-checkbox-circle-line", label: "Yönetici Onayı" },
   { path: "/ayarlar", icon: "ri-settings-4-line", label: "Ayarlar" },
   { path: "/raporlar", icon: "ri-bar-chart-box-line", label: "Raporlar" },
 ];

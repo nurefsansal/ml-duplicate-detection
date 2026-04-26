@@ -2,7 +2,14 @@ import { useState, useEffect } from "react";
 import DashboardLayout from "../../components/feature/DashboardLayout";
 import Header from "../../components/feature/Header";
 
-const defaultWeights = { adSoyad: 30, tcKimlikNo: 35, telefon: 15, email: 10, adres: 10 };
+const defaultWeights = { adSoyad: 30, tcKimlikNo: 35, telefon: 15, email: 10, muhatapNo: 10 };
+const weightLabels: Record<string, string> = {
+  adSoyad: "Ad Soyad",
+  tcKimlikNo: "TC Kimlik No",
+  telefon: "Telefon",
+  email: "E-posta",
+  muhatapNo: "Muhatap Kodu",
+};
 const defaultThresholds = { otoOnayla: 97, bayrakla: 75, yoksay: 50 };
 
 type Settings = {
@@ -129,7 +136,7 @@ export default function Ayarlar() {
               {Object.entries(weights).map(([key, val]) => (
                 <div key={key}>
                   <div className="flex justify-between mb-1.5">
-                    <label className="text-xs font-medium text-gray-700 capitalize">{key}</label>
+                    <label className="text-xs font-medium text-gray-700">{weightLabels[key] ?? key}</label>
                     <span className="text-xs font-bold text-red-600">%{val}</span>
                   </div>
                   <input

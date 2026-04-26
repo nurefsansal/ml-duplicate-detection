@@ -1,8 +1,17 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import DashboardLayout from "../../components/feature/DashboardLayout";
 import Header from "../../components/feature/Header";
-import { normalizationRules, normalizationPreview, type NormalizationRule } from "../../mocks/records";
-import { normalizeFromFile, type NormalizeResponse } from "../../services/api";
+import { normalizationRules, type NormalizationRule } from "../../mocks/records";
+import {
+  listUploads,
+  getUploadColumns,
+  saveColumnMappings,
+  startNormalizationRun,
+  type UploadItem,
+  type NormalizationRunResponse,
+  type ColumnMappingItem,
+} from "../../services/api";
 
 const categoryColors: Record<string, string> = {
   metin: "bg-blue-50 text-blue-600",
@@ -12,99 +21,152 @@ const categoryColors: Record<string, string> = {
   adres: "bg-yellow-50 text-yellow-700",
 };
 
+const TARGET_FIELD_OPTIONS = [
+  { value: "", label: "— eşleştirme yok —" },
+  { value: "name", label: "Ad Soyad (name)" },
+  { value: "tc", label: "TC Kimlik No (tc)" },
+  { value: "phone", label: "Telefon (phone)" },
+  { value: "email", label: "E-posta (email)" },
+  { value: "city", label: "Şehir (city)" },
+  { value: "muhatap_no", label: "Muhatap Kodu (muhatap_no)" },
+  { value: "address", label: "Adres (address)" },
+  { value: "other", label: "Diğer (atla)" },
+];
+
 export default function VeriNormalizasyon() {
+  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+
   const [rules, setRules] = useState<NormalizationRule[]>(normalizationRules);
   const [running, setRunning] = useState(false);
   const [done, setDone] = useState(false);
   const [progress, setProgress] = useState(0);
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [uploading, setUploading] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
   const [statusMessage, setStatusMessage] = useState("");
-  const [normalizeResult, setNormalizeResult] = useState<NormalizeResponse | null>(null);
+  const [normalizeResult, setNormalizeResult] = useState<NormalizationRunResponse | null>(null);
   const [backendHealthy, setBackendHealthy] = useState<boolean | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Backend health check
+  const [uploads, setUploads] = useState<UploadItem[]>([]);
+  const [loadingUploads, setLoadingUploads] = useState(false);
+
+  const urlUploadId = searchParams.get("upload_id");
+  const [selectedUploadId, setSelectedUploadId] = useState<number | "">(() => {
+    if (urlUploadId) return Number(urlUploadId);
+    const stored = localStorage.getItem("lastUploadId");
+    return stored ? Number(stored) : "";
+  });
+
+  const [sourceColumns, setSourceColumns] = useState<string[]>([]);
+  const [suggestedMappings, setSuggestedMappings] = useState<Record<string, string>>({});
+  const [columnMappings, setColumnMappings] = useState<Record<string, string>>({});
+  const [loadingColumns, setLoadingColumns] = useState(false);
+
   useEffect(() => {
     let mounted = true;
     import("../../services/api")
       .then(({ healthCheck }) => healthCheck())
-      .then(() => {
-        if (mounted) setBackendHealthy(true);
-      })
-      .catch(() => {
-        if (mounted) setBackendHealthy(false);
-      });
-    return () => {
-      mounted = false;
-    };
+      .then(() => { if (mounted) setBackendHealthy(true); })
+      .catch(() => { if (mounted) setBackendHealthy(false); });
+    return () => { mounted = false; };
   }, []);
+
+  useEffect(() => {
+    setLoadingUploads(true);
+    listUploads(50)
+      .then((d) => setUploads(d.uploads ?? []))
+      .catch(() => {})
+      .finally(() => setLoadingUploads(false));
+  }, []);
+
+  useEffect(() => {
+    if (selectedUploadId === "") {
+      setSourceColumns([]);
+      setSuggestedMappings({});
+      setColumnMappings({});
+      return;
+    }
+    setLoadingColumns(true);
+    getUploadColumns(selectedUploadId)
+      .then((data) => {
+        setSourceColumns(data.source_columns ?? []);
+        setSuggestedMappings(data.suggested_mappings ?? {});
+        const initial: Record<string, string> = {};
+        for (const col of data.source_columns ?? []) {
+          initial[col] = data.suggested_mappings?.[col] ?? "";
+        }
+        setColumnMappings(initial);
+      })
+      .catch(() => {})
+      .finally(() => setLoadingColumns(false));
+  }, [selectedUploadId]);
 
   const toggleRule = (id: number) => {
     setRules((prev) => prev.map((r) => (r.id === id ? { ...r, active: !r.active } : r)));
   };
 
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      setSelectedFile(file);
-      setErrorMessage("");
-      setStatusMessage("");
-    }
-  };
-
   const handleRun = async () => {
-    if (!selectedFile) {
-      setErrorMessage("Lütfen önce bir dosya seçin");
+    if (selectedUploadId === "") {
+      setErrorMessage("Lütfen normalizasyon yapılacak bir yükleme seçin");
       return;
     }
 
     setRunning(true);
     setDone(false);
     setProgress(0);
-    setUploading(true);
     setErrorMessage("");
     setStatusMessage("");
     setNormalizeResult(null);
 
-    // Simulate progress
     const progressInterval = setInterval(() => {
       setProgress((p) => Math.min(p + Math.floor(Math.random() * 15) + 5, 90));
     }, 200);
 
+    const mappingItems: ColumnMappingItem[] = Object.entries(columnMappings)
+      .filter(([, target]) => target && target !== "other")
+      .map(([source_column, target_field]) => ({ source_column, target_field }));
+
     try {
-      const result = await normalizeFromFile(selectedFile);
+      if (mappingItems.length > 0) {
+        try {
+          await saveColumnMappings(selectedUploadId, mappingItems);
+        } catch {
+          clearInterval(progressInterval);
+          setRunning(false);
+          setErrorMessage("Kolon eşleştirmeleri kaydedilemedi. Lütfen tekrar deneyin.");
+          return;
+        }
+      }
+
+      const result = await startNormalizationRun(
+        selectedUploadId,
+        mappingItems.length > 0 ? mappingItems : undefined,
+      );
       setNormalizeResult(result);
       setProgress(100);
       setDone(true);
-      setStatusMessage(`Normalizasyon tamamlandı — ${result.totalRecords} kayıt işlendi`);
+
+      localStorage.setItem("lastUploadId", String(result.upload_id));
+      localStorage.setItem("lastNormalizationRunId", String(result.normalization_run_id));
+
+      setStatusMessage(
+        `Normalizasyon tamamlandı — ${result.total_processed} kayıt işlendi, ${result.success_count} geçerli (Run ID: ${result.normalization_run_id})`,
+      );
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Normalizasyon sırasında hata oluştu");
       setProgress(0);
     } finally {
       clearInterval(progressInterval);
       setRunning(false);
-      setUploading(false);
     }
   };
 
   const activeCount = rules.filter((r) => r.active).length;
 
-  // Use real preview data if available, otherwise fallback to mock
-  const previewData = normalizeResult?.normalizedRecords
-    ? normalizeResult.normalizedRecords.slice(0, 5).map((record) => ({
-        field: "Örnek",
-        ham: record["Ad Soyad"] as string || "-",
-        normalize: record["clean_name"] as string || "-",
-      }))
-    : normalizationPreview;
-
   return (
     <DashboardLayout>
       <Header
         title="Veri Normalizasyon"
-        subtitle="Excel/CSV dosyalarındaki kayıtları standart formata dönüştürün"
+        subtitle="Yüklenen ham kayıtları standart formata dönüştürün ve temiz veri seti oluşturun"
         actions={
           <div className="flex items-center gap-3">
             {backendHealthy === false && (
@@ -114,7 +176,7 @@ export default function VeriNormalizasyon() {
             )}
             <button
               onClick={handleRun}
-              disabled={running || !selectedFile}
+              disabled={running || selectedUploadId === ""}
               className="flex items-center gap-2 bg-red-600 text-white text-sm font-medium px-5 py-2 rounded-lg hover:bg-red-700 disabled:opacity-60 cursor-pointer transition-colors whitespace-nowrap"
             >
               <i className={`${running ? "ri-loader-4-line animate-spin" : "ri-play-line"}`}></i>
@@ -125,37 +187,97 @@ export default function VeriNormalizasyon() {
       />
 
       <div className="flex-1 overflow-y-auto p-6 space-y-5">
-        {/* File Upload */}
+        {/* Upload selector */}
         <div className="bg-white rounded-xl border border-gray-100 p-5">
-          <h3 className="text-sm font-semibold text-gray-900 mb-3">Dosya Seç</h3>
-          <div className="flex items-center gap-4">
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".xlsx,.xls,.csv"
-              onChange={handleFileSelect}
-              className="hidden"
-            />
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              className="flex items-center gap-2 px-4 py-2 border border-gray-200 rounded-lg text-sm text-gray-600 hover:bg-gray-50 cursor-pointer transition-colors"
+          <h3 className="text-sm font-semibold text-gray-900 mb-1">Yükleme Seç</h3>
+          <p className="text-xs text-gray-400 mb-3">
+            Normalizasyon yapılacak ham veri yüklemesini seçin. Önce Veri Yükleme adımını tamamlamış olmanız gerekir.
+          </p>
+
+          {loadingUploads ? (
+            <p className="text-sm text-gray-400">Yüklemeler yükleniyor…</p>
+          ) : uploads.length === 0 ? (
+            <div className="flex items-start gap-3 rounded-xl border border-amber-100 bg-amber-50 p-4">
+              <i className="ri-alert-line text-lg text-amber-500 mt-0.5 flex-shrink-0" />
+              <div>
+                <p className="text-sm text-amber-700 font-medium">Henüz yükleme yok</p>
+                <p className="text-xs text-amber-600 mt-0.5">
+                  Önce{" "}
+                  <button
+                    onClick={() => navigate("/veri-yukleme")}
+                    className="underline cursor-pointer"
+                  >
+                    Veri Yükleme
+                  </button>{" "}
+                  sayfasından dosya yükleyin.
+                </p>
+              </div>
+            </div>
+          ) : (
+            <select
+              value={selectedUploadId}
+              onChange={(e) => {
+                const v = e.target.value;
+                setSelectedUploadId(v === "" ? "" : Number(v));
+                setDone(false);
+                setNormalizeResult(null);
+                setErrorMessage("");
+                setStatusMessage("");
+              }}
+              className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm bg-white focus:outline-none focus:border-red-400 focus:ring-1 focus:ring-red-100"
             >
-              <i className="ri-folder-open-line"></i>
-              Dosya Seç
-            </button>
-            {selectedFile && (
-              <span className="text-sm text-gray-600">
-                Seçilen: <span className="font-medium">{selectedFile.name}</span>
-                <span className="text-gray-400 ml-1">
-                  ({(selectedFile.size / 1024).toFixed(1)} KB)
-                </span>
-              </span>
+              <option value="">— Yükleme seçin —</option>
+              {uploads.map((u) => (
+                <option key={u.id} value={u.id}>
+                  #{u.id} — {u.file_name} ({u.total_records} kayıt · {u.processing_stage ?? u.status})
+                </option>
+              ))}
+            </select>
+          )}
+        </div>
+
+        {/* Column mapping panel */}
+        {selectedUploadId !== "" && (
+          <div className="bg-white rounded-xl border border-gray-100 p-5">
+            <h3 className="text-sm font-semibold text-gray-900 mb-1">Kolon Eşleştirme</h3>
+            <p className="text-xs text-gray-400 mb-3">
+              Kaynak kolonlarınızı hedef sistem alanlarıyla eşleştirin. Öneriler otomatik doldurulmuştur.
+            </p>
+
+            {loadingColumns ? (
+              <p className="text-sm text-gray-400">Kolonlar yükleniyor…</p>
+            ) : sourceColumns.length === 0 ? (
+              <p className="text-sm text-gray-400">Bu upload için ham kayıt bulunamadı.</p>
+            ) : (
+              <div className="space-y-2 max-h-64 overflow-y-auto">
+                <div className="grid grid-cols-2 gap-2 text-xs font-medium text-gray-500 px-1 pb-1 border-b border-gray-100">
+                  <span>Kaynak Kolon</span>
+                  <span>Hedef Alan</span>
+                </div>
+                {sourceColumns.map((col) => (
+                  <div key={col} className="grid grid-cols-2 gap-2 items-center">
+                    <span className="text-xs text-gray-700 font-mono bg-gray-50 px-2 py-1.5 rounded truncate">
+                      {col}
+                    </span>
+                    <select
+                      value={columnMappings[col] ?? ""}
+                      onChange={(e) =>
+                        setColumnMappings((prev) => ({ ...prev, [col]: e.target.value }))
+                      }
+                      className="border border-gray-200 rounded-lg px-2 py-1.5 text-xs bg-white focus:outline-none focus:border-red-400"
+                    >
+                      {TARGET_FIELD_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                ))}
+              </div>
             )}
           </div>
-          <p className="text-xs text-gray-400 mt-2">
-            Desteklenen formatlar: .xlsx, .xls, .csv — Maks. 50 MB
-          </p>
-        </div>
+        )}
 
         {/* Error / Status Messages */}
         {errorMessage && (
@@ -192,164 +314,84 @@ export default function VeriNormalizasyon() {
           </div>
         )}
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-          {/* Rules List */}
-          <div className="bg-white rounded-xl border border-gray-100">
-            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-50">
-              <div>
-                <h3 className="text-sm font-semibold text-gray-900">Normalizasyon Kuralları</h3>
-                <p className="text-xs text-gray-400 mt-0.5">{activeCount} / {rules.length} kural aktif</p>
-              </div>
-              <div className="flex gap-2">
-                <button
-                  onClick={() => setRules((r) => r.map((x) => ({ ...x, active: true })))}
-                  className="text-xs text-red-600 font-medium hover:underline cursor-pointer whitespace-nowrap"
-                >
-                  Tümünü Aktif Et
-                </button>
-                <button
-                  onClick={() => setRules((r) => r.map((x) => ({ ...x, active: false })))}
-                  className="text-xs text-gray-500 font-medium hover:underline cursor-pointer whitespace-nowrap"
-                >
-                  Tümünü Kapat
-                </button>
-              </div>
-            </div>
-            <div className="divide-y divide-gray-50 max-h-[400px] overflow-y-auto">
-              {rules.map((rule) => (
-                <div key={rule.id} className="flex items-start gap-3 px-5 py-4 hover:bg-gray-50/40 transition-colors">
-                  <button
-                    onClick={() => toggleRule(rule.id)}
-                    className={`relative w-11 min-w-[44px] h-5 rounded-full overflow-hidden flex items-center transition-colors duration-200 flex-shrink-0 mt-0.5 cursor-pointer ${rule.active ? "bg-red-500" : "bg-gray-200"}`}
-                  >
-                    <span className={`absolute left-0.5 top-0.5 w-4 h-4 bg-white rounded-full shadow-sm transition-transform duration-200 ${rule.active ? "translate-x-6" : "translate-x-0"}`} />
-                  </button>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <p className="text-sm font-medium text-gray-800">{rule.name}</p>
-                      <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${categoryColors[rule.category] || "bg-gray-100 text-gray-500"}`}>
-                        {rule.category}
-                      </span>
-                    </div>
-                    <p className="text-xs text-gray-400 mt-0.5">{rule.description}</p>
-                    <p className="text-[10px] text-gray-300 mt-1">Alan: {rule.field}</p>
-                  </div>
+        {/* Post-normalization actions */}
+        {done && normalizeResult && (
+          <div className="bg-white rounded-xl border border-green-100 p-5">
+            <h3 className="text-sm font-semibold text-gray-900 mb-3">Sonraki Adım</h3>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
+              {[
+                { label: "İşlenen Kayıt", value: String(normalizeResult.total_processed) },
+                { label: "Başarılı", value: String(normalizeResult.success_count) },
+                { label: "Hatalı", value: String(normalizeResult.failed_count) },
+                { label: "Run ID", value: String(normalizeResult.normalization_run_id) },
+              ].map((s) => (
+                <div key={s.label} className="bg-gray-50 rounded-lg p-3 text-center">
+                  <p className="text-base font-bold text-gray-900">{s.value}</p>
+                  <p className="text-[10px] text-gray-400 mt-0.5">{s.label}</p>
                 </div>
               ))}
             </div>
-          </div>
-
-          {/* Preview Table */}
-          <div className="bg-white rounded-xl border border-gray-100">
-            <div className="px-5 py-4 border-b border-gray-50">
-              <h3 className="text-sm font-semibold text-gray-900">
-                {normalizeResult ? "Sonuç Önizleme" : "Ham vs Normalize Önizleme"}
-              </h3>
-              <p className="text-xs text-gray-400 mt-0.5">
-                {normalizeResult
-                  ? `${normalizeResult.normalizedRecords.length} normalize edilmiş kayıt`
-                  : "Örnek kayıt üzerindeki dönüşüm sonuçları"}
-              </p>
-            </div>
-            <div className="overflow-x-auto">
-              <table className="w-full text-xs">
-                <thead>
-                  <tr className="bg-gray-50/70">
-                    <th className="text-left text-gray-400 font-medium px-5 py-3 w-24">Alan</th>
-                    <th className="text-left text-gray-400 font-medium px-4 py-3">
-                      {normalizeResult ? "Normalize Ad Soyad" : "Ham Veri"}
-                    </th>
-                    <th className="text-left text-gray-400 font-medium px-4 py-3">
-                      {normalizeResult ? "Clean Name" : "Normalize"}
-                    </th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-50">
-                  {normalizeResult
-                    ? normalizeResult.normalizedRecords.slice(0, 8).map((record, i) => (
-                        <tr key={i} className="hover:bg-gray-50/50 transition-colors">
-                          <td className="px-5 py-3 font-medium text-gray-600 whitespace-nowrap">
-                            #{i + 1}
-                          </td>
-                          <td className="px-4 py-3 text-gray-600 max-w-[140px]">
-                            <span className="bg-gray-50 text-gray-700 px-1.5 py-0.5 rounded font-mono text-[11px] break-all">
-                              {(record["Ad Soyad"] as string) || "-"}
-                            </span>
-                          </td>
-                          <td className="px-4 py-3 max-w-[140px]">
-                            <span className="bg-green-50 text-green-700 px-1.5 py-0.5 rounded font-mono text-[11px] break-all">
-                              {(record["clean_name"] as string) || "-"}
-                            </span>
-                          </td>
-                        </tr>
-                      ))
-                    : previewData.map((row, i) => (
-                        <tr key={i} className="hover:bg-gray-50/50 transition-colors">
-                          <td className="px-5 py-3 font-medium text-gray-600 whitespace-nowrap">{row.field}</td>
-                          <td className="px-4 py-3 text-gray-400 max-w-[140px]">
-                            <span className="bg-red-50 text-red-600 px-1.5 py-0.5 rounded font-mono text-[11px] break-all">{row.ham}</span>
-                          </td>
-                          <td className="px-4 py-3 max-w-[140px]">
-                            <span className="bg-green-50 text-green-700 px-1.5 py-0.5 rounded font-mono text-[11px] break-all">{row.normalize}</span>
-                          </td>
-                        </tr>
-                      ))}
-                </tbody>
-              </table>
-            </div>
-            <div className="px-5 py-4 border-t border-gray-50 bg-gray-50/30">
-              <div className="flex items-center gap-4 text-xs text-gray-500">
-                <div className="flex items-center gap-1.5">
-                  <span className="w-3 h-3 rounded bg-red-100 inline-block"></span>
-                  Ham veri
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <span className="w-3 h-3 rounded bg-green-100 inline-block"></span>
-                  Normalize veri
-                </div>
-              </div>
+            <div className="flex flex-wrap gap-3">
+              <button
+                onClick={() => navigate(`/temiz-veri-seti?upload_id=${normalizeResult.upload_id}`)}
+                className="flex items-center gap-2 bg-red-600 text-white text-sm font-medium px-5 py-2.5 rounded-lg hover:bg-red-700 cursor-pointer transition-colors whitespace-nowrap"
+              >
+                <i className="ri-table-line"></i> Temiz Veriyi Görüntüle
+              </button>
+              <button
+                onClick={() => navigate("/mukerrer-tespit")}
+                className="flex items-center gap-2 border border-gray-200 text-gray-700 text-sm font-medium px-5 py-2.5 rounded-lg hover:bg-gray-50 cursor-pointer transition-colors whitespace-nowrap"
+              >
+                <i className="ri-radar-line"></i> Mükerrer Tespite Git
+              </button>
             </div>
           </div>
-        </div>
+        )}
 
-        {/* Stats */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-          {[
-            {
-              label: "İşlenecek Kayıt",
-              value: normalizeResult ? String(normalizeResult.totalRecords) : "124.836",
-              icon: "ri-database-2-line",
-              color: "text-gray-700",
-            },
-            {
-              label: "Aktif Kural",
-              value: String(activeCount),
-              icon: "ri-settings-4-line",
-              color: "text-red-600",
-            },
-            {
-              label: "Tahmini Süre",
-              value: normalizeResult ? "~1 dk" : "~4 dk",
-              icon: "ri-time-line",
-              color: "text-orange-500",
-            },
-            {
-              label: "Son Çalışma",
-              value: done ? "Şimdi" : "2 sa önce",
-              icon: "ri-history-line",
-              color: "text-green-600",
-            },
-          ].map((stat) => (
-            <div key={stat.label} className="bg-white rounded-xl p-4 border border-gray-100 flex items-center gap-3">
-              <div className="w-9 h-9 rounded-lg bg-gray-50 flex items-center justify-center flex-shrink-0">
-                <i className={`${stat.icon} ${stat.color} text-lg`}></i>
-              </div>
-              <div>
-                <p className="text-lg font-bold text-gray-900">{stat.value}</p>
-                <p className="text-[11px] text-gray-400">{stat.label}</p>
-              </div>
+        {/* Rules List */}
+        <div className="bg-white rounded-xl border border-gray-100">
+          <div className="flex items-center justify-between px-5 py-4 border-b border-gray-50">
+            <div>
+              <h3 className="text-sm font-semibold text-gray-900">Normalizasyon Kuralları</h3>
+              <p className="text-xs text-gray-400 mt-0.5">{activeCount} / {rules.length} kural aktif</p>
             </div>
-          ))}
+            <div className="flex gap-2">
+              <button
+                onClick={() => setRules((r) => r.map((x) => ({ ...x, active: true })))}
+                className="text-xs text-red-600 font-medium hover:underline cursor-pointer whitespace-nowrap"
+              >
+                Tümünü Aktif Et
+              </button>
+              <button
+                onClick={() => setRules((r) => r.map((x) => ({ ...x, active: false })))}
+                className="text-xs text-gray-500 font-medium hover:underline cursor-pointer whitespace-nowrap"
+              >
+                Tümünü Kapat
+              </button>
+            </div>
+          </div>
+          <div className="divide-y divide-gray-50 max-h-[360px] overflow-y-auto">
+            {rules.map((rule) => (
+              <div key={rule.id} className="flex items-start gap-3 px-5 py-4 hover:bg-gray-50/40 transition-colors">
+                <button
+                  onClick={() => toggleRule(rule.id)}
+                  className={`relative w-11 min-w-[44px] h-5 rounded-full overflow-hidden flex items-center transition-colors duration-200 flex-shrink-0 mt-0.5 cursor-pointer ${rule.active ? "bg-red-500" : "bg-gray-200"}`}
+                >
+                  <span className={`absolute left-0.5 top-0.5 w-4 h-4 bg-white rounded-full shadow-sm transition-transform duration-200 ${rule.active ? "translate-x-6" : "translate-x-0"}`} />
+                </button>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <p className="text-sm font-medium text-gray-800">{rule.name}</p>
+                    <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${categoryColors[rule.category] || "bg-gray-100 text-gray-500"}`}>
+                      {rule.category}
+                    </span>
+                  </div>
+                  <p className="text-xs text-gray-400 mt-0.5">{rule.description}</p>
+                  <p className="text-[10px] text-gray-300 mt-1">Alan: {rule.field}</p>
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
       </div>
     </DashboardLayout>

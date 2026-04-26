@@ -13,7 +13,7 @@ export type FieldComparisonKey =
   | "phone"
   | "email"
   | "city"
-  | "address";
+  | "muhatapNo";
 
 export type PairWorkflowState = "bekleyen" | "onaylandi" | "reddedildi";
 
@@ -24,7 +24,6 @@ export type UiPairRecord = {
   email: string;
   sehir: string;
   muhatapNo: string;
-  adres?: string;
 };
 
 export type UiDuplicatePair = {
@@ -60,7 +59,7 @@ export const FIELD_ORDER: FieldComparisonKey[] = [
   "phone",
   "email",
   "city",
-  "address",
+  "muhatapNo",
 ];
 
 export const FIELD_LABELS: Record<FieldComparisonKey, string> = {
@@ -71,7 +70,7 @@ export const FIELD_LABELS: Record<FieldComparisonKey, string> = {
   phone: "Telefon",
   email: "E-posta",
   city: "Sehir",
-  address: "Adres",
+  muhatapNo: "Muhatap Kodu",
 };
 
 function toPercent(value: unknown, fallback = 0): number {
@@ -169,10 +168,9 @@ function buildRecordFromDetectPair(
     sehir:
       fieldValue(comparisons.city, side) ||
       pickRecordValue(record, ["Sehir", "city", "clean_city"]),
-    adres:
-      fieldValue(comparisons.address, side) ||
-      pickRecordValue(record, ["Adres", "address"]),
-    muhatapNo: String(side === "left" ? pair.left_index : pair.right_index),
+    muhatapNo:
+      fieldValue(comparisons.muhatapNo, side) ||
+      pickRecordValue(record, ["Muhatap No", "muhatap_no", "muhatap kodu", "clean_muhatap_no", "customer_id"]),
   };
 }
 
@@ -203,8 +201,9 @@ function buildRecordFromPendingMatch(
       fieldValue(comparisons.city, side) ||
       (side === "left" ? match.donor1_city : match.donor2_city) ||
       "",
-    adres: fieldValue(comparisons.address, side) || "",
-    muhatapNo: String(side === "left" ? match.donor1_id : match.donor2_id),
+    muhatapNo:
+      fieldValue(comparisons.muhatapNo, side) ||
+      "",
   };
 }
 
@@ -395,12 +394,12 @@ export function mapMockGroupToView(group: DuplicateGroup): UiDuplicatePair {
       "mock_exact_match",
       "Mock veri uzerinden olusturulan sehir karsilastirmasi.",
     ),
-    address: syntheticComparison(
-      leftRecord.adres || "",
-      rightRecord.adres || "",
+    muhatapNo: syntheticComparison(
+      leftRecord.muhatapNo || "",
+      rightRecord.muhatapNo || "",
       0,
       "mock_supporting",
-      "Mock veri uzerinden olusturulan destekleyici adres alani.",
+      "Mock veri uzerinden olusturulan muhatap kodu karsilastirmasi.",
     ),
   };
 
@@ -415,7 +414,6 @@ export function mapMockGroupToView(group: DuplicateGroup): UiDuplicatePair {
         email: leftRecord.email,
         sehir: leftRecord.sehir,
         muhatapNo: leftRecord.muhatapNo,
-        adres: leftRecord.adres,
       },
       {
         adSoyad: rightRecord.adSoyad,
@@ -424,7 +422,6 @@ export function mapMockGroupToView(group: DuplicateGroup): UiDuplicatePair {
         email: rightRecord.email,
         sehir: rightRecord.sehir,
         muhatapNo: rightRecord.muhatapNo,
-        adres: rightRecord.adres,
       },
     ],
     score: toPercent(group.score, 0),

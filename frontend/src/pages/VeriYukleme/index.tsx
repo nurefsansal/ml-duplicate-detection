@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { useNavigate } from "react-router-dom";
 import DashboardLayout from "../../components/feature/DashboardLayout";
 import Header from "../../components/feature/Header";
 import DropZone from "./components/DropZone";
@@ -6,68 +7,38 @@ import SourceSelector from "./components/SourceSelector";
 import UploadProgress from "./components/UploadProgress";
 import UploadHistoryTable from "./components/UploadHistoryTable";
 import {
-  type DetectResponse,
-  type NormalizedRecord,
-  detectDuplicates,
-  detectDuplicatesFromFile,
-  detectDuplicatesFromUrl,
+  type UploadFileResponse,
+  uploadFileOnly,
   healthCheck,
 } from "../../services/api";
 
 type SourceType = "excel" | "csv" | "api" | "manuel";
 
 export default function VeriYukleme() {
+  const navigate = useNavigate();
   const [source, setSource] = useState<SourceType>("excel");
   const [uploading, setUploading] = useState(false);
   const [progress, setProgress] = useState(0);
   const [fileName, setFileName] = useState("");
-  const [apiUrl, setApiUrl] = useState("");
-  const [apiKey, setApiKey] = useState("");
-  const [apiMethod, setApiMethod] = useState<"GET" | "POST">("GET");
-  const [saveToDb, setSaveToDb] = useState(true);
-  const [loadingAction, setLoadingAction] = useState(false);
   const [backendHealthy, setBackendHealthy] = useState<boolean | null>(null);
   const [statusMessage, setStatusMessage] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
-  const [result, setResult] = useState<DetectResponse | null>(null);
-  const [manualRecords, setManualRecords] = useState<NormalizedRecord[]>([]);
-  const [manuelForm, setManuelForm] = useState({
-    adSoyad: "",
-    tcKimlikNo: "",
-    telefon: "",
-    email: "",
-    sehir: "",
-  });
+  const [result, setResult] = useState<UploadFileResponse | null>(null);
 
   useEffect(() => {
     let mounted = true;
     healthCheck()
-      .then(() => {
-        if (mounted) {
-          setBackendHealthy(true);
-        }
-      })
-      .catch(() => {
-        if (mounted) {
-          setBackendHealthy(false);
-        }
-      });
-    return () => {
-      mounted = false;
-    };
+      .then(() => { if (mounted) setBackendHealthy(true); })
+      .catch(() => { if (mounted) setBackendHealthy(false); });
+    return () => { mounted = false; };
   }, []);
 
   const getError = (error: unknown) => {
     if (typeof error === "object" && error && "response" in error) {
-      const response = (error as { response?: { data?: { detail?: string } } })
-        .response;
-      if (response?.data?.detail) {
-        return response.data.detail;
-      }
+      const resp = (error as { response?: { data?: { detail?: string } } }).response;
+      if (resp?.data?.detail) return resp.data.detail;
     }
-    if (error instanceof Error) {
-      return error.message;
-    }
+    if (error instanceof Error) return error.message;
     return "Bilinmeyen bir hata oluştu";
   };
 
@@ -75,24 +46,24 @@ export default function VeriYukleme() {
     setFileName(file.name);
     setProgress(0);
     setUploading(true);
-    setLoadingAction(true);
     setErrorMessage("");
     setStatusMessage("");
+    setResult(null);
 
     const timer = setInterval(() => {
       setProgress((p) => Math.min(p + 8, 92));
     }, 180);
 
     try {
-      const response = await detectDuplicatesFromFile(file, { saveToDb });
+      const response = await uploadFileOnly(file);
       setResult(response);
-      if (typeof response.uploadId === "number") {
-        localStorage.setItem("lastDetectUploadId", String(response.uploadId));
+
+      if (typeof response.upload_id === "number") {
+        localStorage.setItem("lastUploadId", String(response.upload_id));
       }
+
       setStatusMessage(
-        `Analiz tamamlandı. Aday: ${response.candidatePairs}, Mükerrer: ${response.duplicatePairs}, DB'ye yazılan: ${response.insertedRows}${
-          typeof response.uploadId === "number" ? `, Upload ID: ${response.uploadId}` : ""
-        }`,
+        `Yükleme tamamlandı — ${response.total_records} ham kayıt kaydedildi (Upload ID: ${response.upload_id})`,
       );
       setProgress(100);
     } catch (error) {
@@ -100,7 +71,6 @@ export default function VeriYukleme() {
       setProgress(0);
     } finally {
       clearInterval(timer);
-      setLoadingAction(false);
       setTimeout(() => setUploading(false), 600);
     }
   };
@@ -111,157 +81,73 @@ export default function VeriYukleme() {
     setFileName("");
   };
 
-  const handleApiFetch = async () => {
-    if (!apiUrl.trim()) {
-      setErrorMessage("Lütfen API endpoint URL girin");
-      return;
-    }
-
-    setLoadingAction(true);
-    setErrorMessage("");
-    setStatusMessage("");
-    try {
-      const response = await detectDuplicatesFromUrl({
-        url: apiUrl.trim(),
-        method: apiMethod,
-        apiKey: apiKey.trim() || undefined,
-        saveToDb,
-      });
-      setResult(response);
-      if (typeof response.uploadId === "number") {
-        localStorage.setItem("lastDetectUploadId", String(response.uploadId));
-      }
-      setStatusMessage(
-        `API verisi işlendi. Mükerrer çift: ${response.duplicatePairs}. DB'ye yazılan: ${response.insertedRows}${
-          typeof response.uploadId === "number" ? `, Upload ID: ${response.uploadId}` : ""
-        }`,
-      );
-    } catch (error) {
-      setErrorMessage(getError(error));
-    } finally {
-      setLoadingAction(false);
-    }
-  };
-
-  const handleManualSave = () => {
-    if (!manuelForm.adSoyad.trim()) {
-      setErrorMessage("Manuel kayıt için en az Ad Soyad alanı zorunlu");
-      return;
-    }
-
-    setManualRecords((prev) => [...prev, { ...manuelForm }]);
-    setManuelForm({
-      adSoyad: "",
-      tcKimlikNo: "",
-      telefon: "",
-      email: "",
-      sehir: "",
-    });
-    setErrorMessage("");
-    setStatusMessage("Manuel kayıt listeye eklendi");
-  };
-
-  const handleManualDetect = async () => {
-    if (manualRecords.length === 0) {
-      setErrorMessage("Önce en az bir manuel kayıt ekleyin");
-      return;
-    }
-
-    setLoadingAction(true);
-    setErrorMessage("");
-    setStatusMessage("");
-    try {
-      const response = await detectDuplicates(manualRecords, { saveToDb });
-      setResult(response);
-      if (typeof response.uploadId === "number") {
-        localStorage.setItem("lastDetectUploadId", String(response.uploadId));
-      }
-      setStatusMessage(
-        `Manuel kayıt analizi tamamlandı. Mükerrer çift: ${response.duplicatePairs}. DB'ye yazılan: ${response.insertedRows}${
-          typeof response.uploadId === "number" ? `, Upload ID: ${response.uploadId}` : ""
-        }`,
-      );
-    } catch (error) {
-      setErrorMessage(getError(error));
-    } finally {
-      setLoadingAction(false);
-    }
-  };
-
-  const previewRows = result?.duplicates ?? [];
-  const previewKeys =
-    previewRows.length > 0 ? Object.keys(previewRows[0]).slice(0, 8) : [];
-
   return (
     <DashboardLayout>
       <Header
         title="Veri Yükleme"
-        subtitle="Excel, CSV, API veya manuel giriş ile kayıt yükleyin"
+        subtitle="Excel veya CSV dosyası yükleyin — ham kayıtlar raw_records tablosuna kaydedilir"
         actions={
-          <div className="flex items-center gap-3 text-xs text-gray-500 bg-gray-50 border border-gray-100 rounded-lg px-3 py-2">
+          <div className="flex items-center gap-2 text-xs text-gray-500 bg-gray-50 border border-gray-100 rounded-lg px-3 py-2">
             <i className="ri-information-line text-sm"></i>
             <span>Maks. 50 MB &bull; .xlsx .csv destekleniyor</span>
-            <label className="flex items-center gap-1.5 text-gray-700">
-              <input
-                type="checkbox"
-                checked={saveToDb}
-                onChange={(e) => setSaveToDb(e.target.checked)}
-                className="accent-red-600"
-              />
-              Sonuçları PostgreSQL'e kaydet
-            </label>
           </div>
         }
       />
+
       <div className="flex-1 overflow-y-auto p-6 space-y-5">
+        {/* Stat cards */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
           <div className="bg-white rounded-xl p-4 border border-gray-100">
             <p className="text-xs text-gray-400">Backend Durumu</p>
-            <p
-              className={`text-sm font-semibold mt-1 ${backendHealthy ? "text-green-600" : "text-red-600"}`}
-            >
-              {backendHealthy === null
-                ? "Kontrol ediliyor"
-                : backendHealthy
-                  ? "Bağlantı aktif"
-                  : "Erişilemiyor"}
+            <p className={`text-sm font-semibold mt-1 ${backendHealthy ? "text-green-600" : backendHealthy === false ? "text-red-600" : "text-gray-400"}`}>
+              {backendHealthy === null ? "Kontrol ediliyor…" : backendHealthy ? "Bağlantı aktif" : "Erişilemiyor"}
             </p>
           </div>
           <div className="bg-white rounded-xl p-4 border border-gray-100">
-            <p className="text-xs text-gray-400">Toplam Aday Çift</p>
+            <p className="text-xs text-gray-400">Yüklenen Ham Kayıt</p>
             <p className="text-lg font-bold text-gray-900 mt-1">
-              {result?.candidatePairs ?? 0}
+              {result ? result.total_records : 0}
             </p>
           </div>
           <div className="bg-white rounded-xl p-4 border border-gray-100">
-            <p className="text-xs text-gray-400">Bulunan Mükerrer</p>
-            <p className="text-lg font-bold text-red-600 mt-1">
-              {result?.duplicatePairs ?? 0}
+            <p className="text-xs text-gray-400">Upload ID</p>
+            <p className="text-lg font-bold text-gray-900 mt-1">
+              {result ? `#${result.upload_id}` : "—"}
             </p>
           </div>
         </div>
 
-        {statusMessage ? (
+        {/* Info banner: this page does NOT run normalization */}
+        <div className="flex items-start gap-3 rounded-xl border border-blue-100 bg-blue-50 p-4">
+          <i className="ri-information-line text-lg text-blue-500 mt-0.5 flex-shrink-0" />
+          <div>
+            <p className="text-sm font-medium text-blue-800">Bu sayfa sadece ham veri yükler</p>
+            <p className="text-xs text-blue-600 mt-0.5">
+              Dosyanız <strong>uploads</strong> ve <strong>raw_records</strong> tablolarına kaydedilir.
+              Normalizasyon ve duplicate detection bir sonraki adımlarda yapılır.
+            </p>
+          </div>
+        </div>
+
+        {statusMessage && (
           <div className="rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-700">
             {statusMessage}
           </div>
-        ) : null}
-        {errorMessage ? (
+        )}
+        {errorMessage && (
           <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
             {errorMessage}
           </div>
-        ) : null}
+        )}
 
+        {/* Source selector */}
         <div className="bg-white rounded-xl p-5 border border-gray-100">
-          <h3 className="text-sm font-semibold text-gray-900 mb-1">
-            Veri Kaynağı Seçin
-          </h3>
-          <p className="text-xs text-gray-400 mb-4">
-            Hangi kaynaktan veri yüklemek istediğinizi seçin
-          </p>
+          <h3 className="text-sm font-semibold text-gray-900 mb-1">Veri Kaynağı Seçin</h3>
+          <p className="text-xs text-gray-400 mb-4">Hangi kaynaktan veri yüklemek istediğinizi seçin</p>
           <SourceSelector selected={source} onChange={setSource} />
         </div>
 
+        {/* File upload */}
         {(source === "excel" || source === "csv") && (
           <div className="bg-white rounded-xl p-5 border border-gray-100">
             <h3 className="text-sm font-semibold text-gray-900 mb-4">
@@ -279,163 +165,88 @@ export default function VeriYukleme() {
           </div>
         )}
 
+        {/* API source: info banner */}
         {source === "api" && (
           <div className="bg-white rounded-xl p-5 border border-gray-100">
-            <h3 className="text-sm font-semibold text-gray-900 mb-4">
-              API Bağlantısı
-            </h3>
-            <div className="space-y-4">
-              <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1.5">
-                  API Endpoint URL
-                </label>
-                <input
-                  type="text"
-                  value={apiUrl}
-                  onChange={(e) => setApiUrl(e.target.value)}
-                  placeholder="https://api.example.com/records"
-                  className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-red-400 focus:ring-1 focus:ring-red-100 transition-all"
-                />
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-medium text-gray-700 mb-1.5">
-                    API Key (Opsiyonel)
-                  </label>
-                  <input
-                    type="password"
-                    value={apiKey}
-                    onChange={(e) => setApiKey(e.target.value)}
-                    placeholder="Bearer token veya API key"
-                    className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-red-400"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-gray-700 mb-1.5">
-                    Metod
-                  </label>
-                  <select
-                    value={apiMethod}
-                    onChange={(e) =>
-                      setApiMethod(e.target.value as "GET" | "POST")
-                    }
-                    className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-red-400 bg-white"
-                  >
-                    <option>GET</option>
-                    <option>POST</option>
-                  </select>
-                </div>
-              </div>
-              <button
-                onClick={handleApiFetch}
-                disabled={loadingAction}
-                className="flex items-center gap-2 bg-red-600 text-white text-sm font-medium px-5 py-2.5 rounded-lg hover:bg-red-700 cursor-pointer transition-colors whitespace-nowrap disabled:opacity-60"
-              >
-                <i className="ri-plug-line"></i> Bağlan ve Veri Çek
-              </button>
+            <h3 className="text-sm font-semibold text-gray-900 mb-3">API Kaynağı</h3>
+            <div className="flex items-start gap-3 rounded-xl border border-blue-100 bg-blue-50 p-4">
+              <i className="ri-information-line text-lg text-blue-500 mt-0.5 flex-shrink-0" />
+              <p className="text-sm text-blue-700">
+                API kaynağından veri çekme özelliği şu an devre dışı. Lütfen Excel veya CSV
+                seçeneğini kullanarak verilerinizi dışa aktarın ve yükleyin.
+              </p>
             </div>
           </div>
         )}
 
+        {/* Manuel source: info banner */}
         {source === "manuel" && (
           <div className="bg-white rounded-xl p-5 border border-gray-100">
-            <h3 className="text-sm font-semibold text-gray-900 mb-4">
-              Manuel Kayıt Girişi
-            </h3>
-            <div className="grid grid-cols-2 gap-4">
-              {Object.keys(manuelForm).map((key) => (
-                <div key={key}>
-                  <label className="block text-xs font-medium text-gray-700 mb-1.5 capitalize">
-                    {key}
-                  </label>
-                  <input
-                    type="text"
-                    value={manuelForm[key as keyof typeof manuelForm]}
-                    onChange={(e) =>
-                      setManuelForm((f) => ({ ...f, [key]: e.target.value }))
-                    }
-                    className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-red-400 focus:ring-1 focus:ring-red-100 transition-all"
-                  />
+            <h3 className="text-sm font-semibold text-gray-900 mb-3">Manuel Giriş</h3>
+            <div className="flex items-start gap-3 rounded-xl border border-amber-100 bg-amber-50 p-4">
+              <i className="ri-information-line text-lg text-amber-500 mt-0.5 flex-shrink-0" />
+              <p className="text-sm text-amber-700">
+                Manuel kayıt girişi şu an bu sayfada desteklenmiyor. Lütfen verilerinizi
+                Excel veya CSV dosyası olarak hazırlayıp yükleyin.
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* Success actions */}
+        {result && (
+          <div className="bg-white rounded-xl p-5 border border-green-100">
+            <h3 className="text-sm font-semibold text-gray-900 mb-3">Yükleme Başarılı — Sonraki Adım</h3>
+
+            {/* Source columns */}
+            {result.source_columns.length > 0 && (
+              <div className="mb-4 p-3 bg-gray-50 rounded-lg">
+                <p className="text-xs font-medium text-gray-600 mb-2">
+                  Tespit edilen kolonlar ({result.source_columns.length}):
+                </p>
+                <div className="flex flex-wrap gap-1.5">
+                  {result.source_columns.map((col) => (
+                    <span
+                      key={col}
+                      className="inline-block px-2 py-0.5 bg-white border border-gray-200 rounded text-xs text-gray-700 font-mono"
+                    >
+                      {col}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
+              {[
+                { label: "Upload ID", value: String(result.upload_id) },
+                { label: "Toplam Kayıt", value: String(result.total_records) },
+                { label: "Kaynak Tip", value: result.source_type },
+                { label: "Kolon Sayısı", value: String(result.source_columns.length) },
+              ].map((s) => (
+                <div key={s.label} className="bg-gray-50 rounded-lg p-3 text-center">
+                  <p className="text-base font-bold text-gray-900">{s.value}</p>
+                  <p className="text-[10px] text-gray-400 mt-0.5">{s.label}</p>
                 </div>
               ))}
             </div>
-            <div className="flex gap-3 mt-4">
+
+            <div className="flex gap-3">
               <button
-                onClick={handleManualSave}
+                onClick={() => navigate(`/veri-normalizasyon?upload_id=${result.upload_id}`)}
                 className="flex items-center gap-2 bg-red-600 text-white text-sm font-medium px-5 py-2.5 rounded-lg hover:bg-red-700 cursor-pointer transition-colors whitespace-nowrap"
               >
-                <i className="ri-save-line"></i> Kaydet
+                <i className="ri-filter-3-line"></i> Normalizasyona Git
               </button>
               <button
-                onClick={() =>
-                  setManuelForm({
-                    adSoyad: "",
-                    tcKimlikNo: "",
-                    telefon: "",
-                    email: "",
-                    sehir: "",
-                  })
-                }
-                className="flex items-center gap-2 border border-gray-200 text-gray-600 text-sm font-medium px-5 py-2.5 rounded-lg hover:bg-gray-50 cursor-pointer transition-colors whitespace-nowrap"
+                onClick={() => navigate(`/temiz-veri-seti?upload_id=${result.upload_id}`)}
+                className="flex items-center gap-2 border border-gray-200 text-gray-700 text-sm font-medium px-5 py-2.5 rounded-lg hover:bg-gray-50 cursor-pointer transition-colors whitespace-nowrap"
               >
-                <i className="ri-add-line"></i> Yeni Ekle
-              </button>
-              <button
-                onClick={handleManualDetect}
-                disabled={loadingAction}
-                className="flex items-center gap-2 border border-red-200 text-red-700 bg-red-50 text-sm font-medium px-5 py-2.5 rounded-lg hover:bg-red-100 cursor-pointer transition-colors whitespace-nowrap disabled:opacity-60"
-              >
-                <i className="ri-search-eye-line"></i> Kaydedilenleri Analiz Et
-                ({manualRecords.length})
+                <i className="ri-table-line"></i> Ham Veriyi İncele
               </button>
             </div>
           </div>
         )}
-
-        <div className="bg-white rounded-xl p-5 border border-gray-100">
-          <div className="flex items-center justify-between mb-3">
-            <h3 className="text-sm font-semibold text-gray-900">
-              Canlı Tespit Sonuçları
-            </h3>
-            {loadingAction ? (
-              <span className="text-xs text-gray-500">İşleniyor...</span>
-            ) : null}
-          </div>
-          {previewRows.length === 0 ? (
-            <p className="text-sm text-gray-500">Henüz analiz sonucu yok.</p>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-xs">
-                <thead>
-                  <tr className="bg-gray-50">
-                    {previewKeys.map((key) => (
-                      <th
-                        key={key}
-                        className="text-left px-3 py-2 font-medium text-gray-500"
-                      >
-                        {key}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {previewRows.slice(0, 20).map((row, idx) => (
-                    <tr key={idx} className="border-t border-gray-100">
-                      {previewKeys.map((key) => (
-                        <td
-                          key={`${idx}-${key}`}
-                          className="px-3 py-2 text-gray-700"
-                        >
-                          {String((row as Record<string, unknown>)[key] ?? "")}
-                        </td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
 
         <UploadHistoryTable />
       </div>

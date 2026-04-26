@@ -139,12 +139,16 @@ def _record_raw_city(record: NormalizedRecord) -> str:
     )
 
 
-def _record_raw_address(record: NormalizedRecord) -> str:
+def _record_raw_muhatap(record: NormalizedRecord) -> str:
+    explicit = _safe_str(record.clean_muhatap_no) if hasattr(record, "clean_muhatap_no") else ""
+    if explicit:
+        return explicit
     return _pick_payload_value(
         [_raw_payload(record), _normalized_payload(record)],
-        "Adres",
-        "address",
-        "adres",
+        "Muhatap No",
+        "muhatap_no",
+        "muhatap kodu",
+        "customer_id",
     )
 
 
@@ -322,13 +326,14 @@ def _build_field_comparisons(
             comparison_method="admin_review_exact(clean_city)",
             field_name="Sehir",
         ),
-        "address": _build_similarity_field_comparison(
-            raw_left=_record_raw_address(left_record),
-            raw_right=_record_raw_address(right_record),
-            normalized_left=_safe_str(left_record.clean_address),
-            normalized_right=_safe_str(right_record.clean_address),
-            comparison_method="admin_review_jaro_winkler(clean_address)",
-            field_name="Adres",
+        "muhatapNo": _build_exact_field_comparison(
+            raw_left=_record_raw_muhatap(left_record),
+            raw_right=_record_raw_muhatap(right_record),
+            normalized_left=_safe_str(left_record.clean_muhatap_no) if hasattr(left_record, "clean_muhatap_no") else "",
+            normalized_right=_safe_str(right_record.clean_muhatap_no) if hasattr(right_record, "clean_muhatap_no") else "",
+            comparison_method="admin_review_exact(clean_muhatap_no)",
+            field_name="Muhatap Kodu",
+            use_conflict_label=True,
         ),
     }
 
@@ -348,10 +353,14 @@ def _derive_features(
     right_city = _safe_str(right_record.clean_city)
     left_name = _safe_str(left_record.clean_name)
     right_name = _safe_str(right_record.clean_name)
+    left_muhatap = _safe_str(left_record.clean_muhatap_no) if hasattr(left_record, "clean_muhatap_no") else ""
+    right_muhatap = _safe_str(right_record.clean_muhatap_no) if hasattr(right_record, "clean_muhatap_no") else ""
 
     return {
         "tc_exact_match": int(field_comparisons["tc"]["exactMatch"]),
         "tc_conflict": int(bool(left_tc and right_tc and left_tc != right_tc)),
+        "muhatap_no_exact_match": int(field_comparisons["muhatapNo"]["exactMatch"]),
+        "muhatap_no_conflict": int(bool(left_muhatap and right_muhatap and left_muhatap != right_muhatap)),
         "phone_exact_match": int(field_comparisons["phone"]["exactMatch"]),
         "email_exact_match": int(field_comparisons["email"]["exactMatch"]),
         "city_exact_match": int(field_comparisons["city"]["exactMatch"]),
@@ -379,6 +388,7 @@ def _derive_features(
                 int(bool(left_phone and right_phone)),
                 int(bool(left_email and right_email)),
                 int(bool(left_city and right_city)),
+                int(bool(left_muhatap and right_muhatap)),
             ]
         ),
     }
@@ -388,6 +398,8 @@ def _build_risk_flags(features: dict[str, Any]) -> list[str]:
     risk_flags: list[str] = []
     if features.get("tc_conflict", 0):
         risk_flags.append("tc_conflict")
+    if features.get("muhatap_no_conflict", 0):
+        risk_flags.append("muhatap_no_conflict")
     if features.get("shared_contact_flag", 0):
         risk_flags.append("shared_contact")
     if int(features.get("common_non_empty_fields", 0) or 0) <= 2:
@@ -416,6 +428,10 @@ def _build_rule_reasons(
         reasons.append("E-posta eslesti.")
     if features.get("city_exact_match", 0):
         reasons.append("Sehir eslesti.")
+    if features.get("muhatap_no_exact_match", 0):
+        reasons.append("Muhatap Kodu tam eslesti; guclu eslesme sinyali.")
+    if features.get("muhatap_no_conflict", 0):
+        reasons.append("Muhatap Kodu catisiyor; farkli kisi olabilir.")
 
     full_name_result = field_comparisons["fullName"]["comparisonResult"]
     if full_name_result in {"exact_match", "strong_match", "partial_match"}:
