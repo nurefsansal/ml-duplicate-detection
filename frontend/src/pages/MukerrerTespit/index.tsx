@@ -1,56 +1,78 @@
-import { useEffect, useRef, useState } from "react";
-
+import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import DashboardLayout from "../../components/feature/DashboardLayout";
 import Header from "../../components/feature/Header";
-import { mockDuplicateGroups } from "../../mocks/records";
 import {
-  detectDuplicatesFromFileWithOptions,
-  type DetectDuplicateResponse,
+  startDetectionFromUpload,
+  listUploads,
+  type DetectResponse,
+  type UploadItem,
 } from "../../services/api";
 import {
   finalDecisionTone,
   mapDetectPairToView,
-  mapMockGroupToView,
   type UiDuplicatePair,
 } from "../../utils/duplicatePairView";
 
 const algorithms = [
-  { id: "levenshtein", label: "Levenshtein", desc: "Karakter duzenleme mesafesi" },
-  { id: "jaro", label: "Jaro-Winkler", desc: "Onek agirlikli benzerlik" },
-  { id: "soundex", label: "Soundex", desc: "Fonetik eslestirme" },
+  { id: "levenshtein", label: "Levenshtein", desc: "Karakter düzenleme mesafesi" },
+  { id: "jaro", label: "Jaro-Winkler", desc: "Önek ağırlıklı benzerlik" },
+  { id: "soundex", label: "Soundex", desc: "Fonetik eşleştirme" },
 ];
 
 export default function MukerrerTespit() {
+  const navigate = useNavigate();
   const [selectedAlgo, setSelectedAlgo] = useState<string[]>(["levenshtein", "jaro"]);
   const [threshold, setThreshold] = useState(75);
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState(0);
   const [done, setDone] = useState(false);
-  const [onlySadeceMuhatap, setOnlySadeceMuhatap] = useState(false);
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [errorMessage, setErrorMessage] = useState("");
   const [statusMessage, setStatusMessage] = useState("");
   const [backendHealthy, setBackendHealthy] = useState<boolean | null>(null);
-  const [realResults, setRealResults] = useState<DetectDuplicateResponse | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [realResults, setRealResults] = useState<DetectResponse | null>(null);
+  const [results, setResults] = useState<UiDuplicatePair[]>([]);
+
+  // Upload selection
+  const [uploads, setUploads] = useState<UploadItem[]>([]);
+  const [loadingUploads, setLoadingUploads] = useState(false);
+  const [selectedUploadId, setSelectedUploadId] = useState<number | "">(() => {
+    const stored = localStorage.getItem("lastUploadId");
+    return stored ? Number(stored) : "";
+  });
+  // Tracks the latest_normalization_run_id of the currently selected upload
+  const [selectedNormalizationRunId, setSelectedNormalizationRunId] = useState<number | null>(null);
 
   useEffect(() => {
     let mounted = true;
     import("../../services/api")
       .then(({ healthCheck }) => healthCheck())
-      .then(() => {
-        if (mounted) {
-          setBackendHealthy(true);
+      .then(() => { if (mounted) setBackendHealthy(true); })
+      .catch(() => { if (mounted) setBackendHealthy(false); });
+    return () => { mounted = false; };
+  }, []);
+
+  // Fetch only uploads that have normalized_records — avoids showing incomplete uploads
+  useEffect(() => {
+    setLoadingUploads(true);
+    listUploads(50, { hasNormalizedRecords: true })
+      .then((d) => {
+        const list = d.uploads ?? [];
+        setUploads(list);
+        // Auto-select from localStorage only if that upload is in the filtered list
+        const storedId = localStorage.getItem("lastUploadId");
+        if (storedId) {
+          const found = list.find((u) => u.id === Number(storedId));
+          if (found) {
+            setSelectedUploadId(found.id);
+            setSelectedNormalizationRunId(found.latest_normalization_run_id ?? null);
+          } else {
+            setSelectedUploadId("");
+          }
         }
       })
-      .catch(() => {
-        if (mounted) {
-          setBackendHealthy(false);
-        }
-      });
-    return () => {
-      mounted = false;
-    };
+      .catch(() => {})
+      .finally(() => setLoadingUploads(false));
   }, []);
 
   const toggleAlgo = (id: string) => {
@@ -59,18 +81,9 @@ export default function MukerrerTespit() {
     );
   };
 
-  const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (file) {
-      setSelectedFile(file);
-      setErrorMessage("");
-      setStatusMessage("");
-    }
-  };
-
   const handleStart = async () => {
-    if (!selectedFile) {
-      setErrorMessage("Lutfen once bir dosya secin");
+    if (selectedUploadId === "") {
+      setErrorMessage("Lütfen tespit yapılacak bir yükleme seçin.");
       return;
     }
 
@@ -80,34 +93,43 @@ export default function MukerrerTespit() {
     setErrorMessage("");
     setStatusMessage("");
     setRealResults(null);
+    setResults([]);
 
     const progressInterval = window.setInterval(() => {
-      setProgress((value) => Math.min(value + Math.floor(Math.random() * 8) + 3, 90));
-    }, 150);
+      setProgress((value) => Math.min(value + Math.floor(Math.random() * 5) + 1, 85));
+    }, 400);
 
     try {
-      const result = await detectDuplicatesFromFileWithOptions(selectedFile, {
+      const result = await startDetectionFromUpload(selectedUploadId, {
+        normalizationRunId: selectedNormalizationRunId,
         minRulesToMatch: Math.ceil((threshold / 100) * 4),
-        saveToDb: true,
-        algorithms: selectedAlgo,
-        threshold,
       });
 
       if (typeof result.uploadId === "number") {
         localStorage.setItem("lastDetectUploadId", String(result.uploadId));
       }
+      if (typeof result.detectionRunId === "number") {
+        localStorage.setItem("lastDetectionRunId", String(result.detectionRunId));
+      }
 
       setRealResults(result);
+      const views = (result.duplicates || []).map(mapDetectPairToView);
+      setResults(views);
       setProgress(100);
       setDone(true);
       setStatusMessage(
-        `Tespit tamamlandi - ${result.duplicatePairs} aday bulundu${
-          typeof result.uploadId === "number" ? ` (Upload ID: ${result.uploadId})` : ""
+        `Tespit tamamlandı — ${result.duplicatePairs} aday çift bulundu${
+          typeof result.detectionRunId === "number"
+            ? ` (Detection Run ID: ${result.detectionRunId})`
+            : ""
         }`,
       );
-    } catch (error) {
+    } catch (error: unknown) {
+      const axiosDetail =
+        (error as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
       setErrorMessage(
-        error instanceof Error ? error.message : "Tespit sirasinda hata olustu",
+        axiosDetail ||
+          (error instanceof Error ? error.message : "Tespit sırasında hata oluştu."),
       );
       setProgress(0);
     } finally {
@@ -116,78 +138,109 @@ export default function MukerrerTespit() {
     }
   };
 
-  const mockResults = mockDuplicateGroups.map(mapMockGroupToView);
-  const realViews = (realResults?.duplicates || []).map(mapDetectPairToView);
-
-  const results: UiDuplicatePair[] = done
-    ? (onlySadeceMuhatap
-        ? realViews.filter(
-            (pair) =>
-              pair.fieldComparisons.fullName?.exactMatch &&
-              pair.fieldComparisons.tc?.exactMatch,
-          )
-        : realViews)
-    : mockResults;
-
   return (
     <DashboardLayout>
       <Header
-        title="Mukerrer Tespit"
-        subtitle="Splink tabanli alan karsilastirmalari ile benzer kayitlari tespit edin"
+        title="Mükerrer Tespit"
+        subtitle="Normalize edilmiş kayıtlar üzerinden benzer kayıtları tespit edin"
         actions={
           <div className="flex items-center gap-3">
             {backendHealthy === false && (
               <span className="rounded bg-red-50 px-2 py-1 text-xs text-red-600">
-                Backend: Erisilemiyor
+                Backend: Erişilemiyor
               </span>
             )}
             <button
               onClick={handleStart}
-              disabled={running || !selectedFile}
+              disabled={running || selectedUploadId === ""}
               className="flex cursor-pointer items-center gap-2 whitespace-nowrap rounded-lg bg-red-600 px-5 py-2 text-sm font-medium text-white transition-colors hover:bg-red-700 disabled:opacity-60"
             >
               <i className={running ? "ri-loader-4-line animate-spin" : "ri-radar-line"} />
-              {running ? `Taraniyor... %${progress}` : "Tespiti Baslat"}
+              {running ? `Taranıyor... %${progress}` : "Tespiti Başlat"}
             </button>
           </div>
         }
       />
 
       <div className="flex-1 space-y-5 overflow-y-auto p-6">
+        {/* Upload selector */}
         <div className="rounded-xl border border-gray-100 bg-white p-5">
           <h3 className="mb-3 text-sm font-semibold text-gray-900">
-            Dosya Sec (Normalize Edilmis Veri)
+            Yükleme Seç (Normalize Edilmiş Veri)
           </h3>
-          <div className="flex items-center gap-4">
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".xlsx,.xls,.csv"
-              onChange={handleFileSelect}
-              className="hidden"
-            />
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              className="flex cursor-pointer items-center gap-2 rounded-lg border border-gray-200 px-4 py-2 text-sm text-gray-600 transition-colors hover:bg-gray-50"
-            >
-              <i className="ri-folder-open-line" />
-              Dosya Sec
-            </button>
-            {selectedFile && (
-              <span className="text-sm text-gray-600">
-                Secilen: <span className="font-medium">{selectedFile.name}</span>
-                <span className="ml-1 text-gray-400">
-                  ({(selectedFile.size / 1024).toFixed(1)} KB)
-                </span>
-              </span>
-            )}
-          </div>
-          <p className="mt-2 text-xs text-gray-400">
-            Tespit sonucu artik Splink alan karsilastirmalari ve is kurallariyla
-            birlikte degerlendiriliyor.
+          <p className="mb-3 text-xs text-gray-400">
+            Tespit yapılacak normalize edilmiş veri setini seçin. Önce Veri Yükleme veya
+            Veri Normalizasyon adımını tamamlamış olmanız gerekir.
           </p>
+
+          {loadingUploads ? (
+            <p className="text-sm text-gray-400">Yüklemeler yükleniyor…</p>
+          ) : uploads.length === 0 ? (
+            <div className="flex items-start gap-3 rounded-xl border border-amber-100 bg-amber-50 p-4">
+              <i className="ri-alert-line text-lg text-amber-500 mt-0.5 flex-shrink-0" />
+              <div>
+                <p className="text-sm text-amber-700 font-medium">Normalize edilmiş yükleme yok</p>
+                <p className="text-xs text-amber-600 mt-0.5">
+                  Tespit yapabilmek için önce{" "}
+                  <button
+                    onClick={() => navigate("/veri-yukleme")}
+                    className="underline cursor-pointer"
+                  >
+                    Veri Yükleme
+                  </button>{" "}
+                  ve ardından{" "}
+                  <button
+                    onClick={() => navigate("/veri-normalizasyon")}
+                    className="underline cursor-pointer"
+                  >
+                    Veri Normalizasyon
+                  </button>{" "}
+                  adımlarını tamamlayın.
+                </p>
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              <select
+                value={selectedUploadId}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  if (v === "") {
+                    setSelectedUploadId("");
+                    setSelectedNormalizationRunId(null);
+                  } else {
+                    const numId = Number(v);
+                    setSelectedUploadId(numId);
+                    const found = uploads.find((u) => u.id === numId);
+                    setSelectedNormalizationRunId(found?.latest_normalization_run_id ?? null);
+                  }
+                }}
+                className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm bg-white focus:outline-none focus:border-red-400 focus:ring-1 focus:ring-red-100"
+              >
+                <option value="">— Normalize edilmiş yükleme seçin —</option>
+                {uploads.map((u) => (
+                  <option key={u.id} value={u.id}>
+                    #{u.id} — {u.file_name} ({u.total_records} kayıt
+                    {u.latest_normalization_run_id ? `, Run #${u.latest_normalization_run_id}` : ""})
+                  </option>
+                ))}
+              </select>
+
+              {selectedUploadId !== "" && (
+                <p className="text-xs text-green-600">
+                  <i className="ri-checkbox-circle-fill mr-1"></i>
+                  Upload #{selectedUploadId}
+                  {selectedNormalizationRunId
+                    ? ` · Normalizasyon Run #${selectedNormalizationRunId}`
+                    : ""}{" "}
+                  — tespit başlatılabilir.
+                </p>
+              )}
+            </div>
+          )}
         </div>
 
+        {/* Error / Status */}
         {errorMessage && (
           <div className="flex items-center gap-3 rounded-xl border border-red-100 bg-red-50 p-4">
             <i className="ri-error-warning-fill text-lg text-red-600" />
@@ -202,9 +255,10 @@ export default function MukerrerTespit() {
           </div>
         )}
 
+        {/* Algorithm + threshold */}
         <div className="grid grid-cols-1 gap-5 lg:grid-cols-3">
           <div className="rounded-xl border border-gray-100 bg-white p-5 lg:col-span-2">
-            <h3 className="mb-4 text-sm font-semibold text-gray-900">Algoritma Secimi</h3>
+            <h3 className="mb-4 text-sm font-semibold text-gray-900">Algoritma Seçimi</h3>
             <div className="grid grid-cols-3 gap-3">
               {algorithms.map((algorithm) => {
                 const active = selectedAlgo.includes(algorithm.id);
@@ -213,27 +267,13 @@ export default function MukerrerTespit() {
                     key={algorithm.id}
                     onClick={() => toggleAlgo(algorithm.id)}
                     className={`cursor-pointer rounded-xl border-2 p-4 text-left transition-all ${
-                      active
-                        ? "border-red-500 bg-red-50"
-                        : "border-gray-100 hover:border-gray-200"
+                      active ? "border-red-500 bg-red-50" : "border-gray-100 hover:border-gray-200"
                     }`}
                   >
-                    <div
-                      className={`mb-2 flex h-8 w-8 items-center justify-center rounded-lg ${
-                        active ? "bg-red-100" : "bg-gray-100"
-                      }`}
-                    >
-                      <i
-                        className={`ri-cpu-line text-base ${
-                          active ? "text-red-600" : "text-gray-400"
-                        }`}
-                      />
+                    <div className={`mb-2 flex h-8 w-8 items-center justify-center rounded-lg ${active ? "bg-red-100" : "bg-gray-100"}`}>
+                      <i className={`ri-cpu-line text-base ${active ? "text-red-600" : "text-gray-400"}`} />
                     </div>
-                    <p
-                      className={`text-sm font-semibold ${
-                        active ? "text-red-700" : "text-gray-700"
-                      }`}
-                    >
+                    <p className={`text-sm font-semibold ${active ? "text-red-700" : "text-gray-700"}`}>
                       {algorithm.label}
                     </p>
                     <p className="mt-0.5 text-xs text-gray-400">{algorithm.desc}</p>
@@ -244,12 +284,10 @@ export default function MukerrerTespit() {
           </div>
 
           <div className="rounded-xl border border-gray-100 bg-white p-5">
-            <h3 className="mb-4 text-sm font-semibold text-gray-900">Benzerlik Esigi</h3>
+            <h3 className="mb-4 text-sm font-semibold text-gray-900">Benzerlik Eşiği</h3>
             <div className="mb-4 text-center">
               <span className="text-4xl font-bold text-red-600">%{threshold}</span>
-              <p className="mt-1 text-xs text-gray-400">
-                ve uzeri olasiliklar one cikarilacak
-              </p>
+              <p className="mt-1 text-xs text-gray-400">ve üzeri olasılıklar öne çıkarılacak</p>
             </div>
             <input
               type="range"
@@ -260,46 +298,27 @@ export default function MukerrerTespit() {
               className="w-full cursor-pointer accent-red-600"
             />
             <div className="mt-1 flex justify-between text-[10px] text-gray-400">
-              <span>%50 Genis</span>
+              <span>%50 Geniş</span>
               <span>%100 Tam</span>
             </div>
           </div>
         </div>
 
+        {/* Progress */}
         {(running || done) && (
-          <div
-            className={`flex items-center gap-4 rounded-xl border p-4 ${
-              done ? "border-green-100 bg-green-50" : "border-red-100 bg-red-50"
-            }`}
-          >
-            <div
-              className={`flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg ${
-                done ? "bg-green-100" : "bg-red-100"
-              }`}
-            >
-              <i
-                className={`text-lg ${
-                  done
-                    ? "ri-checkbox-circle-fill text-green-600"
-                    : "ri-loader-4-line animate-spin text-red-600"
-                }`}
-              />
+          <div className={`flex items-center gap-4 rounded-xl border p-4 ${done ? "border-green-100 bg-green-50" : "border-red-100 bg-red-50"}`}>
+            <div className={`flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg ${done ? "bg-green-100" : "bg-red-100"}`}>
+              <i className={`text-lg ${done ? "ri-checkbox-circle-fill text-green-600" : "ri-loader-4-line animate-spin text-red-600"}`} />
             </div>
             <div className="flex-1">
-              <p
-                className={`text-sm font-semibold ${
-                  done ? "text-green-700" : "text-red-700"
-                }`}
-              >
+              <p className={`text-sm font-semibold ${done ? "text-green-700" : "text-red-700"}`}>
                 {done
-                  ? statusMessage || `Tespit tamamlandi - ${results.length} aday bulundu`
-                  : `${realResults?.totalRecords || "Veri"} taraniyor... %${progress}`}
+                  ? statusMessage
+                  : `${realResults?.totalRecords || "Veri"} taranıyor... %${progress}`}
               </p>
               <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-white/70">
                 <div
-                  className={`h-1.5 rounded-full transition-all duration-150 ${
-                    done ? "bg-green-500" : "bg-red-500"
-                  }`}
+                  className={`h-1.5 rounded-full transition-all duration-150 ${done ? "bg-green-500" : "bg-red-500"}`}
                   style={{ width: `${progress}%` }}
                 />
               </div>
@@ -307,32 +326,32 @@ export default function MukerrerTespit() {
           </div>
         )}
 
+        {/* Post-detection action */}
         {done && (
+          <div className="flex flex-wrap gap-3">
+            <button
+              onClick={() => navigate("/yonetici-onayi")}
+              className="flex items-center gap-2 bg-red-600 text-white text-sm font-medium px-5 py-2.5 rounded-lg hover:bg-red-700 cursor-pointer transition-colors whitespace-nowrap"
+            >
+              <i className="ri-checkbox-circle-line"></i> Yönetici Onayına Git
+            </button>
+            <button
+              onClick={() => navigate("/mukerrer-kayitlar")}
+              className="flex items-center gap-2 border border-gray-200 text-gray-700 text-sm font-medium px-5 py-2.5 rounded-lg hover:bg-gray-50 cursor-pointer transition-colors whitespace-nowrap"
+            >
+              <i className="ri-file-copy-2-line"></i> Mükerrer Kayıtları Gör
+            </button>
+          </div>
+        )}
+
+        {/* Results */}
+        {done && results.length > 0 && (
           <div className="rounded-xl border border-gray-100 bg-white">
             <div className="flex items-center justify-between border-b border-gray-50 px-5 py-4">
               <div>
-                <h3 className="text-sm font-semibold text-gray-900">Tespit Sonuclari</h3>
-                <p className="mt-0.5 text-xs text-gray-400">
-                  {results.length} aday cift
-                </p>
+                <h3 className="text-sm font-semibold text-gray-900">Tespit Sonuçları</h3>
+                <p className="mt-0.5 text-xs text-gray-400">{results.length} aday çift</p>
               </div>
-              <label className="flex cursor-pointer items-center gap-2">
-                <span className="whitespace-nowrap text-xs text-gray-600">
-                  Sadece ad ve TC tam eslesenler
-                </span>
-                <button
-                  onClick={() => setOnlySadeceMuhatap((value) => !value)}
-                  className={`relative flex h-5 w-11 min-w-[44px] cursor-pointer items-center overflow-hidden rounded-full transition-colors ${
-                    onlySadeceMuhatap ? "bg-red-500" : "bg-gray-200"
-                  }`}
-                >
-                  <span
-                    className={`absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${
-                      onlySadeceMuhatap ? "translate-x-6" : "translate-x-0"
-                    }`}
-                  />
-                </button>
-              </label>
             </div>
 
             <div className="overflow-x-auto">
@@ -340,8 +359,8 @@ export default function MukerrerTespit() {
                 <thead>
                   <tr className="bg-gray-50/70">
                     <th className="px-5 py-3 text-left font-medium text-gray-400">Grup</th>
-                    <th className="px-4 py-3 text-left font-medium text-gray-400">Kayit 1</th>
-                    <th className="px-4 py-3 text-left font-medium text-gray-400">Kayit 2</th>
+                    <th className="px-4 py-3 text-left font-medium text-gray-400">Kayıt 1</th>
+                    <th className="px-4 py-3 text-left font-medium text-gray-400">Kayıt 2</th>
                     <th className="px-4 py-3 text-center font-medium text-gray-400">Skor</th>
                     <th className="px-4 py-3 text-left font-medium text-gray-400">Karar</th>
                     <th className="px-4 py-3 text-left font-medium text-gray-400">Kaynak</th>
@@ -355,43 +374,36 @@ export default function MukerrerTespit() {
                         : pair.score >= 80
                           ? "bg-orange-50 text-orange-500"
                           : "bg-yellow-50 text-yellow-600";
-
                     return (
                       <tr key={pair.id} className="transition-colors hover:bg-gray-50/50">
                         <td className="px-5 py-3.5 font-medium text-gray-700">{pair.id}</td>
                         <td className="px-4 py-3.5">
                           <p className="font-medium text-gray-800">{pair.records[0].adSoyad}</p>
                           <p className="text-gray-400">
-                            {pair.records[0].telefon || "-"} - {pair.records[0].email || "-"}
+                            {pair.records[0].telefon || "-"} · {pair.records[0].email || "-"}
                           </p>
                         </td>
                         <td className="px-4 py-3.5">
                           <p className="font-medium text-gray-800">{pair.records[1].adSoyad}</p>
                           <p className="text-gray-400">
-                            {pair.records[1].telefon || "-"} - {pair.records[1].email || "-"}
+                            {pair.records[1].telefon || "-"} · {pair.records[1].email || "-"}
                           </p>
                         </td>
                         <td className="px-4 py-3.5 text-center">
-                          <span
-                            className={`inline-block rounded-full px-2.5 py-1 text-sm font-bold ${scoreColor}`}
-                          >
+                          <span className={`inline-block rounded-full px-2.5 py-1 text-sm font-bold ${scoreColor}`}>
                             %{pair.score.toFixed(1)}
                           </span>
                         </td>
                         <td className="px-4 py-3.5">
-                          <span
-                            className={`inline-block rounded-full px-2.5 py-1 text-[11px] font-medium ${finalDecisionTone(pair.finalDecision)}`}
-                          >
+                          <span className={`inline-block rounded-full px-2.5 py-1 text-[11px] font-medium ${finalDecisionTone(pair.finalDecision)}`}>
                             {pair.finalDecisionLabel}
                           </span>
                           <p className="mt-1 text-[11px] text-gray-400">
-                            {pair.ruleReasons[0] || "Ek aciklama yok"}
+                            {pair.ruleReasons[0] || "Ek açıklama yok"}
                           </p>
                         </td>
                         <td className="px-4 py-3.5 text-gray-500">
-                          {pair.decisionSource === "splink_plus_rules"
-                            ? "Splink + kurallar"
-                            : pair.decisionSource}
+                          {pair.decisionSource === "splink_plus_rules" ? "Splink + kurallar" : pair.decisionSource}
                         </td>
                       </tr>
                     );
@@ -400,10 +412,18 @@ export default function MukerrerTespit() {
               </table>
               {results.length === 0 && (
                 <div className="py-10 text-center text-sm text-gray-400">
-                  Bu filtreyle eslesen kayit bulunamadi.
+                  Bu filtreyle eşleşen kayıt bulunamadı.
                 </div>
               )}
             </div>
+          </div>
+        )}
+
+        {done && results.length === 0 && !errorMessage && (
+          <div className="rounded-xl border border-gray-100 bg-white px-5 py-10 text-center">
+            <i className="ri-checkbox-circle-line text-3xl text-green-500 mb-2 block"></i>
+            <p className="text-sm font-medium text-gray-700">Mükerrer kayıt bulunamadı.</p>
+            <p className="text-xs text-gray-400 mt-1">Seçili veri seti için eşik değerini düşürmeyi deneyin.</p>
           </div>
         )}
       </div>

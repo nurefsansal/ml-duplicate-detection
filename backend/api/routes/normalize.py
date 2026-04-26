@@ -1,3 +1,11 @@
+# LEGACY ENDPOINTS
+# /normalize and /normalize-file do upload + normalization in one step.
+# New main flow separates these into:
+#   POST /api/v1/uploads/file       → uploads + raw_records only
+#   POST /api/v1/normalization-runs → normalization_runs + normalized_records
+# These endpoints are kept for backward compatibility but are no longer
+# called by the main frontend pages.
+
 import io
 
 import pandas as pd
