@@ -70,6 +70,9 @@ def build_pair_features(left: dict, right: dict) -> dict:
     left_city = _safe_str(left.get("clean_city"))
     right_city = _safe_str(right.get("clean_city"))
 
+    left_muhatap = _safe_str(left.get("clean_muhatap_no"))
+    right_muhatap = _safe_str(right.get("clean_muhatap_no"))
+
     left_phonetic = _safe_str(left.get("name_phonetic_key"))
     right_phonetic = _safe_str(right.get("name_phonetic_key"))
 
@@ -95,6 +98,8 @@ def build_pair_features(left: dict, right: dict) -> dict:
     phone_exact_match = int(bool(left_phone and right_phone and left_phone == right_phone))
     email_exact_match = int(bool(left_email and right_email and left_email == right_email))
     city_exact_match = int(bool(left_city and right_city and left_city == right_city))
+    muhatap_no_exact_match = int(bool(left_muhatap and right_muhatap and left_muhatap == right_muhatap))
+    muhatap_no_conflict = int(bool(left_muhatap and right_muhatap and left_muhatap != right_muhatap))
     phonetic_exact_match = int(bool(left_phonetic and right_phonetic and left_phonetic == right_phonetic))
     metaphone_exact_match = int(bool(left_metaphone and right_metaphone and left_metaphone == right_metaphone))
     phonetic_close_match = int(bool(phonetic_exact_match or metaphone_exact_match))
@@ -126,6 +131,8 @@ def build_pair_features(left: dict, right: dict) -> dict:
         "phone_last7_match": _last_n_match(left_phone, right_phone, 7),
         "email_exact_match": email_exact_match,
         "city_exact_match": city_exact_match,
+        "muhatap_no_exact_match": muhatap_no_exact_match,
+        "muhatap_no_conflict": muhatap_no_conflict,
         "phonetic_exact_match": phonetic_exact_match,
         "metaphone_exact_match": metaphone_exact_match,
         "phonetic_close_match": phonetic_close_match,
@@ -149,6 +156,7 @@ def build_pair_features(left: dict, right: dict) -> dict:
                 int(bool(left_email and right_email)),
                 int(bool(left_name and right_name)),
                 int(bool(left_city and right_city)),
+                int(bool(left_muhatap and right_muhatap)),
             ]
         ),
     }

@@ -183,10 +183,26 @@ def get_detection_summary(
             score_q = score_q.filter(MatchCandidate.created_at <= dt_to)
         avg_score_pct = round(float(score_q.scalar() or 0) * 100, 2)
 
+        # Sum group metrics stored on detection_runs (NULL-safe with COALESCE)
+        runs_for_group_q = db.query(
+            func.sum(func.coalesce(DetectionRun.duplicate_group_count, 0)),
+            func.sum(func.coalesce(DetectionRun.affected_record_count, 0)),
+        )
+        if dt_from:
+            runs_for_group_q = runs_for_group_q.filter(DetectionRun.created_at >= dt_from)
+        if dt_to:
+            runs_for_group_q = runs_for_group_q.filter(DetectionRun.created_at <= dt_to)
+        group_row = runs_for_group_q.one()
+        total_duplicate_groups = int(group_row[0] or 0)
+        total_affected_records = int(group_row[1] or 0)
+
         return {
             "success": True,
             "total_detection_runs": total_runs,
             "total_match_candidates": total_candidates,
+            "total_duplicate_pairs": total_candidates,
+            "total_duplicate_groups": total_duplicate_groups,
+            "total_affected_records": total_affected_records,
             "approved": approved,
             "rejected": rejected,
             "pending": pending,

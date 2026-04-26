@@ -27,6 +27,7 @@ from backend.services.normalization_service import (
     ADDRESS_COLUMN,
     CITY_COLUMN,
     EMAIL_COLUMN,
+    MUHATAP_NO_COLUMN,
     NAME_COLUMN,
     PHONE_COLUMN,
     TC_COLUMN,
@@ -162,6 +163,11 @@ def _normalized_record_to_matching_row(record: NormalizedRecord) -> dict[str, An
             raw_payload,
             aliases=(ADDRESS_COLUMN, "adres", "address"),
         ),
+        MUHATAP_NO_COLUMN: _pick_mapping_value(
+            normalized_payload,
+            raw_payload,
+            aliases=(MUHATAP_NO_COLUMN, "muhatap_no", "muhatap kodu", "customer_id", "donor_id"),
+        ),
         "clean_name": clean_name,
         "clean_name_ordered": clean_name_ordered,
         "clean_first_name": clean_first_name,
@@ -173,6 +179,10 @@ def _normalized_record_to_matching_row(record: NormalizedRecord) -> dict[str, An
         "clean_email": clean_email,
         "clean_city": _safe_str(
             normalized_payload.get("clean_city") or record.clean_city
+        ),
+        "clean_muhatap_no": _safe_str(
+            normalized_payload.get("clean_muhatap_no")
+            or (record.clean_muhatap_no if hasattr(record, "clean_muhatap_no") else "")
         ),
         "name_phonetic_key": _safe_str(
             normalized_payload.get("name_phonetic_key")
@@ -303,6 +313,51 @@ def _resolve_detection_scope(
     return int(resolved_upload_id), resolved_normalization_run_id, normalized_records
 
 
+def _compute_duplicate_groups(
+    duplicates: list[dict[str, Any]],
+    index_to_normalized_id: dict[int, int],
+) -> tuple[int, int]:
+    """Union-Find over the duplicate pairs to compute connected components.
+
+    Returns (duplicate_group_count, affected_record_count).
+
+    Example: pairs A-B, A-C, B-C → 1 group, 3 affected records.
+    """
+    parent: dict[int, int] = {}
+
+    def find(x: int) -> int:
+        parent.setdefault(x, x)
+        if parent[x] != x:
+            parent[x] = find(parent[x])
+        return parent[x]
+
+    def union(a: int, b: int) -> None:
+        parent.setdefault(a, a)
+        parent.setdefault(b, b)
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for payload in duplicates:
+        left_index = int(payload.get("left_index", -1))
+        right_index = int(payload.get("right_index", -1))
+        left_id = index_to_normalized_id.get(left_index)
+        right_id = index_to_normalized_id.get(right_index)
+        if left_id is not None and right_id is not None and left_id != right_id:
+            union(left_id, right_id)
+
+    if not parent:
+        return 0, 0
+
+    groups: dict[int, set[int]] = {}
+    for node in list(parent):
+        root = find(node)
+        groups.setdefault(root, set()).add(node)
+
+    real_groups = {root: members for root, members in groups.items() if len(members) >= 2}
+    return len(real_groups), sum(len(m) for m in real_groups.values())
+
+
 def _persist_match_candidates(
     *,
     session,
@@ -410,6 +465,20 @@ def run_detection_from_database(
         )
         logger.info("[detect] MatchCandidate kaydedildi: %d satır", inserted)
 
+        # Connected-components: collapse pairs into groups (A-B + A-C + B-C = 1 group, 3 records)
+        duplicate_group_count, affected_record_count = _compute_duplicate_groups(
+            list(duplicates), index_to_normalized_id
+        )
+        logger.info(
+            "[detect] Grup analizi: %d grup, %d etkilenen kayıt",
+            duplicate_group_count,
+            affected_record_count,
+        )
+
+        # Persist group metrics on the DetectionRun row
+        detection_run.duplicate_group_count = duplicate_group_count
+        detection_run.affected_record_count = affected_record_count
+
         session.commit()
 
         t_total = time.monotonic() - t_start
@@ -422,6 +491,8 @@ def run_detection_from_database(
             "detectionRunId": int(detection_run.id),
             "candidatePairs": candidate_pairs,
             "duplicatePairs": duplicate_pairs,
+            "duplicateGroupCount": duplicate_group_count,
+            "affectedRecordCount": affected_record_count,
             "insertedRows": inserted,
             "totalRecords": len(normalized_records),
             "duplicates": list(duplicates),

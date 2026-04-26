@@ -15,6 +15,7 @@ PHONE_COLUMN = "Telefon"
 EMAIL_COLUMN = "E-mail"
 CITY_COLUMN = "Åehir"
 ADDRESS_COLUMN = "Adres"
+MUHATAP_NO_COLUMN = "Muhatap No"
 
 PREVIEW_COLUMNS = [
     NAME_COLUMN,
@@ -22,6 +23,7 @@ PREVIEW_COLUMNS = [
     PHONE_COLUMN,
     TC_COLUMN,
     EMAIL_COLUMN,
+    MUHATAP_NO_COLUMN,
     "clean_name",
     "first_name",
     "last_name",
@@ -31,6 +33,7 @@ PREVIEW_COLUMNS = [
     "name_phonetic_key",
     "clean_city",
     "clean_address",
+    "clean_muhatap_no",
     "clean_phone",
     "phone_last7",
     "clean_tc",
@@ -66,6 +69,15 @@ SOURCE_FIELD_TARGETS = {
     "il": "city",
     "adres": "address",
     "address": "address",
+    "muhatap no": "muhatap_no",
+    "muhatap kodu": "muhatap_no",
+    "muhatap": "muhatap_no",
+    "customer id": "muhatap_no",
+    "customerid": "muhatap_no",
+    "donor id": "muhatap_no",
+    "donorid": "muhatap_no",
+    "musteri no": "muhatap_no",
+    "musteri kodu": "muhatap_no",
 }
 
 FILE_COLUMN_MAP = {
@@ -88,6 +100,15 @@ FILE_COLUMN_MAP = {
     "il": CITY_COLUMN,
     "adres": ADDRESS_COLUMN,
     "address": ADDRESS_COLUMN,
+    "muhatap no": MUHATAP_NO_COLUMN,
+    "muhatap kodu": MUHATAP_NO_COLUMN,
+    "muhatap": MUHATAP_NO_COLUMN,
+    "customer id": MUHATAP_NO_COLUMN,
+    "customerid": MUHATAP_NO_COLUMN,
+    "donor id": MUHATAP_NO_COLUMN,
+    "donorid": MUHATAP_NO_COLUMN,
+    "musteri no": MUHATAP_NO_COLUMN,
+    "musteri kodu": MUHATAP_NO_COLUMN,
 }
 
 
@@ -250,7 +271,7 @@ def canonicalize_upload_dataframe(df_raw: pd.DataFrame) -> pd.DataFrame:
     if NAME_COLUMN not in df.columns:
         raise ValueError("Eksik zorunlu kolon: Ad Soyad")
 
-    for column in [TC_COLUMN, PHONE_COLUMN, EMAIL_COLUMN, CITY_COLUMN, ADDRESS_COLUMN]:
+    for column in [TC_COLUMN, PHONE_COLUMN, EMAIL_COLUMN, CITY_COLUMN, ADDRESS_COLUMN, MUHATAP_NO_COLUMN]:
         if column not in df.columns:
             df[column] = ""
 
@@ -297,6 +318,12 @@ def prepare_normalized_dataframe(df_raw: pd.DataFrame) -> pd.DataFrame:
     )
     normalized["email_normalized_key"] = normalized["clean_email"].apply(normalize_email_key)
     normalized["clean_address"] = normalized[ADDRESS_COLUMN].apply(normalize_text)
+    if MUHATAP_NO_COLUMN in normalized.columns:
+        normalized["clean_muhatap_no"] = normalized[MUHATAP_NO_COLUMN].apply(
+            lambda v: re.sub(r"\s+", "", str(v or "")).upper() if v and not (isinstance(v, float) and pd.isna(v)) else ""
+        )
+    else:
+        normalized["clean_muhatap_no"] = ""
     normalized["is_valid"] = normalized["clean_name"].astype(str).str.strip() != ""
     normalized["blocking_key"] = normalized.apply(
         lambda row: generate_blocking_key(row.to_dict()),

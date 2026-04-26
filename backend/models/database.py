@@ -354,6 +354,7 @@ class NormalizedRecord(Base):
 
     clean_city = Column(String)
     clean_address = Column(Text)
+    clean_muhatap_no = Column(String)
 
     blocking_key = Column(String(255))
     is_valid = Column(Boolean, default=True)
@@ -408,6 +409,8 @@ class DetectionRun(Base):
     )
     model_version = Column(String(128))
     threshold = Column(Float)
+    duplicate_group_count = Column(Integer, default=0)
+    affected_record_count = Column(Integer, default=0)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     upload = relationship("Upload", back_populates="detection_runs")

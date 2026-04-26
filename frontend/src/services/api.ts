@@ -56,6 +56,8 @@ export type DetectResponse = {
   detectionRunId?: number | null;
   candidatePairs: number;
   duplicatePairs: number;
+  duplicateGroupCount: number;
+  affectedRecordCount: number;
   insertedRows: number;
   totalRecords?: number;
   duplicates: DetectDuplicatePair[];
@@ -173,6 +175,7 @@ export type NormalizedRecordDb = {
   clean_tc: string;
   clean_city: string;
   clean_address: string;
+  clean_muhatap_no: string;
   is_valid: boolean;
   blocking_key: string;
   created_at: string | null;
@@ -215,6 +218,9 @@ export type ReportDetectionSummary = {
   success: boolean;
   total_detection_runs: number;
   total_match_candidates: number;
+  total_duplicate_pairs: number;
+  total_duplicate_groups: number;
+  total_affected_records: number;
   approved: number;
   rejected: number;
   pending: number;

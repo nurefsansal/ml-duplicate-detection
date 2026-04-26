@@ -64,6 +64,8 @@ class DetectResponse(BaseModel):
     detectionRunId: int | None = None
     candidatePairs: int
     duplicatePairs: int
+    duplicateGroupCount: int = 0
+    affectedRecordCount: int = 0
     insertedRows: int
     totalRecords: int | None = None
     duplicates: list[DuplicatePairResponse]

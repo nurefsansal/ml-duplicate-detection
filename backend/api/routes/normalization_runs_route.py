@@ -83,6 +83,7 @@ TARGET_TO_COLUMN = {
     "email": "E-mail",
     "city": "Şehir",
     "address": "Adres",
+    "muhatap_no": "Muhatap No",
 }
 
 
@@ -178,6 +179,7 @@ def create_normalization_run(
                     clean_tc=str(normalized_payload.get("clean_tc", "") or ""),
                     clean_city=str(normalized_payload.get("clean_city", "") or ""),
                     clean_address=str(normalized_payload.get("clean_address", "") or ""),
+                    clean_muhatap_no=str(normalized_payload.get("clean_muhatap_no", "") or ""),
                     blocking_key=str(normalized_payload.get("blocking_key", "") or ""),
                     is_valid=bool(normalized_payload.get("is_valid", False)),
                     normalized_payload=normalized_payload,

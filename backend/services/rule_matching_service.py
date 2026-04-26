@@ -225,6 +225,8 @@ def _build_risk_flags(features: dict[str, Any]) -> list[str]:
 
     if features.get("tc_conflict", 0):
         risk_flags.append("tc_conflict")
+    if features.get("muhatap_no_conflict", 0):
+        risk_flags.append("muhatap_no_conflict")
     if features.get("shared_contact_flag", 0):
         risk_flags.append("shared_contact")
     if features.get("shared_contact_name_conflict", 0):
@@ -436,17 +438,17 @@ def _build_legacy_field_comparisons(
             field_name="Sehir",
             notes="Sehir fallback karsilastirmasinda eslesti.",
         ),
-        "address": {
-            "rawLeftValue": None,
-            "rawRightValue": None,
-            "normalizedLeftValue": None,
-            "normalizedRightValue": None,
-            "comparisonMethod": "not_available",
-            "comparisonResult": "not_available",
-            "score0To100": 0,
-            "exactMatch": False,
-            "notes": "Fallback modunda adres alanı kullanilmadi.",
-        },
+        "muhatapNo": _build_fallback_exact_comparison(
+            raw_left_value=_pick_mapping_value(left_record, "Muhatap No", "muhatap_no", "muhatap kodu", "customer_id"),
+            raw_right_value=_pick_mapping_value(right_record, "Muhatap No", "muhatap_no", "muhatap kodu", "customer_id"),
+            normalized_left_value=_safe_str(left_record.get("clean_muhatap_no")),
+            normalized_right_value=_safe_str(right_record.get("clean_muhatap_no")),
+            exact_match=bool(features.get("muhatap_no_exact_match", 0)),
+            comparison_method="legacy_exact_match(clean_muhatap_no)",
+            field_name="Muhatap Kodu",
+            notes="Muhatap Kodu fallback karsilastirmasinda eslesti.",
+            use_conflict_label=True,
+        ),
     }
 
 
@@ -476,6 +478,10 @@ def _build_rule_reasons(
         reasons.append("E-posta eslesti.")
     if features.get("city_exact_match", 0):
         reasons.append("Sehir eslesti.")
+    if features.get("muhatap_no_exact_match", 0):
+        reasons.append("Muhatap Kodu tam eslesti; guclu eslesme sinyali.")
+    if features.get("muhatap_no_conflict", 0):
+        reasons.append("Muhatap Kodu catisiyor; farkli kisi olabilir.")
     if features.get("shared_contact_name_conflict", 0):
         reasons.append("Ortak iletisim var ancak isim sinyali catismali.")
     if features.get("household_risk_flag", 0):

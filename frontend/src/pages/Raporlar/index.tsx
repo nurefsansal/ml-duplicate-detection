@@ -228,13 +228,36 @@ export default function Raporlar() {
 
                   {/* Detection */}
                   {selectedTab === "detection" && detection && (
-                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
-                      <StatCard label="Tespit Çalışması" value={detection.total_detection_runs} />
-                      <StatCard label="Aday Çift" value={detection.total_match_candidates} />
-                      <StatCard label="Ort. Skor" value={`%${detection.avg_score_pct}`} color="text-blue-600" bg="bg-blue-50" />
-                      <StatCard label="Onaylanan" value={detection.approved} color="text-green-600" bg="bg-green-50" />
-                      <StatCard label="Bekleyen" value={detection.pending} color="text-yellow-600" bg="bg-yellow-50" />
-                      <StatCard label="Reddedilen" value={detection.rejected} color="text-red-600" bg="bg-red-50" />
+                    <div className="space-y-4">
+                      {/* Group-level metrics (primary — the meaningful numbers) */}
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+                        <StatCard
+                          label="Mükerrer Grup"
+                          value={(detection.total_duplicate_groups ?? 0).toLocaleString("tr-TR")}
+                          color="text-red-600"
+                          bg="bg-red-50"
+                        />
+                        <StatCard
+                          label="Mükerrer Çift"
+                          value={(detection.total_duplicate_pairs ?? detection.total_match_candidates ?? 0).toLocaleString("tr-TR")}
+                          color="text-orange-600"
+                          bg="bg-orange-50"
+                        />
+                        <StatCard
+                          label="Etkilenen Kayıt"
+                          value={(detection.total_affected_records ?? 0).toLocaleString("tr-TR")}
+                          color="text-amber-600"
+                          bg="bg-amber-50"
+                        />
+                      </div>
+                      {/* Run-level & decision stats */}
+                      <div className="pt-4 border-t border-gray-100 grid grid-cols-2 sm:grid-cols-3 gap-4">
+                        <StatCard label="Tespit Çalışması" value={detection.total_detection_runs} />
+                        <StatCard label="Ort. Skor" value={`%${detection.avg_score_pct}`} color="text-blue-600" bg="bg-blue-50" />
+                        <StatCard label="Onaylanan" value={detection.approved} color="text-green-600" bg="bg-green-50" />
+                        <StatCard label="Bekleyen" value={detection.pending} color="text-yellow-600" bg="bg-yellow-50" />
+                        <StatCard label="Reddedilen" value={detection.rejected} color="text-red-600" bg="bg-red-50" />
+                      </div>
                     </div>
                   )}
 

@@ -28,6 +28,7 @@ const TARGET_FIELD_OPTIONS = [
   { value: "phone", label: "Telefon (phone)" },
   { value: "email", label: "E-posta (email)" },
   { value: "city", label: "Şehir (city)" },
+  { value: "muhatap_no", label: "Muhatap Kodu (muhatap_no)" },
   { value: "address", label: "Adres (address)" },
   { value: "other", label: "Diğer (atla)" },
 ];

@@ -268,6 +268,7 @@ export default function TemizVeriSeti() {
                   <th className="px-4 py-3 text-left font-medium text-gray-400">Telefon</th>
                   <th className="px-4 py-3 text-left font-medium text-gray-400">TC</th>
                   <th className="px-4 py-3 text-left font-medium text-gray-400">Şehir</th>
+                  <th className="px-4 py-3 text-left font-medium text-gray-400">Muhatap No</th>
                   <th className="px-4 py-3 text-left font-medium text-gray-400">Upload</th>
                   <th className="px-4 py-3 text-left font-medium text-gray-400">Durum</th>
                 </tr>
@@ -275,14 +276,14 @@ export default function TemizVeriSeti() {
               <tbody className="divide-y divide-gray-50">
                 {loading ? (
                   <tr>
-                    <td colSpan={8} className="px-5 py-10 text-center text-gray-400">
+                    <td colSpan={9} className="px-5 py-10 text-center text-gray-400">
                       <i className="ri-loader-4-line animate-spin text-xl block mb-2" />
                       Yükleniyor…
                     </td>
                   </tr>
                 ) : records.length === 0 ? (
                   <tr>
-                    <td colSpan={8} className="px-5 py-10 text-center text-gray-400">
+                    <td colSpan={9} className="px-5 py-10 text-center text-gray-400">
                       Kayıt bulunamadı.
                       {total === 0 && " Önce Veri Yükleme veya Veri Normalizasyon adımını tamamlayın."}
                     </td>
@@ -296,6 +297,7 @@ export default function TemizVeriSeti() {
                       <td className="px-4 py-3 text-gray-600">{r.clean_phone || "-"}</td>
                       <td className="px-4 py-3 text-gray-600 font-mono">{r.clean_tc || "-"}</td>
                       <td className="px-4 py-3 text-gray-600">{r.clean_city || "-"}</td>
+                      <td className="px-4 py-3 text-gray-600 font-mono">{r.clean_muhatap_no || "-"}</td>
                       <td className="px-4 py-3 text-gray-400">#{r.upload_id}</td>
                       <td className="px-4 py-3"><Badge ok={r.is_valid} /></td>
                     </tr>

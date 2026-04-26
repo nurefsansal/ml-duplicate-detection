@@ -117,12 +117,22 @@ export default function MukerrerTespit() {
       setResults(views);
       setProgress(100);
       setDone(true);
+
+      const groupCount = result.duplicateGroupCount ?? 0;
+      const pairCount = result.duplicatePairs ?? 0;
+      const affected = result.affectedRecordCount ?? 0;
       setStatusMessage(
-        `Tespit tamamlandı — ${result.duplicatePairs} aday çift bulundu${
-          typeof result.detectionRunId === "number"
-            ? ` (Detection Run ID: ${result.detectionRunId})`
-            : ""
-        }`,
+        groupCount > 0
+          ? `Tespit tamamlandı — ${groupCount} mükerrer grup, ${pairCount} çift, ${affected} etkilenen kayıt${
+              typeof result.detectionRunId === "number"
+                ? ` (Run #${result.detectionRunId})`
+                : ""
+            }`
+          : `Tespit tamamlandı — mükerrer kayıt bulunamadı${
+              typeof result.detectionRunId === "number"
+                ? ` (Run #${result.detectionRunId})`
+                : ""
+            }`,
       );
     } catch (error: unknown) {
       const axiosDetail =
@@ -326,7 +336,51 @@ export default function MukerrerTespit() {
           </div>
         )}
 
-        {/* Post-detection action */}
+        {/* Post-detection summary stats */}
+        {done && realResults && (
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            {[
+              {
+                label: "Toplam Kayıt",
+                value: realResults.totalRecords ?? 0,
+                icon: "ri-database-2-line",
+                color: "text-gray-600",
+                bg: "bg-gray-50",
+              },
+              {
+                label: "Mükerrer Grup",
+                value: realResults.duplicateGroupCount ?? 0,
+                icon: "ri-group-line",
+                color: "text-red-600",
+                bg: "bg-red-50",
+              },
+              {
+                label: "Mükerrer Çift",
+                value: realResults.duplicatePairs ?? 0,
+                icon: "ri-links-line",
+                color: "text-orange-600",
+                bg: "bg-orange-50",
+              },
+              {
+                label: "Etkilenen Kayıt",
+                value: realResults.affectedRecordCount ?? 0,
+                icon: "ri-user-line",
+                color: "text-amber-600",
+                bg: "bg-amber-50",
+              },
+            ].map(({ label, value, icon, color, bg }) => (
+              <div key={label} className={`rounded-xl border border-gray-100 ${bg} p-4`}>
+                <div className="flex items-center gap-2 mb-1">
+                  <i className={`${icon} ${color} text-base`} />
+                  <p className="text-xs text-gray-500">{label}</p>
+                </div>
+                <p className={`text-2xl font-bold ${color}`}>{value.toLocaleString("tr-TR")}</p>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Post-detection actions */}
         {done && (
           <div className="flex flex-wrap gap-3">
             <button
