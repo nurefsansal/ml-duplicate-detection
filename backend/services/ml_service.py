@@ -1,13 +1,30 @@
 from __future__ import annotations
 
+import json
 import math
 import pickle
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
+from sklearn.model_selection import train_test_split
+from sqlalchemy.orm import Session
+
+from backend.models.database import MatchCandidate, ReviewAction
 
 
 MODEL_PATH = Path("backend/models/model.pkl")
+MODEL_STATUS_PATH = Path("backend/models/model_status.json")
+TRAINING_FEATURE_COLUMNS = [
+    "name_similarity",
+    "email_similarity",
+    "phone_exact_match",
+    "tc_exact_match",
+    "city_exact_match",
+    "address_similarity",
+]
 
 
 def _sigmoid(x: float) -> float:
@@ -64,6 +81,143 @@ def _load_model():
 
     with open(MODEL_PATH, "rb") as f:
         return pickle.load(f)
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _extract_raw_features(match: MatchCandidate) -> dict[str, Any]:
+    raw = {}
+    decision_features = getattr(match, "features", None)
+    if isinstance(decision_features, dict):
+        nested = decision_features.get("features")
+        if isinstance(nested, dict):
+            raw.update(nested)
+        raw.update({k: v for k, v in decision_features.items() if k != "features"})
+    return raw
+
+
+def _extract_training_features(raw_features: dict[str, Any]) -> dict[str, float]:
+    return {
+        "name_similarity": _safe_float(raw_features.get("name_similarity"), 0.0),
+        "email_similarity": _safe_float(raw_features.get("email_similarity"), 0.0),
+        "phone_exact_match": float(_safe_int(raw_features.get("phone_exact_match"), 0)),
+        "tc_exact_match": float(_safe_int(raw_features.get("tc_exact_match"), 0)),
+        "city_exact_match": float(_safe_int(raw_features.get("city_exact_match"), 0)),
+        "address_similarity": _safe_float(raw_features.get("address_similarity"), 0.0),
+    }
+
+
+def _latest_review_decisions(session: Session) -> dict[int, str]:
+    rows = (
+        session.query(ReviewAction)
+        .order_by(ReviewAction.match_id.asc(), ReviewAction.decided_at.desc(), ReviewAction.id.desc())
+        .all()
+    )
+    latest: dict[int, str] = {}
+    for row in rows:
+        if row.match_id in latest:
+            continue
+        latest[int(row.match_id)] = str(row.decision or "").strip().lower()
+    return latest
+
+
+def train_match_probability_model(session: Session) -> dict[str, Any]:
+    review_labels = _latest_review_decisions(session)
+    candidates = (
+        session.query(MatchCandidate)
+        .filter(MatchCandidate.decision.in_(["approved", "rejected", "pending"]))
+        .all()
+    )
+
+    rows: list[dict[str, float]] = []
+    labels: list[int] = []
+    for candidate in candidates:
+        decision = review_labels.get(int(candidate.id)) or str(candidate.decision or "").strip().lower()
+        if decision == "approved":
+            label = 1
+        elif decision == "rejected":
+            label = 0
+        else:
+            continue
+
+        features = _extract_training_features(_extract_raw_features(candidate))
+        rows.append(features)
+        labels.append(label)
+
+    if len(rows) < 10:
+        raise ValueError("Model eğitimi için en az 10 etiketli kayıt gerekiyor.")
+    if len(set(labels)) < 2:
+        raise ValueError("Model eğitimi için hem approved hem rejected örnekleri gerekiyor.")
+
+    X = pd.DataFrame(rows, columns=TRAINING_FEATURE_COLUMNS)
+    y = pd.Series(labels, dtype="int64")
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X,
+        y,
+        test_size=0.2,
+        random_state=42,
+        stratify=y,
+    )
+
+    model = RandomForestClassifier(
+        n_estimators=200,
+        random_state=42,
+        class_weight="balanced",
+    )
+    model.fit(X_train, y_train)
+
+    y_pred = model.predict(X_test)
+    metrics = {
+        "accuracy": round(float(accuracy_score(y_test, y_pred)), 4),
+        "precision": round(float(precision_score(y_test, y_pred, zero_division=0)), 4),
+        "recall": round(float(recall_score(y_test, y_pred, zero_division=0)), 4),
+        "f1": round(float(f1_score(y_test, y_pred, zero_division=0)), 4),
+        "train_size": int(len(X_train)),
+        "test_size": int(len(X_test)),
+        "total_labeled_samples": int(len(X)),
+        "feature_columns": TRAINING_FEATURE_COLUMNS,
+    }
+
+    MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(MODEL_PATH, "wb") as model_file:
+        pickle.dump(model, model_file)
+    with open(MODEL_STATUS_PATH, "w", encoding="utf-8") as status_file:
+        json.dump(metrics, status_file, ensure_ascii=False, indent=2)
+
+    return metrics
+
+
+def get_model_status() -> dict[str, Any]:
+    if not MODEL_PATH.exists():
+        return {
+            "trained": False,
+            "model_path": str(MODEL_PATH),
+            "message": "Model henüz eğitilmedi.",
+        }
+    status_payload: dict[str, Any] = {}
+    if MODEL_STATUS_PATH.exists():
+        with open(MODEL_STATUS_PATH, "r", encoding="utf-8") as status_file:
+            data = json.load(status_file)
+            if isinstance(data, dict):
+                status_payload = data
+    return {
+        "trained": True,
+        "model_path": str(MODEL_PATH),
+        **status_payload,
+    }
 
 
 def predict_match_probability(features: dict) -> float:
@@ -143,3 +297,11 @@ def predict_match_probability(features: dict) -> float:
         return round(pred, 4)
 
     return _fallback_probability(features)
+
+
+def predict_same_person_probability(features: dict[str, Any]) -> float:
+    """
+    Public service function for downstream consumers.
+    """
+    prepared = _extract_training_features(features)
+    return predict_match_probability(prepared)

@@ -14,7 +14,11 @@ from sqlalchemy.orm import sessionmaker
 
 from backend.schemas.requests import RecordIn
 from backend.services.blocking_service import generate_candidate_pairs
-from backend.services.feature_service import build_pair_features
+from backend.services.feature_service import (
+    build_pair_features,
+    email_similarity_score,
+    phone_similarity_score,
+)
 from backend.services.ml_service import predict_match_probability
 from backend.services.normalization_service import (
     canonical_name,
@@ -233,6 +237,8 @@ def _build_risk_flags(features: dict[str, Any]) -> list[str]:
         risk_flags.append("shared_contact_name_conflict")
     if features.get("household_risk_flag", 0):
         risk_flags.append("household_risk")
+    if features.get("same_surname_name_conflict", 0):
+        risk_flags.append("same_surname_name_conflict")
     if int(features.get("common_non_empty_fields", 0) or 0) <= 2:
         risk_flags.append("sparse_data")
 
@@ -343,6 +349,60 @@ def _build_fallback_similarity_comparison(
     }
 
 
+def _build_fallback_contact_similarity_comparison(
+    *,
+    raw_left_value: str,
+    raw_right_value: str,
+    normalized_left_value: str,
+    normalized_right_value: str,
+    similarity_score: float,
+    exact_match: bool,
+    comparison_method: str,
+    field_name: str,
+) -> dict[str, Any]:
+    if not normalized_left_value and not normalized_right_value:
+        result = "missing"
+        score_percent = 0
+        notes = f"{field_name} her iki kayitta da bos."
+        exact = False
+    elif not normalized_left_value or not normalized_right_value:
+        result = "missing"
+        score_percent = 0
+        notes = f"{field_name} alanlarindan biri bos."
+        exact = False
+    else:
+        exact = bool(exact_match)
+        bounded_score = max(0.0, min(1.0, float(similarity_score or 0.0)))
+        score_percent = 100 if exact else int(round(bounded_score * 100))
+        if exact:
+            result = "exact_match"
+            notes = f"{field_name} fallback karsilastirmasinda birebir eslesti."
+        elif bounded_score >= 0.85:
+            result = "strong_match"
+            notes = f"{field_name} fallback karsilastirmasinda guclu benzerlik gosteriyor."
+        elif bounded_score >= 0.60:
+            result = "partial_match"
+            notes = f"{field_name} fallback karsilastirmasinda kismi benzerlik gosteriyor."
+        elif bounded_score >= 0.20:
+            result = "weak_match"
+            notes = f"{field_name} fallback karsilastirmasinda zayif benzerlik gosteriyor."
+        else:
+            result = "mismatch"
+            notes = f"{field_name} fallback karsilastirmasinda farkli gorunuyor."
+
+    return {
+        "rawLeftValue": raw_left_value or None,
+        "rawRightValue": raw_right_value or None,
+        "normalizedLeftValue": normalized_left_value or None,
+        "normalizedRightValue": normalized_right_value or None,
+        "comparisonMethod": comparison_method,
+        "comparisonResult": result,
+        "score0To100": score_percent,
+        "exactMatch": exact,
+        "notes": notes,
+    }
+
+
 def _build_legacy_field_comparisons(
     left_record: dict[str, Any],
     right_record: dict[str, Any],
@@ -365,6 +425,19 @@ def _build_legacy_field_comparisons(
     right_first_name = _safe_str(right_record.get("clean_first_name"))
     left_surname = _safe_str(left_record.get("clean_surname"))
     right_surname = _safe_str(right_record.get("clean_surname"))
+    left_clean_phone = _safe_str(left_record.get("clean_phone"))
+    right_clean_phone = _safe_str(right_record.get("clean_phone"))
+    left_clean_email = _safe_str(left_record.get("clean_email"))
+    right_clean_email = _safe_str(right_record.get("clean_email"))
+    left_email_key = _safe_str(left_record.get("email_normalized_key"))
+    right_email_key = _safe_str(right_record.get("email_normalized_key"))
+    left_clean_address = _safe_str(left_record.get("clean_address"))
+    right_clean_address = _safe_str(right_record.get("clean_address"))
+
+    phone_similarity = phone_similarity_score(left_clean_phone, right_clean_phone)
+    email_similarity_clean = email_similarity_score(left_clean_email, right_clean_email)
+    email_similarity_key = email_similarity_score(left_email_key, right_email_key)
+    email_similarity = max(email_similarity_clean, email_similarity_key)
 
     return {
         "fullName": _build_fallback_similarity_comparison(
@@ -374,7 +447,7 @@ def _build_legacy_field_comparisons(
             normalized_right_value=right_full_name,
             score=float(features.get("name_jaro_winkler", 0.0) or 0.0),
             exact_match=left_full_name == right_full_name and bool(left_full_name),
-            comparison_method="legacy_jaro_winkler(clean_name)",
+            comparison_method="legacy_hybrid_jaro_token_similarity(clean_name)",
             field_name="Ad soyad",
         ),
         "firstName": _build_fallback_similarity_comparison(
@@ -408,25 +481,25 @@ def _build_legacy_field_comparisons(
             notes="TC Kimlik No fallback karsilastirmasinda eslesti.",
             use_conflict_label=True,
         ),
-        "phone": _build_fallback_exact_comparison(
+        "phone": _build_fallback_contact_similarity_comparison(
             raw_left_value=raw_left_phone,
             raw_right_value=raw_right_phone,
-            normalized_left_value=_safe_str(left_record.get("clean_phone")),
-            normalized_right_value=_safe_str(right_record.get("clean_phone")),
+            normalized_left_value=left_clean_phone,
+            normalized_right_value=right_clean_phone,
+            similarity_score=phone_similarity,
             exact_match=bool(features.get("phone_exact_match", 0)),
-            comparison_method="legacy_exact_match(clean_phone)",
+            comparison_method="legacy_tiered_phone_similarity(clean_phone)",
             field_name="Telefon",
-            notes="Telefon fallback karsilastirmasinda eslesti.",
         ),
-        "email": _build_fallback_exact_comparison(
+        "email": _build_fallback_contact_similarity_comparison(
             raw_left_value=raw_left_email,
             raw_right_value=raw_right_email,
-            normalized_left_value=_safe_str(left_record.get("email_normalized_key")),
-            normalized_right_value=_safe_str(right_record.get("email_normalized_key")),
+            normalized_left_value=left_email_key or left_clean_email,
+            normalized_right_value=right_email_key or right_clean_email,
+            similarity_score=email_similarity,
             exact_match=bool(features.get("email_exact_match", 0)),
-            comparison_method="legacy_exact_match(email_normalized_key)",
+            comparison_method="legacy_hybrid_email_similarity(clean_email+email_normalized_key)",
             field_name="E-posta",
-            notes="E-posta fallback karsilastirmasinda normalize anahtara gore eslesti.",
         ),
         "city": _build_fallback_exact_comparison(
             raw_left_value=raw_left_city,
@@ -437,6 +510,16 @@ def _build_legacy_field_comparisons(
             comparison_method="legacy_exact_match(clean_city)",
             field_name="Sehir",
             notes="Sehir fallback karsilastirmasinda eslesti.",
+        ),
+        "address": _build_fallback_similarity_comparison(
+            raw_left_value=_pick_mapping_value(left_record, "Adres", "adres", "address"),
+            raw_right_value=_pick_mapping_value(right_record, "Adres", "adres", "address"),
+            normalized_left_value=left_clean_address,
+            normalized_right_value=right_clean_address,
+            score=float(features.get("address_similarity", 0.0) or 0.0),
+            exact_match=bool(left_clean_address and left_clean_address == right_clean_address),
+            comparison_method="legacy_jaro_winkler(clean_address)",
+            field_name="Adres",
         ),
         "muhatapNo": _build_fallback_exact_comparison(
             raw_left_value=_pick_mapping_value(left_record, "Muhatap No", "muhatap_no", "muhatap kodu", "customer_id"),
@@ -486,6 +569,8 @@ def _build_rule_reasons(
         reasons.append("Ortak iletisim var ancak isim sinyali catismali.")
     if features.get("household_risk_flag", 0):
         reasons.append("Household riski tespit edildi.")
+    if features.get("same_surname_name_conflict", 0):
+        reasons.append("Soyad ayni ancak ad sinyali belirgin sekilde farkli.")
     if int(features.get("common_non_empty_fields", 0) or 0) <= 2:
         reasons.append("Bos alanlar nedeniyle guven dusuruldu.")
 
@@ -494,11 +579,11 @@ def _build_rule_reasons(
     if source == "fallback_legacy":
         reasons.append("Splink kullanilamadi; legacy fallback devrede.")
 
-    if final_decision == "review":
+    if final_decision == "pending":
         reasons.append("Nihai karar manuel inceleme olarak birakildi.")
-    elif final_decision == "different_person":
+    elif final_decision == "rejected":
         reasons.append("Nihai karar farkli kisi yonunde.")
-    elif final_decision == "same_person":
+    elif final_decision == "approved":
         reasons.append("Nihai karar ayni kisi yonunde.")
 
     return reasons
@@ -511,6 +596,16 @@ def _build_legacy_payload(df_clean: pd.DataFrame, left_idx: int, right_idx: int)
     features = build_pair_features(left_record, right_record)
     ml_probability = predict_match_probability(features)
     final_decision = resolve_match_decision(ml_probability, features)
+    if final_decision == "rejected" and features.get("tc_conflict", 0) and ml_probability >= 0.80:
+        decision_reason = (
+            "Benzerlik skoru yuksek ancak TC Kimlik No cakismasi nedeniyle otomatik birlestirme engellendi."
+        )
+    elif final_decision == "approved":
+        decision_reason = "Guclu kimlik sinyalleri nedeniyle otomatik onaylandi."
+    elif final_decision == "pending":
+        decision_reason = "Skor ve kimlik sinyalleri manuel inceleme gerektiriyor."
+    else:
+        decision_reason = "Guven skoru ve kimlik sinyalleri yetersiz oldugu icin otomatik reddedildi."
     field_comparisons = _build_legacy_field_comparisons(
         left_record,
         right_record,
@@ -524,6 +619,7 @@ def _build_legacy_payload(df_clean: pd.DataFrame, left_idx: int, right_idx: int)
         final_decision=final_decision,
         source="fallback_legacy",
     )
+    rule_reasons.insert(0, decision_reason)
 
     return {
         "pairId": f"{int(left_idx)}-{int(right_idx)}",
@@ -540,6 +636,9 @@ def _build_legacy_payload(df_clean: pd.DataFrame, left_idx: int, right_idx: int)
         "splinkMatchWeight": None,
         "ml_probability": ml_probability,
         "decision": final_decision,
+        "decision_type": "auto",
+        "review_required": final_decision == "pending",
+        "reason": decision_reason,
         "finalDecision": final_decision,
         "decisionSource": "fallback_legacy",
     }
@@ -557,7 +656,10 @@ def _legacy_rules_matched(features: dict) -> int:
 
 
 def _legacy_detection(df_clean: pd.DataFrame, min_rules_to_match: int) -> DetectionResults:
-    candidate_pairs = generate_candidate_pairs(df_clean)
+    candidate_pairs, candidate_meta = generate_candidate_pairs(
+        df_clean,
+        return_metadata=True,
+    )
     duplicates: list[dict] = []
 
     for left_idx, right_idx in candidate_pairs:
@@ -575,7 +677,12 @@ def _legacy_detection(df_clean: pd.DataFrame, min_rules_to_match: int) -> Detect
         reverse=True,
     )
 
-    return DetectionResults(duplicates, candidate_pairs=len(candidate_pairs))
+    return DetectionResults(
+        duplicates,
+        candidate_pairs=len(candidate_pairs),
+        candidate_pairs_total=len(candidate_pairs),
+        candidate_pairs_limited=bool(candidate_meta.get("limited", False)),
+    )
 
 
 def _get_database_url() -> str:

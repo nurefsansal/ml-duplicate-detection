@@ -15,6 +15,8 @@ from backend.models.database import Entity, EntityMap
 from backend.services.database_service import EntityMapService
 from backend.services.review_service import (
     approve_match_candidate,
+    get_duplicate_groups,
+    get_match_candidates,
     get_entity_memberships,
     get_match_candidate_statistics,
     get_pending_match_candidates,
@@ -22,6 +24,7 @@ from backend.services.review_service import (
     remove_entity_membership,
     serialize_match_candidate,
 )
+from backend.services.auth_service import get_current_user
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
@@ -40,7 +43,7 @@ def get_db():
         db.close()
 
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(get_current_user)])
 
 
 class PendingMatchResponse(BaseModel):
@@ -49,6 +52,7 @@ class PendingMatchResponse(BaseModel):
     id: int
     left_id: int
     right_id: int
+    decision: str = "pending"
     score: float
     match_type: str
     confidence: Optional[float]
@@ -128,10 +132,71 @@ def get_pending_matches(
         raise HTTPException(status_code=500, detail=f"Error fetching pending matches: {str(e)}")
 
 
+@router.get("/matches")
+def list_matches(
+    decision: str = Query("pending", pattern="^(pending|approved|rejected)$"),
+    upload_id: Optional[int] = None,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+):
+    """
+    Match kayitlarini karar durumuna gore listele.
+
+    Query params:
+    - decision: pending | approved | rejected
+    - upload_id: opsiyonel upload filtresi
+    - limit: sonuc limiti
+    """
+    try:
+        matches = get_match_candidates(
+            db,
+            upload_id=upload_id,
+            decision=decision,
+            limit=limit,
+        )
+        result = [serialize_match_candidate(match) for match in matches]
+        return {
+            "success": True,
+            "decision": decision,
+            "count": len(result),
+            "matches": result,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching matches: {str(e)}")
+
+
+@router.get("/duplicate-groups")
+def list_duplicate_groups(
+    decision: str = Query("approved", pattern="^(pending|approved|rejected)$"),
+    upload_id: Optional[int] = None,
+    limit: int = 5000,
+    db: Session = Depends(get_db),
+):
+    """
+    Pair esitlesmeleri graph olarak birlestirip duplicate group listesi doner.
+    """
+    try:
+        groups = get_duplicate_groups(
+            db,
+            upload_id=upload_id,
+            decision=decision,
+            limit=limit,
+        )
+        return {
+            "success": True,
+            "decision": decision,
+            "count": len(groups),
+            "groups": groups,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching duplicate groups: {str(e)}")
+
+
 @router.post("/admin/approve-match")
 def approve_match(
     request: ApproveMatchRequest,
     db: Session = Depends(get_db),
+    current_user: str = Depends(get_current_user),
 ):
     """
     Match'i onayla ve opsiyonel olarak entity'ye birlestir.
@@ -140,7 +205,7 @@ def approve_match(
         match, entity = approve_match_candidate(
             db,
             match_id=request.match_id,
-            approved_by=request.approved_by,
+            approved_by=current_user,
             merge_into_entity=request.merge_into_entity,
             canonical_name=request.canonical_name,
         )
@@ -152,7 +217,7 @@ def approve_match(
             "success": True,
             "match_id": match.id,
             "status": match.decision,
-            "approved_by": request.approved_by,
+            "approved_by": current_user,
             "approved_at": datetime.utcnow().isoformat(),
         }
 
@@ -178,6 +243,7 @@ def approve_match(
 def reject_match(
     request: RejectMatchRequest,
     db: Session = Depends(get_db),
+    current_user: str = Depends(get_current_user),
 ):
     """
     Match'i reddet.
@@ -186,7 +252,7 @@ def reject_match(
         match = reject_match_candidate(
             db,
             match_id=request.match_id,
-            rejected_by=request.rejected_by,
+            rejected_by=current_user,
             reason=request.reason,
         )
 
@@ -199,7 +265,7 @@ def reject_match(
             "success": True,
             "match_id": match.id,
             "status": match.decision,
-            "rejected_by": request.rejected_by,
+            "rejected_by": current_user,
             "rejected_at": datetime.utcnow().isoformat(),
             "reason": request.reason,
         }
@@ -323,7 +389,7 @@ def get_entity_donors(
                 "donor_count": entity.donor_count,
             },
             "donors": donor_list,
-        }
+        } 
     except HTTPException:
         raise
     except Exception as e:

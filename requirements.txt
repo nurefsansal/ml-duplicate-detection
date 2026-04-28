@@ -9,4 +9,5 @@ httpx
 python-multipart
 scikit-learn
 splink>=4.0.0
+PyJWT
 

@@ -21,6 +21,7 @@ def make_record(
     telefon: str = "",
     email: str = "",
     sehir: str = "",
+    adres: str = "",
 ) -> RecordIn:
     return RecordIn(
         adSoyad=ad_soyad,
@@ -28,6 +29,7 @@ def make_record(
         telefon=telefon,
         email=email,
         sehir=sehir,
+        adres=adres,
     )
 
 
@@ -106,6 +108,7 @@ def test_same_phone_is_reported_as_match() -> None:
     assert phone_comparison["comparisonResult"] == "exact_match"
     assert phone_comparison["score0To100"] == 100
     assert pair["features"]["phone_exact_match"] == 1
+    assert pair["features"]["phone_match"] == 1
 
 
 def test_same_tckn_is_reported_as_match() -> None:
@@ -130,6 +133,30 @@ def test_same_tckn_is_reported_as_match() -> None:
     assert tc_comparison["comparisonResult"] == "exact_match"
     assert tc_comparison["score0To100"] == 100
     assert pair["features"]["tc_exact_match"] == 1
+    assert pair["features"]["city_match"] == 1
+
+
+def test_address_similarity_feature_is_exposed() -> None:
+    pair = first_pair(
+        [
+            make_record(
+                "Mehmet Can",
+                telefon="05323334455",
+                sehir="Ankara",
+                adres="Ataturk Bulvari No:10 Cankaya",
+            ),
+            make_record(
+                "Mehmet Can",
+                telefon="05323334455",
+                sehir="Ankara",
+                adres="Ataturk Blv 10 Cankaya",
+            ),
+        ]
+    )
+
+    assert "address" in pair["fieldComparisons"]
+    assert "address_similarity" in pair["features"]
+    assert 0.0 <= pair["features"]["address_similarity"] <= 1.0
 
 
 def test_name_variation_can_be_strong_without_being_exact() -> None:
@@ -154,6 +181,69 @@ def test_name_variation_can_be_strong_without_being_exact() -> None:
     assert full_name_comparison["score0To100"] >= 80
 
 
+def test_name_order_swap_is_tolerated() -> None:
+    pair = first_pair(
+        [
+            make_record(
+                "Ali Veli",
+                telefon="05335557788",
+                sehir="Samsun",
+            ),
+            make_record(
+                "Veli Ali",
+                telefon="05335557788",
+                sehir="Samsun",
+            ),
+        ]
+    )
+
+    full_name_comparison = pair["fieldComparisons"]["fullName"]
+    assert full_name_comparison["comparisonResult"] == "exact_match"
+    assert full_name_comparison["score0To100"] == 100
+
+
+def test_name_abbreviation_is_supported_by_token_similarity() -> None:
+    pair = first_pair(
+        [
+            make_record(
+                "Ahmet M.",
+                telefon="05321112233",
+                sehir="Ankara",
+            ),
+            make_record(
+                "Ahmet Mustafa",
+                telefon="05321112233",
+                sehir="Ankara",
+            ),
+        ]
+    )
+
+    full_name_comparison = pair["fieldComparisons"]["fullName"]
+    assert full_name_comparison["comparisonResult"] in {"strong_match", "partial_match"}
+    assert full_name_comparison["score0To100"] >= 90
+    assert pair["features"]["name_token_similarity"] >= 0.90
+
+
+def test_same_surname_but_different_first_name_sets_risk_flag() -> None:
+    pair = first_pair(
+        [
+            make_record(
+                "Ali Yilmaz",
+                telefon="05326667788",
+                sehir="Ankara",
+            ),
+            make_record(
+                "Veli Yilmaz",
+                telefon="05326667788",
+                sehir="Ankara",
+            ),
+        ]
+    )
+
+    assert "same_surname_name_conflict" in pair["riskFlags"]
+    assert pair["finalDecision"] != "approved"
+
+
 def test_same_surname_and_city_with_different_phone_does_not_auto_merge() -> None:
     pair = first_pair(
         [
@@ -173,7 +263,53 @@ def test_same_surname_and_city_with_different_phone_does_not_auto_merge() -> Non
     )
 
     assert pair["fieldComparisons"]["phone"]["comparisonResult"] != "exact_match"
-    assert pair["finalDecision"] != "same_person"
+    assert pair["finalDecision"] != "approved"
+
+
+def test_tc_and_phone_match_can_auto_approve() -> None:
+    pair = first_pair(
+        [
+            make_record(
+                "Kerem Karaca",
+                tc="12345678901",
+                telefon="05331112233",
+                email="kerem.karaca+bagis@example.com",
+                sehir="Istanbul",
+            ),
+            make_record(
+                "Kerem Karaca",
+                tc="12345678901",
+                telefon="+90 533 111 22 33",
+                email="kerem.karaca@example.com",
+                sehir="Istanbul",
+            ),
+        ]
+    )
+    assert pair["finalDecision"] == "approved"
+    assert pair["decision"] == "approved"
+
+
+def test_tc_conflict_blocks_auto_approval_even_at_high_similarity() -> None:
+    pair = first_pair(
+        [
+            make_record(
+                "Pelin Koc",
+                tc="12345678901",
+                telefon="05332223344",
+                email="pelin.koc@example.com",
+                sehir="Ankara",
+            ),
+            make_record(
+                "Pelin Koc",
+                tc="99999999999",
+                telefon="05332223344",
+                email="pelin.koc+bagis@example.com",
+                sehir="Ankara",
+            ),
+        ]
+    )
+    assert pair["features"]["tc_conflict"] == 1
+    assert pair["finalDecision"] != "approved"
 
 
 def test_different_pairs_do_not_share_identical_breakdowns_unless_data_matches() -> None:
@@ -213,7 +349,8 @@ def test_different_pairs_do_not_share_identical_breakdowns_unless_data_matches()
     assert email_pair["fieldComparisons"] != phone_pair["fieldComparisons"]
     assert email_pair["fieldComparisons"]["email"]["score0To100"] == 100
     assert phone_pair["fieldComparisons"]["email"]["score0To100"] == 0
-    assert email_pair["fieldComparisons"]["phone"]["score0To100"] == 0
+    # Telefon karşılaştırması artık kademeli fuzzy skor üretebilir (exact değilse 0 olmak zorunda değil).
+    assert email_pair["fieldComparisons"]["phone"]["score0To100"] < 100
     assert phone_pair["fieldComparisons"]["phone"]["score0To100"] == 100
 
 

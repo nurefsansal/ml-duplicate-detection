@@ -59,10 +59,12 @@ class DuplicatePairResponse(BaseModel):
 
 class DetectResponse(BaseModel):
     sessionId: str
+    jobId: int | None = None
     uploadId: int | None = None
     normalizationRunId: int | None = None
     detectionRunId: int | None = None
     candidatePairs: int
+    candidatePairsLimited: bool = False
     duplicatePairs: int
     duplicateGroupCount: int = 0
     affectedRecordCount: int = 0

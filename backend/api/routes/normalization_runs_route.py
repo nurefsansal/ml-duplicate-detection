@@ -26,6 +26,7 @@ from backend.services.normalization_service import (
     extract_first_last_name,
     prepare_normalized_dataframe,
 )
+from backend.services.job_service import create_job, update_job_progress
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
@@ -93,8 +94,20 @@ def create_normalization_run(
     db: Session = Depends(get_db),
 ):
     """upload_id üzerinden raw_records normalize et, normalization_runs + normalized_records yaz."""
+    job = create_job(db, job_type="normalization")
+    if job is not None:
+        db.flush()
+        db.commit()
     upload = db.query(Upload).filter(Upload.id == payload.upload_id).first()
     if not upload:
+        if job is not None:
+            update_job_progress(
+                db,
+                job_id=job.id,
+                status="failed",
+                error_message=f"Upload {payload.upload_id} bulunamadı",
+            )
+            db.commit()
         raise HTTPException(
             status_code=404, detail=f"Upload {payload.upload_id} bulunamadı"
         )
@@ -106,10 +119,28 @@ def create_normalization_run(
         .all()
     )
     if not raw_records:
+        if job is not None:
+            update_job_progress(
+                db,
+                job_id=job.id,
+                status="failed",
+                error_message=f"Upload {payload.upload_id} için raw_record bulunamadı",
+            )
+            db.commit()
         raise HTTPException(
             status_code=400,
             detail=f"Upload {payload.upload_id} için raw_record bulunamadı",
         )
+    if job is not None:
+        update_job_progress(
+            db,
+            job_id=job.id,
+            status="running",
+            progress=10,
+            total_rows=len(raw_records),
+            processed_rows=0,
+        )
+        db.flush()
 
     rows = [r.raw_payload for r in raw_records]
     df_original = pd.DataFrame(rows)
@@ -132,6 +163,14 @@ def create_normalization_run(
     try:
         normalized_df = prepare_normalized_dataframe(df_processing)
     except Exception as exc:
+        if job is not None:
+            update_job_progress(
+                db,
+                job_id=job.id,
+                status="failed",
+                error_message=f"Normalizasyon hatası: {exc}",
+            )
+            db.commit()
         raise HTTPException(
             status_code=500, detail=f"Normalizasyon hatası: {exc}"
         ) from exc
@@ -153,8 +192,18 @@ def create_normalization_run(
         db.flush()
 
         normalized_payloads = [_row_to_payload(row) for _, row in normalized_df.iterrows()]
+        if job is not None:
+            update_job_progress(
+                db,
+                job_id=job.id,
+                status="running",
+                progress=40,
+                processed_rows=0,
+            )
 
-        for raw_record, normalized_payload in zip(raw_records, normalized_payloads, strict=False):
+        for index, (raw_record, normalized_payload) in enumerate(
+            zip(raw_records, normalized_payloads, strict=False), start=1
+        ):
             clean_name = str(normalized_payload.get("clean_name", "") or "")
             first_name = str(normalized_payload.get("first_name", "") or "")
             last_name = str(normalized_payload.get("last_name", "") or "")
@@ -185,6 +234,15 @@ def create_normalization_run(
                     normalized_payload=normalized_payload,
                 )
             )
+            if job is not None and index % 1000 == 0:
+                progress = 40 + (index / max(total_processed, 1)) * 50
+                update_job_progress(
+                    db,
+                    job_id=job.id,
+                    status="running",
+                    progress=progress,
+                    processed_rows=index,
+                )
 
         now = datetime.now(UTC).replace(tzinfo=None)
         upload.processing_stage = "normalized"
@@ -193,9 +251,19 @@ def create_normalization_run(
         upload.updated_at = now
 
         db.commit()
+        if job is not None:
+            update_job_progress(
+                db,
+                job_id=job.id,
+                status="completed",
+                progress=100,
+                processed_rows=total_processed,
+            )
+            db.commit()
 
         return {
             "success": True,
+            "job_id": job.id if job is not None else None,
             "upload_id": payload.upload_id,
             "normalization_run_id": normalization_run.id,
             "total_processed": total_processed,
@@ -204,6 +272,14 @@ def create_normalization_run(
         }
     except Exception as exc:
         db.rollback()
+        if job is not None:
+            update_job_progress(
+                db,
+                job_id=job.id,
+                status="failed",
+                error_message=f"Normalizasyon kaydedilemedi: {exc}",
+            )
+            db.commit()
         raise HTTPException(
             status_code=500, detail=f"Normalizasyon kaydedilemedi: {exc}"
         ) from exc

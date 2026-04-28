@@ -16,6 +16,7 @@ const navItems = [
 export default function Sidebar() {
   const [collapsed, setCollapsed] = useState(false);
   const location = useLocation();
+  const username = "Ayşe Kara";
 
   return (
     <aside
@@ -105,13 +106,15 @@ export default function Sidebar() {
 
       {!collapsed && (
         <div className="p-3 border-t border-gray-100">
-          <div className="flex items-center gap-3 p-2 rounded-lg hover:bg-gray-50 cursor-pointer">
+          <div className="flex items-center gap-3 p-2 rounded-lg">
             <div className="w-8 h-8 rounded-full bg-red-100 flex items-center justify-center flex-shrink-0">
-              <span className="text-xs font-bold text-red-600">AK</span>
+              <span className="text-xs font-bold text-red-600">
+                {username.slice(0, 2).toUpperCase()}
+              </span>
             </div>
             <div className="flex-1 min-w-0">
               <p className="text-xs font-semibold text-gray-800 truncate">
-                Ayşe Kara
+                {username}
               </p>
               <p className="text-[10px] text-gray-400 truncate">
                 Sistem Yöneticisi

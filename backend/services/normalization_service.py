@@ -5,15 +5,15 @@ from typing import Any
 
 import pandas as pd
 
-from src.preprocess import DataCleaner
 from backend.schemas.requests import RecordIn
 from backend.services.advanced_matching_service import build_name_keys
+from src.preprocess import DataCleaner
 
 NAME_COLUMN = "Ad Soyad"
 TC_COLUMN = "TC"
 PHONE_COLUMN = "Telefon"
 EMAIL_COLUMN = "E-mail"
-CITY_COLUMN = "Åehir"
+CITY_COLUMN = "\u015eehir"
 ADDRESS_COLUMN = "Adres"
 MUHATAP_NO_COLUMN = "Muhatap No"
 
@@ -43,73 +43,119 @@ PREVIEW_COLUMNS = [
     "is_valid",
 ]
 
-SOURCE_FIELD_TARGETS = {
-    "ad soyad": "name",
-    "ad": "name",
-    "soyad": "name",
-    "name": "name",
-    "full name": "name",
-    "fullname": "name",
-    "tc kimlik no": "tc",
-    "tc": "tc",
-    "tckn": "tc",
-    "identity": "tc",
-    "idnumber": "tc",
-    "telefon": "phone",
-    "phone": "phone",
-    "tel": "phone",
-    "mobile": "phone",
-    "email": "email",
-    "e-posta": "email",
-    "mail": "email",
-    "e mail": "email",
-    "sehir": "city",
-    "şehir": "city",
-    "city": "city",
-    "il": "city",
-    "adres": "address",
-    "address": "address",
-    "muhatap no": "muhatap_no",
-    "muhatap kodu": "muhatap_no",
-    "muhatap": "muhatap_no",
-    "customer id": "muhatap_no",
-    "customerid": "muhatap_no",
-    "donor id": "muhatap_no",
-    "donorid": "muhatap_no",
-    "musteri no": "muhatap_no",
-    "musteri kodu": "muhatap_no",
+TARGET_FIELD_ALIASES = {
+    "name": [
+        "ad soyad",
+        "ad",
+        "soyad",
+        "name",
+        "full name",
+        "fullname",
+    ],
+    "tc": [
+        "tc",
+        "tckn",
+        "tc kimlik no",
+        "identity",
+        "idnumber",
+    ],
+    "phone": [
+        "telefon",
+        "phone",
+        "tel",
+        "mobile",
+        "gsm",
+        "cep telefonu",
+    ],
+    "email": [
+        "email",
+        "e-mail",
+        "e mail",
+        "eposta",
+        "e-posta",
+        "mail",
+        "email address",
+    ],
+    "city": [
+        "sehir",
+        "\u015fehir",
+        "il",
+        "city",
+    ],
+    "address": [
+        "adres",
+        "acik adres",
+        "a\u00e7\u0131k adres",
+        "ikamet adresi",
+        "address",
+    ],
+    "muhatap_no": [
+        "muhatap no",
+        "muhatap kodu",
+        "muhatap",
+        "customer id",
+        "customerid",
+        "donor id",
+        "donorid",
+        "musteri no",
+        "m\u00fcsteri no",
+        "musteri kodu",
+        "m\u00fc\u015fteri kodu",
+    ],
 }
 
-FILE_COLUMN_MAP = {
-    "ad soyad": NAME_COLUMN,
-    "ad": NAME_COLUMN,
-    "soyad": NAME_COLUMN,
+TARGET_FIELD_TO_CANONICAL_COLUMN = {
     "name": NAME_COLUMN,
-    "tc kimlik no": TC_COLUMN,
     "tc": TC_COLUMN,
-    "tckn": TC_COLUMN,
-    "telefon": PHONE_COLUMN,
     "phone": PHONE_COLUMN,
-    "tel": PHONE_COLUMN,
     "email": EMAIL_COLUMN,
-    "e-posta": EMAIL_COLUMN,
-    "mail": EMAIL_COLUMN,
-    "sehir": CITY_COLUMN,
-    "şehir": CITY_COLUMN,
     "city": CITY_COLUMN,
-    "il": CITY_COLUMN,
-    "adres": ADDRESS_COLUMN,
     "address": ADDRESS_COLUMN,
-    "muhatap no": MUHATAP_NO_COLUMN,
-    "muhatap kodu": MUHATAP_NO_COLUMN,
-    "muhatap": MUHATAP_NO_COLUMN,
-    "customer id": MUHATAP_NO_COLUMN,
-    "customerid": MUHATAP_NO_COLUMN,
-    "donor id": MUHATAP_NO_COLUMN,
-    "donorid": MUHATAP_NO_COLUMN,
-    "musteri no": MUHATAP_NO_COLUMN,
-    "musteri kodu": MUHATAP_NO_COLUMN,
+    "muhatap_no": MUHATAP_NO_COLUMN,
 }
+
+
+def normalize_source_column_name(value: object) -> str:
+    text = str(value or "").strip().lower()
+    text = text.translate(
+        str.maketrans(
+            {
+                "c": "c",
+                "g": "g",
+                "i": "i",
+                "o": "o",
+                "s": "s",
+                "u": "u",
+                "\u00e7": "c",
+                "\u011f": "g",
+                "\u0131": "i",
+                "\u00f6": "o",
+                "\u015f": "s",
+                "\u00fc": "u",
+            }
+        )
+    )
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _compact_source_column_name(value: object) -> str:
+    return normalize_source_column_name(value).replace(" ", "")
+
+
+def _build_source_field_targets() -> dict[str, str]:
+    mappings: dict[str, str] = {}
+    for target_field, aliases in TARGET_FIELD_ALIASES.items():
+        for alias in aliases:
+            normalized = normalize_source_column_name(alias)
+            if not normalized:
+                continue
+            mappings[normalized] = target_field
+            mappings[_compact_source_column_name(alias)] = target_field
+    return mappings
+
+
+SOURCE_FIELD_TARGETS = _build_source_field_targets()
 
 
 def canonical_name(value: str) -> str:
@@ -175,7 +221,14 @@ def dict_records_from_df(df: pd.DataFrame) -> list[dict[str, str]]:
         out.append(
             {
                 "adSoyad": pick(row, NAME_COLUMN, "adSoyad", "name", "fullName"),
-                "tcKimlikNo": pick(row, TC_COLUMN, "tcKimlikNo", "tc", "identity", "idNumber"),
+                "tcKimlikNo": pick(
+                    row,
+                    TC_COLUMN,
+                    "tcKimlikNo",
+                    "tc",
+                    "identity",
+                    "idNumber",
+                ),
                 "telefon": pick(row, PHONE_COLUMN, "telefon", "phone", "mobile"),
                 "email": pick(row, EMAIL_COLUMN, "email", "mail"),
                 "sehir": pick(row, CITY_COLUMN, "Sehir", "sehir", "city"),
@@ -220,19 +273,19 @@ def normalize_text(value: object) -> str:
     text = str(value).strip().upper()
     replacements = str.maketrans(
         {
-            "Ç": "C",
-            "Ğ": "G",
-            "İ": "I",
+            "\u00c7": "C",
+            "\u011e": "G",
+            "\u0130": "I",
             "I": "I",
-            "Ö": "O",
-            "Ş": "S",
-            "Ü": "U",
-            "ç": "C",
-            "ğ": "G",
-            "ı": "I",
-            "ö": "O",
-            "ş": "S",
-            "ü": "U",
+            "\u00d6": "O",
+            "\u015e": "S",
+            "\u00dc": "U",
+            "\u00e7": "C",
+            "\u011f": "G",
+            "\u0131": "I",
+            "\u00f6": "O",
+            "\u015f": "S",
+            "\u00fc": "U",
         }
     )
     text = text.translate(replacements)
@@ -241,8 +294,9 @@ def normalize_text(value: object) -> str:
 
 
 def infer_target_field_name(source_column_name: str) -> str:
-    normalized = re.sub(r"\s+", " ", str(source_column_name or "").strip().lower())
-    return SOURCE_FIELD_TARGETS.get(normalized, "ignored")
+    normalized = normalize_source_column_name(source_column_name)
+    compact = normalized.replace(" ", "")
+    return SOURCE_FIELD_TARGETS.get(normalized) or SOURCE_FIELD_TARGETS.get(compact) or "ignored"
 
 
 def build_column_mapping_definitions(source_columns: list[str]) -> list[dict[str, Any]]:
@@ -264,14 +318,24 @@ def build_column_mapping_definitions(source_columns: list[str]) -> list[dict[str
 def canonicalize_upload_dataframe(df_raw: pd.DataFrame) -> pd.DataFrame:
     df = df_raw.copy()
     df.columns = [
-        FILE_COLUMN_MAP.get(str(column).lower().strip(), column)
+        TARGET_FIELD_TO_CANONICAL_COLUMN.get(
+            infer_target_field_name(str(column)),
+            column,
+        )
         for column in df.columns
     ]
 
     if NAME_COLUMN not in df.columns:
         raise ValueError("Eksik zorunlu kolon: Ad Soyad")
 
-    for column in [TC_COLUMN, PHONE_COLUMN, EMAIL_COLUMN, CITY_COLUMN, ADDRESS_COLUMN, MUHATAP_NO_COLUMN]:
+    for column in [
+        TC_COLUMN,
+        PHONE_COLUMN,
+        EMAIL_COLUMN,
+        CITY_COLUMN,
+        ADDRESS_COLUMN,
+        MUHATAP_NO_COLUMN,
+    ]:
         if column not in df.columns:
             df[column] = ""
 
@@ -316,11 +380,15 @@ def prepare_normalized_dataframe(df_raw: pd.DataFrame) -> pd.DataFrame:
     normalized["phone_last7"] = normalized["clean_phone"].apply(
         lambda value: str(value or "")[-7:] if value else ""
     )
-    normalized["email_normalized_key"] = normalized["clean_email"].apply(normalize_email_key)
+    normalized["email_normalized_key"] = normalized["clean_email"].apply(
+        normalize_email_key
+    )
     normalized["clean_address"] = normalized[ADDRESS_COLUMN].apply(normalize_text)
     if MUHATAP_NO_COLUMN in normalized.columns:
         normalized["clean_muhatap_no"] = normalized[MUHATAP_NO_COLUMN].apply(
-            lambda v: re.sub(r"\s+", "", str(v or "")).upper() if v and not (isinstance(v, float) and pd.isna(v)) else ""
+            lambda v: re.sub(r"\s+", "", str(v or "")).upper()
+            if v and not (isinstance(v, float) and pd.isna(v))
+            else ""
         )
     else:
         normalized["clean_muhatap_no"] = ""

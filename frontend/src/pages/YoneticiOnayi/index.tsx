@@ -1,79 +1,32 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import DashboardLayout from "../../components/feature/DashboardLayout";
 import FieldComparisonsPanel from "../../components/feature/FieldComparisonsPanel";
 import Header from "../../components/feature/Header";
 import {
   approvePendingMatch,
-  getPendingMatches,
+  getMatches,
   rejectPendingMatch,
 } from "../../services/api";
 import {
+  finalDecisionLabel,
+  finalDecisionTone,
   mapPendingMatchToView,
-  type PairWorkflowState,
   type UiDuplicatePair,
 } from "../../utils/duplicatePairView";
-
-type TabType = PairWorkflowState;
 
 function formatScore(value: number): string {
   return `${value.toFixed(2)}%`;
 }
 
-function formatDate(value?: string | null): string {
-  if (!value) {
-    return "-";
-  }
-
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-
-  return date.toLocaleString("tr-TR", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
-function workflowLabel(value: PairWorkflowState): string {
-  if (value === "onaylandi") {
-    return "Onaylandi";
-  }
-  if (value === "reddedildi") {
-    return "Reddedildi";
-  }
-  return "Beklemede";
-}
-
-function workflowTone(value: PairWorkflowState): string {
-  if (value === "onaylandi") {
-    return "bg-green-50 text-green-700";
-  }
-  if (value === "reddedildi") {
-    return "bg-red-50 text-red-600";
-  }
-  return "bg-yellow-50 text-yellow-700";
-}
-
 function algorithmLabel(value?: string): string {
-  if (!value) {
-    return "Bilinmiyor";
-  }
-  return value.toUpperCase();
+  return value ? value.toUpperCase() : "Bilinmiyor";
 }
 
 function recordMeta(record: UiDuplicatePair["records"][number]): string {
   return [record.telefon, record.email, record.tcKimlikNo]
     .filter(Boolean)
     .join(" | ");
-}
-
-function pairNames(group: UiDuplicatePair): string {
-  return `${group.records[0].adSoyad || "-"} / ${group.records[1].adSoyad || "-"}`;
 }
 
 function pairSearchText(group: UiDuplicatePair): string {
@@ -93,38 +46,43 @@ function pairSearchText(group: UiDuplicatePair): string {
 }
 
 export default function YoneticiOnayi() {
-  const [tab, setTab] = useState<TabType>("bekleyen");
+  const [activeDecision, setActiveDecision] = useState<
+    "pending" | "approved" | "rejected"
+  >("pending");
   const [detailGroup, setDetailGroup] = useState<UiDuplicatePair | null>(null);
   const [searchText, setSearchText] = useState("");
   const [loading, setLoading] = useState(false);
-  const [realData, setRealData] = useState<UiDuplicatePair[]>([]);
+  const [matches, setMatches] = useState<UiDuplicatePair[]>([]);
+  const [decisionCounts, setDecisionCounts] = useState({
+    pending: 0,
+    approved: 0,
+    rejected: 0,
+  });
   const [decisionNote, setDecisionNote] = useState("");
   const [apiError, setApiError] = useState("");
   const [lastUploadId, setLastUploadId] = useState<number | null>(null);
   const [backendHealthy, setBackendHealthy] = useState<boolean | null>(null);
   const isMountedRef = useRef(true);
 
-  const refreshPendingMatches = async (uploadId?: number) => {
+  const refreshMatches = async (
+    uploadId: number | undefined,
+    decision: "pending" | "approved" | "rejected",
+  ) => {
     setLoading(true);
     setApiError("");
 
     try {
-      const response = await getPendingMatches({
+      const response = await getMatches({
+        decision,
         uploadId,
         limit: 100,
       });
-      const mapped = (response.matches || []).map(mapPendingMatchToView);
 
       if (!isMountedRef.current) {
         return;
       }
 
-      setRealData((prev) => {
-        const reviewedPairs = prev.filter(
-          (group) => group.workflowState !== "bekleyen",
-        );
-        return [...mapped, ...reviewedPairs];
-      });
+      setMatches((response.matches || []).map(mapPendingMatchToView));
     } catch (error) {
       if (!isMountedRef.current) {
         return;
@@ -132,11 +90,33 @@ export default function YoneticiOnayi() {
       setApiError(
         error instanceof Error
           ? error.message
-          : "Pending kayitlar alinamadi.",
+          : "Kayıtlar alınamadı.",
       );
     } finally {
       if (isMountedRef.current) {
         setLoading(false);
+      }
+    }
+  };
+
+  const refreshDecisionCounts = async (uploadId: number | undefined) => {
+    try {
+      const [pendingRes, approvedRes, rejectedRes] = await Promise.all([
+        getMatches({ decision: "pending", uploadId, limit: 1_000_000 }),
+        getMatches({ decision: "approved", uploadId, limit: 1_000_000 }),
+        getMatches({ decision: "rejected", uploadId, limit: 1_000_000 }),
+      ]);
+      if (!isMountedRef.current) {
+        return;
+      }
+      setDecisionCounts({
+        pending: pendingRes.count ?? 0,
+        approved: approvedRes.count ?? 0,
+        rejected: rejectedRes.count ?? 0,
+      });
+    } catch {
+      if (isMountedRef.current) {
+        setDecisionCounts({ pending: 0, approved: 0, rejected: 0 });
       }
     }
   };
@@ -150,13 +130,15 @@ export default function YoneticiOnayi() {
         if (!isMountedRef.current) {
           return;
         }
+
         setBackendHealthy(true);
 
         const storedUpload = localStorage.getItem("lastDetectUploadId");
         const parsedUpload = storedUpload ? Number(storedUpload) : Number.NaN;
         const uploadId = Number.isFinite(parsedUpload) ? parsedUpload : undefined;
         setLastUploadId(uploadId ?? null);
-        refreshPendingMatches(uploadId);
+        refreshMatches(uploadId, "pending");
+        refreshDecisionCounts(uploadId);
       })
       .catch(() => {
         if (isMountedRef.current) {
@@ -169,28 +151,25 @@ export default function YoneticiOnayi() {
     };
   }, []);
 
-  const data = realData;
-  const bekleyen = data.filter((group) => group.workflowState === "bekleyen");
-  const onaylandi = data.filter((group) => group.workflowState === "onaylandi");
-  const reddedildi = data.filter((group) => group.workflowState === "reddedildi");
-  const filteredHistory = (tab === "onaylandi" ? onaylandi : reddedildi).filter(
-    (group) =>
-      !searchText || pairSearchText(group).includes(searchText.toLowerCase()),
+  useEffect(() => {
+    if (backendHealthy === false) {
+      return;
+    }
+    refreshMatches(lastUploadId ?? undefined, activeDecision);
+  }, [activeDecision]);
+
+  const filteredMatches = useMemo(
+    () =>
+      matches.filter(
+        (group) =>
+          !searchText ||
+          pairSearchText(group).includes(searchText.toLowerCase()),
+      ),
+    [matches, searchText],
   );
 
-  const updateGroup = (
-    groupId: string,
-    updates: Partial<UiDuplicatePair>,
-  ) => {
-    setRealData((prev) =>
-      prev.map((group) =>
-        group.id === groupId ? { ...group, ...updates } : group,
-      ),
-    );
-  };
-
   const handleApprove = async (groupId: string) => {
-    const target = data.find((group) => group.id === groupId);
+    const target = matches.find((group) => group.id === groupId);
     if (!target?.backendMatchId) {
       return;
     }
@@ -199,34 +178,29 @@ export default function YoneticiOnayi() {
     setApiError("");
 
     try {
-      const response = await approvePendingMatch({
+      await approvePendingMatch({
         matchId: target.backendMatchId,
         mergeIntoEntity: true,
         canonicalName: target.records[0].adSoyad || target.records[1].adSoyad,
       });
 
-      updateGroup(groupId, {
-        workflowState: "onaylandi",
-        backendDecision: response.status,
-        reviewedAt: response.approved_at ?? new Date().toISOString(),
-        reviewedBy: response.approved_by ?? null,
-        reviewNote: decisionNote || "Kayit onaylandi.",
-      });
-
+      setMatches((prev) => prev.filter((group) => group.id !== groupId));
       setDetailGroup(null);
       setDecisionNote("");
-      setTab("onaylandi");
+      await Promise.all([
+        refreshMatches(lastUploadId ?? undefined, activeDecision),
+        refreshDecisionCounts(lastUploadId ?? undefined),
+      ]);
     } catch (error) {
       setApiError(
-        error instanceof Error ? error.message : "Onay islemi basarisiz.",
+        error instanceof Error ? error.message : "Onay işlemi başarısız.",
       );
-    } finally {
       setLoading(false);
     }
   };
 
   const handleReject = async (groupId: string) => {
-    const target = data.find((group) => group.id === groupId);
+    const target = matches.find((group) => group.id === groupId);
     if (!target?.backendMatchId) {
       return;
     }
@@ -235,70 +209,50 @@ export default function YoneticiOnayi() {
     setApiError("");
 
     try {
-      const response = await rejectPendingMatch({
+      await rejectPendingMatch({
         matchId: target.backendMatchId,
-        reason: decisionNote || "Kayit reddedildi.",
+        reason: decisionNote || "Kayıt reddedildi.",
       });
 
-      updateGroup(groupId, {
-        workflowState: "reddedildi",
-        backendDecision: response.status,
-        reviewedAt: response.rejected_at ?? new Date().toISOString(),
-        reviewedBy: response.rejected_by ?? null,
-        reviewNote: response.reason || decisionNote || "Kayit reddedildi.",
-      });
-
+      setMatches((prev) => prev.filter((group) => group.id !== groupId));
       setDetailGroup(null);
       setDecisionNote("");
-      setTab("reddedildi");
+      await Promise.all([
+        refreshMatches(lastUploadId ?? undefined, activeDecision),
+        refreshDecisionCounts(lastUploadId ?? undefined),
+      ]);
     } catch (error) {
       setApiError(
-        error instanceof Error ? error.message : "Reddetme islemi basarisiz.",
+        error instanceof Error ? error.message : "Reddetme işlemi başarısız.",
       );
-    } finally {
       setLoading(false);
     }
   };
 
   const refreshLabel = lastUploadId
     ? `Yenile (Upload ${lastUploadId})`
-    : "Tumunu Yenile";
-
-  const tabs: { key: TabType; label: string; count: number; color: string }[] = [
-    {
-      key: "bekleyen",
-      label: "Bekleyen",
-      count: bekleyen.length,
-      color: "border-yellow-200 bg-yellow-50 text-yellow-700",
-    },
-    {
-      key: "onaylandi",
-      label: "Onaylanan",
-      count: onaylandi.length,
-      color: "border-green-200 bg-green-50 text-green-700",
-    },
-    {
-      key: "reddedildi",
-      label: "Reddedilen",
-      count: reddedildi.length,
-      color: "border-red-200 bg-red-50 text-red-600",
-    },
-  ];
+    : "Tümünü Yenile";
+  const canTakeAction = activeDecision === "pending";
 
   return (
     <DashboardLayout>
       <Header
         title="Yonetici Onayi"
-        subtitle="Mukerrer kayit kararlarini gercek backend eslesmeleri uzerinden yonetin"
+        subtitle="Bekleyen eşleşmeleri doğrudan backend API verileri üzerinden yönetin"
         actions={
           <div className="flex items-center gap-3">
             {backendHealthy === false && (
               <span className="rounded bg-red-50 px-2 py-1 text-xs text-red-600">
-                Backend: Erisilemiyor
+                Backend: Erişilemiyor
               </span>
             )}
             <button
-              onClick={() => refreshPendingMatches(lastUploadId ?? undefined)}
+              onClick={() =>
+                Promise.all([
+                  refreshMatches(lastUploadId ?? undefined, activeDecision),
+                  refreshDecisionCounts(lastUploadId ?? undefined),
+                ])
+              }
               disabled={loading || backendHealthy === false}
               className="flex cursor-pointer items-center gap-2 rounded-lg border border-gray-200 px-4 py-2 text-sm text-gray-600 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
             >
@@ -318,11 +272,44 @@ export default function YoneticiOnayi() {
           <div className="flex items-center gap-3 rounded-xl border border-amber-100 bg-amber-50 p-4">
             <i className="ri-information-line text-lg text-amber-600" />
             <p className="text-sm text-amber-700">
-              Yonetici onayi son detect calismasi uzerinden filtreleniyor. Upload
+              Liste son detect çalışmasındaki upload için filtreleniyor. Upload
               ID: {lastUploadId}
             </p>
           </div>
         )}
+
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            onClick={() => setActiveDecision("pending")}
+            className={`cursor-pointer rounded-lg px-3 py-2 text-xs font-medium transition-colors ${
+              activeDecision === "pending"
+                ? "bg-yellow-500 text-white"
+                : "border border-gray-200 text-gray-600 hover:bg-gray-50"
+            }`}
+          >
+            Bekleyen: {decisionCounts.pending}
+          </button>
+          <button
+            onClick={() => setActiveDecision("approved")}
+            className={`cursor-pointer rounded-lg px-3 py-2 text-xs font-medium transition-colors ${
+              activeDecision === "approved"
+                ? "bg-green-600 text-white"
+                : "border border-gray-200 text-gray-600 hover:bg-gray-50"
+            }`}
+          >
+            Onaylanan: {decisionCounts.approved}
+          </button>
+          <button
+            onClick={() => setActiveDecision("rejected")}
+            className={`cursor-pointer rounded-lg px-3 py-2 text-xs font-medium transition-colors ${
+              activeDecision === "rejected"
+                ? "bg-red-600 text-white"
+                : "border border-gray-200 text-gray-600 hover:bg-gray-50"
+            }`}
+          >
+            Reddedilen: {decisionCounts.rejected}
+          </button>
+        </div>
 
         {apiError && (
           <div className="flex items-center gap-3 rounded-xl border border-red-100 bg-red-50 p-4">
@@ -334,217 +321,158 @@ export default function YoneticiOnayi() {
         {loading && (
           <div className="flex items-center gap-3 rounded-xl border border-blue-100 bg-blue-50 p-4">
             <i className="ri-loader-4-line animate-spin text-lg text-blue-600" />
-            <p className="text-sm text-blue-700">Backend verileri yukleniyor...</p>
+            <p className="text-sm text-blue-700">Backend verileri yükleniyor...</p>
           </div>
         )}
 
-        <div className="flex w-fit gap-1 rounded-xl bg-gray-100/60 p-1">
-          {tabs.map((item) => (
-            <button
-              key={item.key}
-              onClick={() => setTab(item.key)}
-              className={`flex cursor-pointer items-center gap-2 whitespace-nowrap rounded-lg px-5 py-2 text-sm font-medium transition-all ${
-                tab === item.key
-                  ? "bg-white text-gray-900 shadow-sm"
-                  : "text-gray-500 hover:text-gray-700"
-              }`}
-            >
-              {item.label}
-              <span
-                className={`rounded-full border px-2 py-0.5 text-[10px] font-bold ${item.color}`}
-              >
-                {item.count}
-              </span>
-            </button>
-          ))}
+        <div className="relative">
+          <i className="ri-search-line absolute left-3 top-1/2 -translate-y-1/2 text-sm text-gray-400" />
+          <input
+            type="text"
+            value={searchText}
+            onChange={(event) => setSearchText(event.target.value)}
+            placeholder="Match ID veya kişi adı ara..."
+            className="w-full rounded-lg border border-gray-200 py-2.5 pl-9 pr-4 text-sm focus:border-red-400 focus:outline-none"
+          />
         </div>
 
-        {tab === "bekleyen" && (
-          <div className="overflow-hidden rounded-xl border border-gray-100 bg-white">
-            <div className="border-b border-gray-50 px-5 py-4">
-              <h3 className="text-sm font-semibold text-gray-900">Onay Bekleyen Kayitlar</h3>
-              <p className="mt-0.5 text-xs text-gray-400">
-                Match candidate verileri backend response alanlarindan besleniyor
-              </p>
-            </div>
-            <div className="overflow-x-auto">
-              <table className="w-full min-w-[940px] text-sm">
-                <thead>
-                  <tr className="border-b border-gray-100 bg-gray-50/70">
-                    <th className="px-5 py-3 text-left font-medium text-gray-400">Match ID</th>
-                    <th className="px-4 py-3 text-left font-medium text-gray-400">Left Record</th>
-                    <th className="px-4 py-3 text-left font-medium text-gray-400">Right Record</th>
-                    <th className="px-4 py-3 text-left font-medium text-gray-400">Score</th>
-                    <th className="px-4 py-3 text-left font-medium text-gray-400">Status</th>
-                    <th className="px-4 py-3 text-left font-medium text-gray-400">Action</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-50">
-                  {bekleyen.map((group) => (
-                    <tr key={group.id} className="align-top transition-colors hover:bg-gray-50/50">
-                      <td className="px-5 py-4">
-                        <div className="font-semibold text-gray-800">
-                          #{group.backendMatchId ?? group.id}
-                        </div>
-                        <div className="mt-1 text-xs text-gray-400">
-                          {algorithmLabel(group.matchType)}
-                        </div>
-                      </td>
-                      <td className="px-4 py-4">
-                        <div className="font-medium text-gray-800">
-                          {group.records[0].adSoyad || "-"}
-                        </div>
-                        <div className="mt-1 text-xs text-gray-500">
-                          {recordMeta(group.records[0]) || "-"}
-                        </div>
-                      </td>
-                      <td className="px-4 py-4">
-                        <div className="font-medium text-gray-800">
-                          {group.records[1].adSoyad || "-"}
-                        </div>
-                        <div className="mt-1 text-xs text-gray-500">
-                          {recordMeta(group.records[1]) || "-"}
-                        </div>
-                      </td>
-                      <td className="px-4 py-4">
-                        <div className="font-semibold text-gray-900">
-                          {formatScore(group.score)}
-                        </div>
-                        <div className="mt-1 text-xs text-gray-400">
-                          {group.decisionReason || "Confidence / score alanindan hesaplandi"}
-                        </div>
-                      </td>
-                      <td className="px-4 py-4">
-                        <span
-                          className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${workflowTone(group.workflowState)}`}
+        <div className="overflow-hidden rounded-xl border border-gray-100 bg-white">
+          <div className="border-b border-gray-50 px-5 py-4">
+            <h3 className="text-sm font-semibold text-gray-900">
+              Eşleşme Kayıtları
+            </h3>
+            <p className="mt-0.5 text-xs text-gray-400">
+              Bu liste backend API&apos;dan gelen{" "}
+              {activeDecision === "pending"
+                ? "bekleyen"
+                : activeDecision === "approved"
+                  ? "onaylanan"
+                  : "reddedilen"}{" "}
+              eşleşmeleri gösterir.
+            </p>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[940px] text-sm">
+              <thead>
+                <tr className="border-b border-gray-100 bg-gray-50/70">
+                  <th className="px-5 py-3 text-left font-medium text-gray-400">
+                    Match ID
+                  </th>
+                  <th className="px-4 py-3 text-left font-medium text-gray-400">
+                    Left Record
+                  </th>
+                  <th className="px-4 py-3 text-left font-medium text-gray-400">
+                    Right Record
+                  </th>
+                  <th className="px-4 py-3 text-left font-medium text-gray-400">
+                    Score
+                  </th>
+                  <th className="px-4 py-3 text-left font-medium text-gray-400">
+                    Durum
+                  </th>
+                  <th className="px-4 py-3 text-left font-medium text-gray-400">
+                    Action
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-50">
+                {filteredMatches.map((group) => (
+                  <tr
+                    key={group.id}
+                    className="align-top transition-colors hover:bg-gray-50/50"
+                  >
+                    <td className="px-5 py-4">
+                      <div className="font-semibold text-gray-800">
+                        #{group.backendMatchId ?? group.id}
+                      </div>
+                      <div className="mt-1 text-xs text-gray-400">
+                        {algorithmLabel(group.matchType)}
+                      </div>
+                    </td>
+                    <td className="px-4 py-4">
+                      <div className="font-medium text-gray-800">
+                        {group.records[0].adSoyad || "-"}
+                      </div>
+                      <div className="mt-1 text-xs text-gray-500">
+                        {recordMeta(group.records[0]) || "-"}
+                      </div>
+                    </td>
+                    <td className="px-4 py-4">
+                      <div className="font-medium text-gray-800">
+                        {group.records[1].adSoyad || "-"}
+                      </div>
+                      <div className="mt-1 text-xs text-gray-500">
+                        {recordMeta(group.records[1]) || "-"}
+                      </div>
+                    </td>
+                    <td className="px-4 py-4">
+                      <div className="font-semibold text-gray-900">
+                        {formatScore(group.score)}
+                      </div>
+                      <div className="mt-1 text-xs text-gray-400">
+                        {group.decisionReason ||
+                          "Confidence / score alanından hesaplandı"}
+                      </div>
+                    </td>
+                    <td className="px-4 py-4">
+                      <span
+                        className={`inline-block rounded-full px-2.5 py-1 text-[11px] font-medium ${finalDecisionTone(
+                          group.backendDecision || group.finalDecision,
+                        )}`}
+                      >
+                        {finalDecisionLabel(
+                          group.backendDecision || group.finalDecision,
+                        )}
+                      </span>
+                    </td>
+                    <td className="px-4 py-4">
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          onClick={() => setDetailGroup(group)}
+                          className="cursor-pointer rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-700 transition-colors hover:bg-gray-50"
                         >
-                          {workflowLabel(group.workflowState)}
-                        </span>
-                      </td>
-                      <td className="px-4 py-4">
-                        <div className="flex flex-wrap gap-2">
-                          <button
-                            onClick={() => setDetailGroup(group)}
-                            className="cursor-pointer rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-700 transition-colors hover:bg-gray-50"
-                          >
-                            Detay
-                          </button>
-                          <button
-                            onClick={() => handleApprove(group.id)}
-                            disabled={loading}
-                            className="cursor-pointer rounded-lg bg-green-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-60"
-                          >
-                            Onayla
-                          </button>
-                          <button
-                            onClick={() => handleReject(group.id)}
-                            disabled={loading}
-                            className="cursor-pointer rounded-lg border border-red-200 px-3 py-1.5 text-xs font-medium text-red-600 transition-colors hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60"
-                          >
-                            Reddet
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                  {bekleyen.length === 0 && (
-                    <tr>
-                      <td colSpan={6} className="px-5 py-10 text-center text-sm text-gray-400">
-                        Bekleyen kayit yok.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
-
-        {(tab === "onaylandi" || tab === "reddedildi") && (
-          <div className="space-y-4">
-            <div className="relative">
-              <i className="ri-search-line absolute left-3 top-1/2 -translate-y-1/2 text-sm text-gray-400" />
-              <input
-                type="text"
-                value={searchText}
-                onChange={(event) => setSearchText(event.target.value)}
-                placeholder="Match ID veya kisi adi ara..."
-                className="w-full rounded-lg border border-gray-200 py-2.5 pl-9 pr-4 text-sm focus:border-red-400 focus:outline-none"
-              />
-            </div>
-
-            <div className="overflow-hidden rounded-xl border border-gray-100 bg-white">
-              <div className="overflow-x-auto">
-                <table className="w-full min-w-[940px] text-sm">
-                  <thead>
-                    <tr className="border-b border-gray-100 bg-gray-50/70">
-                      <th className="px-5 py-3 text-left font-medium text-gray-400">Match ID</th>
-                      <th className="px-4 py-3 text-left font-medium text-gray-400">Left Record</th>
-                      <th className="px-4 py-3 text-left font-medium text-gray-400">Right Record</th>
-                      <th className="px-4 py-3 text-left font-medium text-gray-400">Score</th>
-                      <th className="px-4 py-3 text-left font-medium text-gray-400">Status</th>
-                      <th className="px-4 py-3 text-left font-medium text-gray-400">Tarih</th>
-                      <th className="px-4 py-3 text-left font-medium text-gray-400">Not</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-50">
-                    {filteredHistory.map((group) => (
-                      <tr key={group.id} className="align-top transition-colors hover:bg-gray-50/50">
-                        <td className="px-5 py-3.5 font-medium text-gray-700">
-                          #{group.backendMatchId ?? group.id}
-                        </td>
-                        <td className="px-4 py-3.5">
-                          <div className="font-medium text-gray-800">
-                            {group.records[0].adSoyad || "-"}
-                          </div>
-                          <div className="mt-1 text-xs text-gray-500">
-                            {recordMeta(group.records[0]) || "-"}
-                          </div>
-                        </td>
-                        <td className="px-4 py-3.5">
-                          <div className="font-medium text-gray-800">
-                            {group.records[1].adSoyad || "-"}
-                          </div>
-                          <div className="mt-1 text-xs text-gray-500">
-                            {recordMeta(group.records[1]) || "-"}
-                          </div>
-                        </td>
-                        <td className="px-4 py-3.5">
-                          <div className="font-semibold text-gray-900">
-                            {formatScore(group.score)}
-                          </div>
-                          <div className="mt-1 text-xs text-gray-400">
-                            {algorithmLabel(group.matchType)}
-                          </div>
-                        </td>
-                        <td className="px-4 py-3.5">
-                          <span
-                            className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${workflowTone(group.workflowState)}`}
-                          >
-                            {workflowLabel(group.workflowState)}
+                          Detay
+                        </button>
+                        {canTakeAction ? (
+                          <>
+                            <button
+                              onClick={() => handleApprove(group.id)}
+                              disabled={loading}
+                              className="cursor-pointer rounded-lg bg-green-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-60"
+                            >
+                              Onayla
+                            </button>
+                            <button
+                              onClick={() => handleReject(group.id)}
+                              disabled={loading}
+                              className="cursor-pointer rounded-lg border border-red-200 px-3 py-1.5 text-xs font-medium text-red-600 transition-colors hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60"
+                            >
+                              Reddet
+                            </button>
+                          </>
+                        ) : (
+                          <span className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-500">
+                            İşlem yok
                           </span>
-                        </td>
-                        <td className="px-4 py-3.5 text-gray-400">
-                          {formatDate(group.reviewedAt)}
-                        </td>
-                        <td className="max-w-[240px] px-4 py-3.5 text-gray-500">
-                          {group.reviewNote || "-"}
-                        </td>
-                      </tr>
-                    ))}
-                    {filteredHistory.length === 0 && (
-                      <tr>
-                        <td colSpan={7} className="px-5 py-10 text-center text-sm text-gray-400">
-                          Bu sekmede gosterilecek kayit yok.
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </div>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+                {filteredMatches.length === 0 && !loading && (
+                  <tr>
+                    <td
+                      colSpan={6}
+                      className="px-5 py-10 text-center text-sm text-gray-400"
+                    >
+                      Bu filtre için kayıt yok.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
           </div>
-        )}
+        </div>
       </div>
 
       {detailGroup && (
@@ -559,10 +487,11 @@ export default function YoneticiOnayi() {
             <div className="flex items-center justify-between border-b border-gray-100 px-6 py-4">
               <div>
                 <h2 className="text-base font-bold text-gray-900">
-                  Tam Alan Karsilastirmasi - Match #{detailGroup.backendMatchId ?? detailGroup.id}
+                  Tam Alan Karşılaştırması - Match #
+                  {detailGroup.backendMatchId ?? detailGroup.id}
                 </h2>
                 <p className="mt-0.5 text-xs text-gray-400">
-                  Gercek backend match verisi ve alan bazli karsilastirmalar
+                  Gerçek backend match verisi ve alan bazlı karşılaştırmalar
                 </p>
               </div>
               <button
@@ -594,9 +523,10 @@ export default function YoneticiOnayi() {
                   </p>
                 </div>
                 <div>
-                  <p className="text-[11px] text-gray-400">Kayitlar</p>
+                  <p className="text-[11px] text-gray-400">Kayıtlar</p>
                   <p className="text-sm font-semibold text-gray-800">
-                    {pairNames(detailGroup)}
+                    {detailGroup.records[0].adSoyad || "-"} /{" "}
+                    {detailGroup.records[1].adSoyad || "-"}
                   </p>
                 </div>
               </div>
@@ -613,7 +543,7 @@ export default function YoneticiOnayi() {
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
                 {detailGroup.records.map((record, index) => (
                   <div
-                    key={`${detailGroup.id}-${record.muhatapNo}`}
+                    key={`${detailGroup.id}-${index}-${record.muhatapNo}`}
                     className={`rounded-xl border-2 p-4 ${
                       index === 0
                         ? "border-gray-200"
@@ -627,14 +557,14 @@ export default function YoneticiOnayi() {
                           : "bg-red-100 text-red-600"
                       }`}
                     >
-                      Kayit {index + 1} - {record.muhatapNo}
+                      Kayıt {index + 1} - {record.muhatapNo}
                     </span>
                     {[
                       ["Ad Soyad", record.adSoyad],
                       ["TC Kimlik", record.tcKimlikNo],
                       ["Telefon", record.telefon],
                       ["E-posta", record.email],
-                      ["Sehir", record.sehir],
+                      ["Şehir", record.sehir],
                       ["Muhatap Kodu", record.muhatapNo || "-"],
                     ].map(([label, value]) => (
                       <div key={label} className="mb-2">
@@ -654,7 +584,7 @@ export default function YoneticiOnayi() {
                 </label>
                 <textarea
                   rows={2}
-                  placeholder="Karar gerekcenizi yazin..."
+                  placeholder="Karar gerekçenizi yazın..."
                   className="w-full resize-none rounded-lg border border-gray-200 px-3 py-2.5 text-sm focus:border-red-400 focus:outline-none"
                   maxLength={500}
                   value={decisionNote}
@@ -662,24 +592,26 @@ export default function YoneticiOnayi() {
                 />
               </div>
 
-              <div className="flex gap-3">
-                <button
-                  onClick={() => handleApprove(detailGroup.id)}
-                  disabled={loading}
-                  className="flex-1 cursor-pointer whitespace-nowrap rounded-lg bg-green-600 py-2.5 text-sm font-semibold text-white hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  <i className="ri-checkbox-circle-line mr-1.5" />
-                  Onayla
-                </button>
-                <button
-                  onClick={() => handleReject(detailGroup.id)}
-                  disabled={loading}
-                  className="flex-1 cursor-pointer whitespace-nowrap rounded-lg border-2 border-red-200 py-2.5 text-sm font-semibold text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  <i className="ri-close-circle-line mr-1.5" />
-                  Reddet
-                </button>
-              </div>
+              {canTakeAction && (
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => handleApprove(detailGroup.id)}
+                    disabled={loading}
+                    className="flex-1 cursor-pointer whitespace-nowrap rounded-lg bg-green-600 py-2.5 text-sm font-semibold text-white hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    <i className="ri-checkbox-circle-line mr-1.5" />
+                    Onayla
+                  </button>
+                  <button
+                    onClick={() => handleReject(detailGroup.id)}
+                    disabled={loading}
+                    className="flex-1 cursor-pointer whitespace-nowrap rounded-lg border-2 border-red-200 py-2.5 text-sm font-semibold text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    <i className="ri-close-circle-line mr-1.5" />
+                    Reddet
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         </div>

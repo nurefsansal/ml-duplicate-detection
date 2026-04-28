@@ -36,6 +36,29 @@ def _normalize_for_name(value: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def _name_tokens(value: str) -> list[str]:
+    normalized = _normalize_for_name(value)
+    if not normalized:
+        return []
+    return [token for token in normalized.split(" ") if token]
+
+
+def _sorted_name(value: str) -> str:
+    tokens = _name_tokens(value)
+    if not tokens:
+        return ""
+    return " ".join(sorted(tokens))
+
+
+def _split_name_parts(value: str) -> tuple[str, str]:
+    tokens = _name_tokens(value)
+    if not tokens:
+        return "", ""
+    if len(tokens) == 1:
+        return tokens[0], ""
+    return tokens[0], tokens[-1]
+
+
 def _levenshtein_distance(a: str, b: str) -> int:
     a = _safe_str(a)
     b = _safe_str(b)
@@ -146,6 +169,105 @@ def sequence_similarity(a: str, b: str) -> float:
     if not a or not b:
         return 0.0
     return round(SequenceMatcher(None, a, b).ratio(), 4)
+
+
+def _token_similarity(left_token: str, right_token: str) -> float:
+    left_value = _normalize_for_name(left_token)
+    right_value = _normalize_for_name(right_token)
+    if not left_value or not right_value:
+        return 0.0
+    if left_value == right_value:
+        return 1.0
+
+    if len(left_value) == 1 or len(right_value) == 1:
+        return 0.92 if left_value[0] == right_value[0] else 0.0
+
+    score = max(
+        jaro_winkler_similarity(left_value, right_value),
+        levenshtein_similarity(left_value, right_value),
+        sequence_similarity(left_value, right_value),
+    )
+    if left_value.startswith(right_value) or right_value.startswith(left_value):
+        score = max(score, 0.9)
+    return round(score, 4)
+
+
+def token_name_similarity(a: str, b: str) -> float:
+    left_tokens = _name_tokens(a)
+    right_tokens = _name_tokens(b)
+    if not left_tokens or not right_tokens:
+        return 0.0
+
+    available_right = list(enumerate(right_tokens))
+    matched_scores: list[float] = []
+
+    for left_token in left_tokens:
+        best_position = -1
+        best_score = 0.0
+        for index, right_token in available_right:
+            score = _token_similarity(left_token, right_token)
+            if score > best_score:
+                best_score = score
+                best_position = index
+        if best_position == -1 or best_score < 0.7:
+            continue
+        matched_scores.append(best_score)
+        available_right = [
+            (index, token)
+            for index, token in available_right
+            if index != best_position
+        ]
+
+    if not matched_scores:
+        return 0.0
+
+    denominator = max(len(left_tokens), len(right_tokens))
+    return round(sum(matched_scores) / denominator, 4)
+
+
+def same_surname_name_conflict(a: str, b: str) -> bool:
+    left_tokens = _name_tokens(a)
+    right_tokens = _name_tokens(b)
+    if len(left_tokens) < 2 or len(right_tokens) < 2:
+        return False
+
+    left_surname = left_tokens[-1]
+    right_surname = right_tokens[-1]
+    if left_surname != right_surname:
+        return False
+
+    left_given_names = " ".join(left_tokens[:-1])
+    right_given_names = " ".join(right_tokens[:-1])
+    if not left_given_names or not right_given_names:
+        return False
+    if left_given_names == right_given_names:
+        return False
+
+    given_name_similarity = token_name_similarity(left_given_names, right_given_names)
+    return bool(given_name_similarity < 0.85)
+
+
+def hybrid_name_similarity(a: str, b: str) -> float:
+    left_value = _normalize_for_name(a)
+    right_value = _normalize_for_name(b)
+    if not left_value or not right_value:
+        return 0.0
+
+    ordered_jaro = jaro_winkler_similarity(left_value, right_value)
+    orderless_jaro = jaro_winkler_similarity(_sorted_name(left_value), _sorted_name(right_value))
+    token_similarity = token_name_similarity(left_value, right_value)
+
+    score = max(
+        ordered_jaro,
+        orderless_jaro,
+        token_similarity,
+        round((orderless_jaro * 0.5) + (token_similarity * 0.5), 4),
+    )
+
+    if same_surname_name_conflict(a, b):
+        score = min(score, 0.74)
+
+    return round(score, 4)
 
 
 def soundex_tr(value: str) -> str:

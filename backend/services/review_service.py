@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import hashlib
 from typing import Any
 
 from sqlalchemy import func
@@ -15,7 +16,13 @@ from backend.models.database import (
     NormalizedRecord,
     ReviewAction,
 )
-from backend.services.advanced_matching_service import jaro_winkler_similarity
+from backend.services.advanced_matching_service import (
+    hybrid_name_similarity,
+    jaro_winkler_similarity,
+    same_surname_name_conflict,
+    token_name_similarity,
+)
+from backend.services.feature_service import email_similarity_score, phone_similarity_score
 
 
 def _safe_str(value: Any) -> str:
@@ -29,6 +36,25 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _normalize_decision(value: str) -> str:
+    normalized = _safe_str(value).lower()
+    if normalized in {"approved", "same_person"}:
+        return "approved"
+    if normalized in {"rejected", "different_person"}:
+        return "rejected"
+    return "pending"
+
+
+def _decision_type_for_candidate(decision: str, match_type: str) -> str:
+    normalized_decision = _normalize_decision(decision)
+    if normalized_decision == "pending":
+        return "manual"
+    source = _safe_str(match_type).lower()
+    if "manual" in source:
+        return "manual"
+    return "auto"
 
 
 def _normalise_mapping_key(value: str) -> str:
@@ -222,6 +248,7 @@ def _build_similarity_field_comparison(
     normalized_right: str,
     comparison_method: str,
     field_name: str,
+    use_token_hybrid: bool = False,
 ) -> dict[str, Any]:
     if not normalized_left and not normalized_right:
         similarity = 0.0
@@ -232,7 +259,11 @@ def _build_similarity_field_comparison(
         result = "missing"
         notes = f"{field_name} alanlarindan biri bos."
     else:
-        similarity = jaro_winkler_similarity(normalized_left, normalized_right)
+        similarity = (
+            hybrid_name_similarity(normalized_left, normalized_right)
+            if use_token_hybrid
+            else jaro_winkler_similarity(normalized_left, normalized_right)
+        )
         result = _comparison_result_from_similarity(similarity)
         if result == "exact_match":
             notes = f"{field_name} normalize edilmis sekilde birebir eslesti."
@@ -256,6 +287,60 @@ def _build_similarity_field_comparison(
     }
 
 
+def _build_contact_similarity_field_comparison(
+    *,
+    raw_left: str,
+    raw_right: str,
+    normalized_left: str,
+    normalized_right: str,
+    similarity_score: float,
+    exact_match: bool,
+    comparison_method: str,
+    field_name: str,
+) -> dict[str, Any]:
+    if not normalized_left and not normalized_right:
+        result = "missing"
+        notes = f"{field_name} her iki kayitta da bos."
+        score_percent = 0
+        exact = False
+    elif not normalized_left or not normalized_right:
+        result = "missing"
+        notes = f"{field_name} alanlarindan biri bos."
+        score_percent = 0
+        exact = False
+    else:
+        exact = bool(exact_match)
+        bounded = max(0.0, min(1.0, float(similarity_score or 0.0)))
+        score_percent = 100 if exact else int(round(bounded * 100))
+        if exact:
+            result = "exact_match"
+            notes = f"{field_name} birebir eslesti."
+        elif bounded >= 0.85:
+            result = "strong_match"
+            notes = f"{field_name} guclu benzerlik gosteriyor."
+        elif bounded >= 0.60:
+            result = "partial_match"
+            notes = f"{field_name} kismi benzerlik gosteriyor."
+        elif bounded >= 0.20:
+            result = "weak_match"
+            notes = f"{field_name} zayif benzerlik gosteriyor."
+        else:
+            result = "mismatch"
+            notes = f"{field_name} belirgin sekilde farkli."
+
+    return {
+        "rawLeftValue": raw_left or None,
+        "rawRightValue": raw_right or None,
+        "normalizedLeftValue": normalized_left or None,
+        "normalizedRightValue": normalized_right or None,
+        "comparisonMethod": comparison_method,
+        "comparisonResult": result,
+        "score0To100": score_percent,
+        "exactMatch": exact,
+        "notes": notes,
+    }
+
+
 def _build_field_comparisons(
     left_record: NormalizedRecord,
     right_record: NormalizedRecord,
@@ -267,6 +352,10 @@ def _build_field_comparisons(
     normalized_right_first = _safe_str(right_record.first_name or right_first)
     normalized_left_surname = _safe_str(left_record.last_name or left_surname)
     normalized_right_surname = _safe_str(right_record.last_name or right_surname)
+    normalized_left_phone = _safe_str(left_record.clean_phone)
+    normalized_right_phone = _safe_str(right_record.clean_phone)
+    normalized_left_email = _safe_str(left_record.clean_email)
+    normalized_right_email = _safe_str(right_record.clean_email)
 
     return {
         "fullName": _build_similarity_field_comparison(
@@ -274,8 +363,9 @@ def _build_field_comparisons(
             raw_right=_record_raw_name(right_record),
             normalized_left=_safe_str(left_record.clean_name),
             normalized_right=_safe_str(right_record.clean_name),
-            comparison_method="admin_review_jaro_winkler(clean_name)",
+            comparison_method="admin_review_hybrid_jaro_token_similarity(clean_name)",
             field_name="Ad soyad",
+            use_token_hybrid=True,
         ),
         "firstName": _build_similarity_field_comparison(
             raw_left=_split_name(_record_raw_name(left_record))[0],
@@ -302,20 +392,30 @@ def _build_field_comparisons(
             field_name="TC Kimlik No",
             use_conflict_label=True,
         ),
-        "phone": _build_exact_field_comparison(
+        "phone": _build_contact_similarity_field_comparison(
             raw_left=_record_raw_phone(left_record),
             raw_right=_record_raw_phone(right_record),
-            normalized_left=_safe_str(left_record.clean_phone),
-            normalized_right=_safe_str(right_record.clean_phone),
-            comparison_method="admin_review_exact(clean_phone)",
+            normalized_left=normalized_left_phone,
+            normalized_right=normalized_right_phone,
+            similarity_score=phone_similarity_score(
+                normalized_left_phone,
+                normalized_right_phone,
+            ),
+            exact_match=bool(normalized_left_phone and normalized_left_phone == normalized_right_phone),
+            comparison_method="admin_review_tiered_phone_similarity(clean_phone)",
             field_name="Telefon",
         ),
-        "email": _build_exact_field_comparison(
+        "email": _build_contact_similarity_field_comparison(
             raw_left=_record_raw_email(left_record),
             raw_right=_record_raw_email(right_record),
-            normalized_left=_safe_str(left_record.clean_email),
-            normalized_right=_safe_str(right_record.clean_email),
-            comparison_method="admin_review_exact(clean_email)",
+            normalized_left=normalized_left_email,
+            normalized_right=normalized_right_email,
+            similarity_score=email_similarity_score(
+                normalized_left_email,
+                normalized_right_email,
+            ),
+            exact_match=bool(normalized_left_email and normalized_left_email == normalized_right_email),
+            comparison_method="admin_review_hybrid_email_similarity(clean_email)",
             field_name="E-posta",
         ),
         "city": _build_exact_field_comparison(
@@ -355,6 +455,17 @@ def _derive_features(
     right_name = _safe_str(right_record.clean_name)
     left_muhatap = _safe_str(left_record.clean_muhatap_no) if hasattr(left_record, "clean_muhatap_no") else ""
     right_muhatap = _safe_str(right_record.clean_muhatap_no) if hasattr(right_record, "clean_muhatap_no") else ""
+    left_ordered_name = _record_raw_name(left_record) or left_name
+    right_ordered_name = _record_raw_name(right_record) or right_name
+    shared_contact_flag = int(
+        bool(
+            (left_phone and right_phone and left_phone == right_phone)
+            or (left_email and right_email and left_email == right_email)
+        )
+    )
+    same_surname_name_conflict_flag = int(
+        same_surname_name_conflict(left_ordered_name, right_ordered_name)
+    )
 
     return {
         "tc_exact_match": int(field_comparisons["tc"]["exactMatch"]),
@@ -362,11 +473,17 @@ def _derive_features(
         "muhatap_no_exact_match": int(field_comparisons["muhatapNo"]["exactMatch"]),
         "muhatap_no_conflict": int(bool(left_muhatap and right_muhatap and left_muhatap != right_muhatap)),
         "phone_exact_match": int(field_comparisons["phone"]["exactMatch"]),
+        "phone_similarity": round(field_comparisons["phone"]["score0To100"] / 100, 4),
         "email_exact_match": int(field_comparisons["email"]["exactMatch"]),
+        "email_similarity": round(field_comparisons["email"]["score0To100"] / 100, 4),
         "city_exact_match": int(field_comparisons["city"]["exactMatch"]),
         "first_name_exact_match": int(field_comparisons["firstName"]["exactMatch"]),
         "surname_exact_match": int(field_comparisons["surname"]["exactMatch"]),
         "name_similarity": round(field_comparisons["fullName"]["score0To100"] / 100, 4),
+        "name_token_similarity": round(
+            token_name_similarity(left_ordered_name, right_ordered_name),
+            4,
+        ),
         "first_name_similarity": round(
             field_comparisons["firstName"]["score0To100"] / 100,
             4,
@@ -375,12 +492,8 @@ def _derive_features(
             field_comparisons["surname"]["score0To100"] / 100,
             4,
         ),
-        "shared_contact_flag": int(
-            bool(
-                (left_phone and right_phone and left_phone == right_phone)
-                or (left_email and right_email and left_email == right_email)
-            )
-        ),
+        "shared_contact_flag": shared_contact_flag,
+        "same_surname_name_conflict": same_surname_name_conflict_flag,
         "common_non_empty_fields": sum(
             [
                 int(bool(left_name and right_name)),
@@ -402,6 +515,23 @@ def _build_risk_flags(features: dict[str, Any]) -> list[str]:
         risk_flags.append("muhatap_no_conflict")
     if features.get("shared_contact_flag", 0):
         risk_flags.append("shared_contact")
+    if features.get("same_surname_name_conflict", 0):
+        risk_flags.append("same_surname_name_conflict")
+    if (
+        float(features.get("email_similarity", 0.0) or 0.0) >= 0.85
+        and not features.get("tc_exact_match", 0)
+        and not features.get("phone_exact_match", 0)
+        and float(features.get("name_similarity", 0.0) or 0.0) < 0.80
+    ):
+        risk_flags.append("email_high_identity_weak")
+    if (
+        not features.get("tc_exact_match", 0)
+        and not features.get("tc_conflict", 0)
+        and not features.get("phone_exact_match", 0)
+        and not features.get("email_exact_match", 0)
+        and float(features.get("name_similarity", 0.0) or 0.0) >= 0.80
+    ):
+        risk_flags.append("weak_identity_evidence")
     if int(features.get("common_non_empty_fields", 0) or 0) <= 2:
         risk_flags.append("sparse_data")
     return risk_flags
@@ -411,6 +541,8 @@ def _build_rule_reasons(
     match_candidate: MatchCandidate,
     features: dict[str, Any],
     field_comparisons: dict[str, dict[str, Any]],
+    *,
+    decision: str,
 ) -> list[str]:
     reasons = [
         f"Eslesme tipi: {_safe_str(match_candidate.match_type) or 'unknown'}",
@@ -432,12 +564,25 @@ def _build_rule_reasons(
         reasons.append("Muhatap Kodu tam eslesti; guclu eslesme sinyali.")
     if features.get("muhatap_no_conflict", 0):
         reasons.append("Muhatap Kodu catisiyor; farkli kisi olabilir.")
+    if features.get("same_surname_name_conflict", 0):
+        reasons.append("Soyad ayni ancak ad sinyali belirgin sekilde farkli.")
 
     full_name_result = field_comparisons["fullName"]["comparisonResult"]
     if full_name_result in {"exact_match", "strong_match", "partial_match"}:
         reasons.append(f"Ad soyad sonucu: {full_name_result}.")
 
-    reasons.append("Nihai durum manuel inceleme icin beklemede.")
+    normalized_decision = _normalize_decision(decision)
+    if normalized_decision == "approved":
+        reasons.append("Nihai karar otomatik veya manuel onayla ayni kisi yonunde.")
+    elif normalized_decision == "rejected":
+        if features.get("tc_conflict", 0) and _candidate_confidence(match_candidate) >= 0.80:
+            reasons.append(
+                "Benzerlik skoru yuksek ancak TC Kimlik No cakismasi nedeniyle otomatik birlestirme engellendi."
+            )
+        else:
+            reasons.append("Nihai karar reddedildi; farkli kisi olasiligi daha yuksek.")
+    else:
+        reasons.append("Nihai durum manuel inceleme icin beklemede.")
     return reasons
 
 
@@ -446,6 +591,10 @@ def _candidate_confidence(match_candidate: MatchCandidate) -> float:
         match_candidate.confidence,
         default=_safe_float(match_candidate.score),
     )
+
+
+def _decision_to_final_decision(decision: str) -> str:
+    return _normalize_decision(decision)
 
 
 def serialize_match_candidate(match_candidate: MatchCandidate) -> dict[str, Any]:
@@ -457,14 +606,30 @@ def serialize_match_candidate(match_candidate: MatchCandidate) -> dict[str, Any]
 
     field_comparisons = _build_field_comparisons(left_record, right_record)
     features = _derive_features(left_record, right_record, field_comparisons)
+    normalized_decision = _normalize_decision(match_candidate.decision)
+    decision_type = _decision_type_for_candidate(normalized_decision, _safe_str(match_candidate.match_type))
     risk_flags = _build_risk_flags(features)
-    rule_reasons = _build_rule_reasons(match_candidate, features, field_comparisons)
+    rule_reasons = _build_rule_reasons(
+        match_candidate,
+        features,
+        field_comparisons,
+        decision=normalized_decision,
+    )
     confidence = _candidate_confidence(match_candidate)
+    if normalized_decision == "rejected" and "tc_conflict" in risk_flags and confidence >= 0.80:
+        reason = "Benzerlik skoru yuksek ancak TC Kimlik No cakismasi nedeniyle otomatik birlestirme engellendi."
+    elif normalized_decision == "approved":
+        reason = "Guclu kimlik sinyalleri nedeniyle onaylandi."
+    else:
+        reason = "Kayit manuel inceleme gerektiriyor."
 
     return {
         "id": match_candidate.id,
         "left_id": match_candidate.left_id,
         "right_id": match_candidate.right_id,
+        "decision": normalized_decision,
+        "decision_type": decision_type,
+        "review_required": normalized_decision == "pending",
         "score": _safe_float(match_candidate.score, default=confidence),
         "match_type": _safe_str(match_candidate.match_type) or "unknown",
         "confidence": confidence,
@@ -481,23 +646,25 @@ def serialize_match_candidate(match_candidate: MatchCandidate) -> dict[str, Any]
         "donor2_city": _safe_str(right_record.clean_city) or None,
         "donor2_tc": _safe_str(right_record.clean_tc) or None,
         "ml_score": confidence,
-        "decision_reason": None,
+        "decision_reason": reason,
+        "reason": reason,
         "features": features,
         "fieldComparisons": field_comparisons,
         "riskFlags": risk_flags,
         "ruleReasons": rule_reasons,
         "decisionSource": _safe_str(match_candidate.match_type) or "match_candidate",
-        "finalDecision": "review",
+        "finalDecision": _decision_to_final_decision(normalized_decision),
         "splinkMatchProbability": confidence,
         "splinkMatchWeight": None,
         "created_at": match_candidate.created_at.isoformat() if match_candidate.created_at else None,
     }
 
 
-def get_pending_match_candidates(
+def get_match_candidates(
     session: Session,
     *,
     upload_id: int | None = None,
+    decision: str | None = None,
     limit: int = 50,
 ) -> list[MatchCandidate]:
     query = (
@@ -507,11 +674,30 @@ def get_pending_match_candidates(
             joinedload(MatchCandidate.left_record).joinedload(NormalizedRecord.raw_record),
             joinedload(MatchCandidate.right_record).joinedload(NormalizedRecord.raw_record),
         )
-        .filter(MatchCandidate.decision == "pending")
     )
+    normalized_decision = _safe_str(decision).lower()
+    if normalized_decision in {"pending", "approved", "rejected"}:
+        query = query.filter(MatchCandidate.decision == normalized_decision)
 
     if upload_id is not None:
         query = query.join(DetectionRun).filter(DetectionRun.upload_id == upload_id)
+        # Aynı upload için birden fazla detection run çalıştırıldığında aynı çiftler tekrar görünebilir.
+        # Listeyi son run ile sınırla.
+        latest_run_id = (
+            session.query(func.max(DetectionRun.id))
+            .filter(DetectionRun.upload_id == upload_id)
+            .scalar()
+        )
+        if latest_run_id is not None:
+            query = query.filter(MatchCandidate.detection_run_id == int(latest_run_id))
+    else:
+        # upload_id filtresi yoksa: tüm upload'ların *son* detection run'larını göster.
+        latest_run_ids_subq = (
+            session.query(func.max(DetectionRun.id).label("id"))
+            .group_by(DetectionRun.upload_id)
+            .subquery()
+        )
+        query = query.join(DetectionRun).filter(DetectionRun.id.in_(latest_run_ids_subq))
 
     return (
         query.order_by(
@@ -520,6 +706,305 @@ def get_pending_match_candidates(
         )
         .limit(limit)
         .all()
+    )
+
+
+def _record_completeness_score(record: NormalizedRecord) -> int:
+    return sum(
+        [
+            int(bool(_safe_str(record.clean_name))),
+            int(bool(_safe_str(record.clean_tc))),
+            int(bool(_safe_str(record.clean_phone))),
+            int(bool(_safe_str(record.clean_email))),
+            int(bool(_safe_str(record.clean_city))),
+            int(bool(_safe_str(record.clean_address))),
+            int(bool(_safe_str(record.clean_muhatap_no))),
+        ]
+    )
+
+
+def _best_value(values: list[str], *, preferred_len: int | None = None) -> str:
+    non_empty = [_safe_str(value) for value in values if _safe_str(value)]
+    if not non_empty:
+        return ""
+    counts: dict[str, int] = {}
+    for value in non_empty:
+        counts[value] = counts.get(value, 0) + 1
+
+    def _rank(value: str) -> tuple[int, int, int]:
+        preferred = int(preferred_len is not None and len(value) == preferred_len)
+        return (counts[value], preferred, len(value))
+
+    return sorted(non_empty, key=_rank, reverse=True)[0]
+
+
+def _normalize_phone(value: str) -> str:
+    digits = "".join(ch for ch in _safe_str(value) if ch.isdigit())
+    if len(digits) >= 10:
+        return digits[-10:]
+    return digits
+
+
+def _normalize_tc(value: str) -> str:
+    digits = "".join(ch for ch in _safe_str(value) if ch.isdigit())
+    return digits if len(digits) == 11 else ""
+
+
+def _normalize_email(value: str) -> tuple[str, bool]:
+    email = _safe_str(value).lower().replace(" ", "")
+    if "@" not in email:
+        return "", False
+    username, domain = email.split("@", 1)
+    username = username or ""
+    domain = domain or ""
+    base_username = username.split("+", 1)[0]
+    return (f"{base_username}@{domain}" if base_username and domain else ""), ("+" in username)
+
+
+def _serialize_group_record(record: NormalizedRecord) -> dict[str, Any]:
+    payload = _normalized_payload(record)
+    return {
+        "record_id": record.id,
+        "raw_id": record.raw_id,
+        "upload_id": record.upload_id,
+        "clean_name": _safe_str(record.clean_name),
+        "clean_tc": _safe_str(record.clean_tc),
+        "clean_phone": _safe_str(record.clean_phone),
+        "clean_email": _safe_str(record.clean_email),
+        "clean_city": _safe_str(record.clean_city),
+        "clean_address": _safe_str(record.clean_address),
+        "clean_muhatap_no": _safe_str(record.clean_muhatap_no),
+        "normalized_payload": payload,
+        "completeness_score": _record_completeness_score(record),
+    }
+
+
+def _build_golden_record(records: list[NormalizedRecord]) -> dict[str, Any]:
+    if not records:
+        return {}
+
+    ordered_records = sorted(
+        records,
+        key=lambda record: (_record_completeness_score(record), -int(record.id)),
+        reverse=True,
+    )
+    warnings: list[str] = []
+    source_record_ids = [int(record.id) for record in ordered_records]
+    field_sources: dict[str, int | None] = {}
+    secondary_emails: list[str] = []
+
+    def pick_with_source(field_name: str, values: list[str], *, preferred_len: int | None = None, longest=False) -> str:
+        non_empty = [_safe_str(value) for value in values if _safe_str(value)]
+        if not non_empty:
+            field_sources[field_name] = None
+            return ""
+        chosen = _best_value(non_empty, preferred_len=preferred_len)
+        if longest:
+            chosen = sorted(non_empty, key=lambda value: len(value), reverse=True)[0]
+        for record in ordered_records:
+            if _safe_str(getattr(record, field_name, "")) == chosen:
+                field_sources[field_name] = int(record.id)
+                break
+        if field_name not in field_sources:
+            field_sources[field_name] = None
+        return chosen
+
+    tc_values = [_normalize_tc(record.clean_tc) for record in ordered_records]
+    unique_tcs = {tc for tc in tc_values if tc}
+    golden_tc = _best_value([tc for tc in tc_values if tc], preferred_len=11)
+    if len(unique_tcs) > 1:
+        warnings.append("tc_conflict")
+    for record in ordered_records:
+        if _normalize_tc(record.clean_tc) == golden_tc and golden_tc:
+            field_sources["clean_tc"] = int(record.id)
+            break
+    if "clean_tc" not in field_sources:
+        field_sources["clean_tc"] = None
+
+    phone_values = [_normalize_phone(record.clean_phone) for record in ordered_records]
+    golden_phone = _best_value([phone for phone in phone_values if phone], preferred_len=10)
+    for record in ordered_records:
+        if _normalize_phone(record.clean_phone) == golden_phone and golden_phone:
+            field_sources["clean_phone"] = int(record.id)
+            break
+    if "clean_phone" not in field_sources:
+        field_sources["clean_phone"] = None
+
+    normalized_emails: list[str] = []
+    for record in ordered_records:
+        normalized_email, is_alias = _normalize_email(record.clean_email)
+        if normalized_email:
+            normalized_emails.append(normalized_email)
+            if is_alias:
+                secondary_emails.append(_safe_str(record.clean_email).lower())
+    golden_email = _best_value(normalized_emails)
+    for record in ordered_records:
+        normalized_email, _ = _normalize_email(record.clean_email)
+        if normalized_email == golden_email and golden_email:
+            field_sources["clean_email"] = int(record.id)
+            break
+    if "clean_email" not in field_sources:
+        field_sources["clean_email"] = None
+
+    golden_name = pick_with_source(
+        "clean_name",
+        [_safe_str(record.clean_name) for record in ordered_records],
+    )
+    city_values = [_safe_str(record.clean_city) for record in ordered_records]
+    golden_city = pick_with_source("clean_city", city_values)
+    golden_address = pick_with_source(
+        "clean_address",
+        [_safe_str(record.clean_address) for record in ordered_records],
+        longest=True,
+    )
+    golden_muhatap = pick_with_source(
+        "clean_muhatap_no",
+        [_safe_str(record.clean_muhatap_no) for record in ordered_records],
+    )
+
+    if not golden_tc and not golden_phone and not golden_email:
+        warnings.append("weak_identity_evidence")
+
+    return {
+        "clean_name": golden_name,
+        "clean_tc": golden_tc,
+        "clean_phone": golden_phone,
+        "clean_email": golden_email,
+        "clean_city": golden_city,
+        "clean_address": golden_address,
+        "clean_muhatap_no": golden_muhatap,
+        "source_record_ids": source_record_ids,
+        "field_sources": field_sources,
+        "warnings": warnings,
+        "risk_flags": warnings,
+        "secondary_emails": sorted(set(secondary_emails)),
+    }
+
+
+def get_duplicate_groups(
+    session: Session,
+    *,
+    upload_id: int | None = None,
+    decision: str = "approved",
+    limit: int = 5000,
+) -> list[dict[str, Any]]:
+    candidates = get_match_candidates(
+        session,
+        upload_id=upload_id,
+        decision=decision,
+        limit=limit,
+    )
+    if not candidates:
+        return []
+
+    adjacency: dict[int, set[int]] = {}
+    edge_by_pair: dict[tuple[int, int], MatchCandidate] = {}
+    record_by_id: dict[int, NormalizedRecord] = {}
+
+    for candidate in candidates:
+        left = candidate.left_record
+        right = candidate.right_record
+        if left is None or right is None:
+            continue
+        left_id = int(left.id)
+        right_id = int(right.id)
+        if left_id == right_id:
+            continue
+
+        serialized = serialize_match_candidate(candidate)
+        features = serialized.get("features", {}) if isinstance(serialized, dict) else {}
+        candidate_decision = _normalize_decision(candidate.decision)
+        tc_conflict = bool(features.get("tc_conflict", 0))
+        phone_match = bool(features.get("phone_exact_match", 0))
+        tc_match = bool(features.get("tc_exact_match", 0))
+        name_similarity = _safe_float(features.get("name_similarity"), 0.0)
+        email_similarity = _safe_float(features.get("email_similarity"), 0.0)
+        strong_signal = tc_match or phone_match or (email_similarity >= 0.85 and name_similarity >= 0.85)
+
+        if candidate_decision == "rejected":
+            continue
+        if tc_conflict:
+            continue
+        if not strong_signal:
+            continue
+        if candidate_decision == "pending" and _candidate_confidence(candidate) < 0.80:
+            continue
+
+        adjacency.setdefault(left_id, set()).add(right_id)
+        adjacency.setdefault(right_id, set()).add(left_id)
+        pair_key = (min(left_id, right_id), max(left_id, right_id))
+        edge_by_pair[pair_key] = candidate
+        record_by_id[left_id] = left
+        record_by_id[right_id] = right
+
+    groups: list[dict[str, Any]] = []
+    visited: set[int] = set()
+    for start in sorted(adjacency.keys()):
+        if start in visited:
+            continue
+        stack = [start]
+        component: set[int] = set()
+        while stack:
+            node = stack.pop()
+            if node in visited:
+                continue
+            visited.add(node)
+            component.add(node)
+            stack.extend(sorted(adjacency.get(node, set()) - visited))
+
+        if len(component) < 2:
+            continue
+
+        component_ids = sorted(component)
+        match_candidates_in_group = [
+            candidate
+            for (left_id, right_id), candidate in edge_by_pair.items()
+            if left_id in component and right_id in component
+        ]
+        match_scores = [
+            _candidate_confidence(candidate) for candidate in match_candidates_in_group
+        ]
+        group_score = round(
+            (sum(match_scores) / len(match_scores)) if match_scores else 0.0,
+            4,
+        )
+        score_max = round(max(match_scores), 4) if match_scores else 0.0
+
+        stable_key = ",".join(str(record_id) for record_id in component_ids)
+        digest = hashlib.sha1(stable_key.encode("utf-8")).hexdigest()[:10]
+        group_id = f"grp-{digest}"
+
+        group_records = [record_by_id[record_id] for record_id in component_ids]
+        groups.append(
+            {
+                "group_id": group_id,
+                "record_ids": component_ids,
+                "group_score": group_score,
+                "group_score_max": score_max,
+                "match_count": len(match_candidates_in_group),
+                "records": [_serialize_group_record(record) for record in group_records],
+                "golden_record": _build_golden_record(group_records),
+            }
+        )
+
+    groups.sort(
+        key=lambda group: (group["group_score"], group["match_count"]),
+        reverse=True,
+    )
+    return groups
+
+
+def get_pending_match_candidates(
+    session: Session,
+    *,
+    upload_id: int | None = None,
+    limit: int = 50,
+) -> list[MatchCandidate]:
+    return get_match_candidates(
+        session,
+        upload_id=upload_id,
+        decision="pending",
+        limit=limit,
     )
 
 

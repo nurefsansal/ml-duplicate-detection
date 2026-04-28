@@ -2,6 +2,11 @@ import { useState, useEffect } from "react";
 import DashboardLayout from "../../components/feature/DashboardLayout";
 import Header from "../../components/feature/Header";
 import {
+  downloadApprovedMatchesCsv,
+  downloadCleanDatasetCsv,
+  downloadDuplicateGroupsCsv,
+  downloadGoldenRecordsCsv,
+  getMatches,
   getReportOverview,
   getReportDataQuality,
   getReportDetectionSummary,
@@ -54,6 +59,12 @@ export default function Raporlar() {
   const [detection, setDetection] = useState<ReportDetectionSummary | null>(null);
   const [review, setReview] = useState<ReportReviewSummary | null>(null);
   const [uploadHistory, setUploadHistory] = useState<ReportUploadHistoryItem[]>([]);
+  const [decisionCounts, setDecisionCounts] = useState({
+    pending: 0,
+    approved: 0,
+    rejected: 0,
+  });
+  const [exporting, setExporting] = useState(false);
 
   const dateParams = {
     date_from: dateFrom || undefined,
@@ -64,18 +75,27 @@ export default function Raporlar() {
     setLoading(true);
     setError("");
     try {
-      const [ov, q, d, r, uh] = await Promise.all([
+      const [ov, q, d, r, uh, pendingMatches, approvedMatches, rejectedMatches] =
+        await Promise.all([
         getReportOverview(dateParams),
         getReportDataQuality(dateParams),
         getReportDetectionSummary(dateParams),
         getReportReviewSummary(dateParams),
         getReportUploadHistory({ ...dateParams, limit: 20 }),
+        getMatches({ decision: "pending", limit: 1_000_000 }),
+        getMatches({ decision: "approved", limit: 1_000_000 }),
+        getMatches({ decision: "rejected", limit: 1_000_000 }),
       ]);
       setOverview(ov.success ? ov : null);
       setQuality(q.success ? q : null);
       setDetection(d.success ? d : null);
       setReview(r.success ? r : null);
       setUploadHistory(uh.success ? uh.uploads : []);
+      setDecisionCounts({
+        pending: pendingMatches.count ?? 0,
+        approved: approvedMatches.count ?? 0,
+        rejected: rejectedMatches.count ?? 0,
+      });
     } catch {
       setError("Rapor verileri yüklenemedi. Backend bağlantısını kontrol edin.");
     } finally {
@@ -96,6 +116,36 @@ export default function Raporlar() {
     }
     setDateFrom(from.toISOString().split("T")[0]);
     setDateTo(new Date().toISOString().split("T")[0]);
+  };
+
+  const handleExport = async (
+    exportType:
+      | "clean"
+      | "duplicate_groups"
+      | "approved_matches"
+      | "golden_records",
+  ) => {
+    setExporting(true);
+    setError("");
+    try {
+      const lastUploadIdRaw = localStorage.getItem("lastDetectUploadId");
+      const parsedUploadId = lastUploadIdRaw ? Number(lastUploadIdRaw) : Number.NaN;
+      const uploadId = Number.isFinite(parsedUploadId) ? parsedUploadId : undefined;
+
+      if (exportType === "clean") {
+        await downloadCleanDatasetCsv({ uploadId });
+      } else if (exportType === "duplicate_groups") {
+        await downloadDuplicateGroupsCsv({ uploadId, decision: "approved" });
+      } else if (exportType === "approved_matches") {
+        await downloadApprovedMatchesCsv({ uploadId });
+      } else {
+        await downloadGoldenRecordsCsv({ uploadId, decision: "approved" });
+      }
+    } catch {
+      setError("Export dosyasi indirilemedi. Lütfen tekrar deneyin.");
+    } finally {
+      setExporting(false);
+    }
   };
 
   return (
@@ -202,9 +252,9 @@ export default function Raporlar() {
                       <StatCard label="Toplam Yükleme" value={overview.total_uploads} />
                       <StatCard label="Normalize Kayıt" value={overview.total_normalized_records.toLocaleString("tr-TR")} />
                       <StatCard label="Aday Çift" value={overview.total_match_candidates} />
-                      <StatCard label="Onaylanan" value={overview.approved} color="text-green-600" bg="bg-green-50" />
-                      <StatCard label="Bekleyen" value={overview.pending} color="text-yellow-600" bg="bg-yellow-50" />
-                      <StatCard label="Reddedilen" value={overview.rejected} color="text-red-600" bg="bg-red-50" />
+                      <StatCard label="Onaylanan" value={decisionCounts.approved} color="text-green-600" bg="bg-green-50" />
+                      <StatCard label="Bekleyen" value={decisionCounts.pending} color="text-yellow-600" bg="bg-yellow-50" />
+                      <StatCard label="Reddedilen" value={decisionCounts.rejected} color="text-red-600" bg="bg-red-50" />
                     </div>
                   )}
 
@@ -254,9 +304,9 @@ export default function Raporlar() {
                       <div className="pt-4 border-t border-gray-100 grid grid-cols-2 sm:grid-cols-3 gap-4">
                         <StatCard label="Tespit Çalışması" value={detection.total_detection_runs} />
                         <StatCard label="Ort. Skor" value={`%${detection.avg_score_pct}`} color="text-blue-600" bg="bg-blue-50" />
-                        <StatCard label="Onaylanan" value={detection.approved} color="text-green-600" bg="bg-green-50" />
-                        <StatCard label="Bekleyen" value={detection.pending} color="text-yellow-600" bg="bg-yellow-50" />
-                        <StatCard label="Reddedilen" value={detection.rejected} color="text-red-600" bg="bg-red-50" />
+                        <StatCard label="Onaylanan" value={decisionCounts.approved} color="text-green-600" bg="bg-green-50" />
+                        <StatCard label="Bekleyen" value={decisionCounts.pending} color="text-yellow-600" bg="bg-yellow-50" />
+                        <StatCard label="Reddedilen" value={decisionCounts.rejected} color="text-red-600" bg="bg-red-50" />
                       </div>
                     </div>
                   )}
@@ -264,9 +314,12 @@ export default function Raporlar() {
                   {/* Review */}
                   {selectedTab === "review" && review && (
                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                      <StatCard label="Toplam İnceleme" value={review.total_reviews} />
-                      <StatCard label="Onay" value={review.approvals} color="text-green-600" bg="bg-green-50" />
-                      <StatCard label="Red" value={review.rejections} color="text-red-600" bg="bg-red-50" />
+                      <StatCard
+                        label="Toplam İnceleme"
+                        value={decisionCounts.pending + decisionCounts.approved + decisionCounts.rejected}
+                      />
+                      <StatCard label="Onay" value={decisionCounts.approved} color="text-green-600" bg="bg-green-50" />
+                      <StatCard label="Red" value={decisionCounts.rejected} color="text-red-600" bg="bg-red-50" />
                     </div>
                   )}
 
@@ -339,8 +392,8 @@ export default function Raporlar() {
                   {[
                     { label: "Yüklemeler", value: overview.total_uploads, icon: "ri-upload-cloud-2-line", color: "text-blue-600" },
                     { label: "Normalize Kayıt", value: overview.total_normalized_records.toLocaleString("tr-TR"), icon: "ri-database-2-line", color: "text-gray-600" },
-                    { label: "Bekleyen Onay", value: overview.pending, icon: "ri-time-line", color: "text-yellow-600" },
-                    { label: "Onaylanan", value: overview.approved, icon: "ri-checkbox-circle-line", color: "text-green-600" },
+                    { label: "Bekleyen Onay", value: decisionCounts.pending, icon: "ri-time-line", color: "text-yellow-600" },
+                    { label: "Onaylanan", value: decisionCounts.approved, icon: "ri-checkbox-circle-line", color: "text-green-600" },
                   ].map((s) => (
                     <div key={s.label} className="flex items-center justify-between">
                       <div className="flex items-center gap-2">
@@ -360,16 +413,42 @@ export default function Raporlar() {
             <div className="bg-gray-50 rounded-xl p-4 border border-gray-100">
               <p className="text-xs font-semibold text-gray-700 mb-2">Dışa Aktarma</p>
               <p className="text-xs text-gray-500 mb-3">
-                Rapor export özelliği şu an geliştirme aşamasındadır.
-                Temiz veri setini CSV olarak indirmek için Temiz Veri Seti sayfasını kullanın.
+                Export dosyalari gerçek DB verilerinden üretilir.
               </p>
-              <button
-                disabled
-                className="w-full flex items-center justify-center gap-2 bg-gray-200 text-gray-400 text-sm font-semibold py-2.5 rounded-xl cursor-not-allowed whitespace-nowrap"
-              >
-                <i className="ri-download-2-line"></i>
-                Raporu Dışa Aktar (Yakında)
-              </button>
+              <div className="space-y-2">
+                <button
+                  onClick={() => handleExport("clean")}
+                  disabled={exporting}
+                  className="w-full flex items-center justify-center gap-2 bg-white text-gray-700 text-sm font-semibold py-2.5 rounded-xl border border-gray-200 hover:bg-gray-50 disabled:opacity-60"
+                >
+                  <i className="ri-download-2-line"></i>
+                  clean_dataset.csv
+                </button>
+                <button
+                  onClick={() => handleExport("duplicate_groups")}
+                  disabled={exporting}
+                  className="w-full flex items-center justify-center gap-2 bg-white text-gray-700 text-sm font-semibold py-2.5 rounded-xl border border-gray-200 hover:bg-gray-50 disabled:opacity-60"
+                >
+                  <i className="ri-download-2-line"></i>
+                  duplicate_groups.csv
+                </button>
+                <button
+                  onClick={() => handleExport("approved_matches")}
+                  disabled={exporting}
+                  className="w-full flex items-center justify-center gap-2 bg-white text-gray-700 text-sm font-semibold py-2.5 rounded-xl border border-gray-200 hover:bg-gray-50 disabled:opacity-60"
+                >
+                  <i className="ri-download-2-line"></i>
+                  approved_matches.csv
+                </button>
+                <button
+                  onClick={() => handleExport("golden_records")}
+                  disabled={exporting}
+                  className="w-full flex items-center justify-center gap-2 bg-white text-gray-700 text-sm font-semibold py-2.5 rounded-xl border border-gray-200 hover:bg-gray-50 disabled:opacity-60"
+                >
+                  <i className="ri-download-2-line"></i>
+                  golden_records.csv
+                </button>
+              </div>
             </div>
           </div>
         </div>

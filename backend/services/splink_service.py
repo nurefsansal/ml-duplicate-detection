@@ -1,14 +1,21 @@
 from __future__ import annotations
 
 import logging
+import os
+from difflib import SequenceMatcher
 from typing import Any
 
 import pandas as pd
 
 from backend.services.advanced_matching_service import (
+    hybrid_name_similarity,
     jaro_winkler_similarity,
     levenshtein_similarity,
+    same_surname_name_conflict,
+    token_name_similarity,
 )
+from backend.services.feature_service import email_similarity_score, phone_similarity_score
+from backend.services.blocking_service import generate_candidate_pairs
 from backend.services.resolution_service import resolve_match_decision
 
 logger = logging.getLogger(__name__)
@@ -16,14 +23,24 @@ logger = logging.getLogger(__name__)
 MAX_PAIRS = 50_000
 PREDICTION_THRESHOLD = 0.3
 
+
+def _max_pairs_limit() -> int:
+    raw = os.getenv("DETECTION_MAX_PAIRS", str(MAX_PAIRS)).strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        value = MAX_PAIRS
+    return max(1, value)
+
 try:
     from splink import DuckDBAPI, Linker, SettingsCreator, block_on
     from splink.comparison_library import ExactMatch, JaroWinklerAtThresholds
+    from splink.comparison_library import LevenshteinAtThresholds  # type: ignore
 
     SPLINK_IMPORT_ERROR: Exception | None = None
 except Exception as exc:  # pragma: no cover - exercised when dependency is absent
     DuckDBAPI = Linker = SettingsCreator = block_on = None  # type: ignore[assignment]
-    ExactMatch = JaroWinklerAtThresholds = None  # type: ignore[assignment]
+    ExactMatch = JaroWinklerAtThresholds = LevenshteinAtThresholds = None  # type: ignore[assignment]
     SPLINK_IMPORT_ERROR = exc
 
 
@@ -34,12 +51,14 @@ class DetectionResults(list):
         *,
         candidate_pairs: int = 0,
         candidate_pairs_total: int | None = None,
+        candidate_pairs_limited: bool = False,
     ) -> None:
         super().__init__(items or [])
         self.candidate_pairs = int(candidate_pairs)
         self.candidate_pairs_total = int(
             candidate_pairs if candidate_pairs_total is None else candidate_pairs_total
         )
+        self.candidate_pairs_limited = bool(candidate_pairs_limited)
         self.duplicate_pairs = len(self)
 
 
@@ -130,15 +149,12 @@ def _collect_pairs_by_column(df: pd.DataFrame, column: str) -> set[tuple[int, in
 
 
 def _estimate_candidate_pairs(df: pd.DataFrame) -> list[tuple[int, int]]:
-    all_pairs: set[tuple[int, int]] = set()
-    for column in (
-        "clean_tc",
-        "clean_phone",
-        "email_normalized_key",
-        "name_phonetic_key",
-    ):
-        all_pairs.update(_collect_pairs_by_column(df, column))
-    return sorted(all_pairs)
+    pairs, _ = generate_candidate_pairs(
+        df,
+        max_pairs=_max_pairs_limit(),
+        return_metadata=True,
+    )
+    return pairs
 
 
 def _split_name_parts(full_name: str) -> tuple[str, str]:
@@ -178,6 +194,7 @@ def _prepare_splink_input(df_clean: pd.DataFrame) -> pd.DataFrame:
         "clean_phone",
         "clean_email",
         "clean_city",
+        "clean_address",
         "name_phonetic_key",
         "email_normalized_key",
         "name_metaphone_key",
@@ -188,6 +205,19 @@ def _prepare_splink_input(df_clean: pd.DataFrame) -> pd.DataFrame:
         df_input[column] = df_input[column].apply(
             lambda value: None if _safe_str(value) == "" else _safe_str(value)
         )
+
+    # DuckDB/Splink JaroWinkler fonksiyonları VARCHAR bekler.
+    # Bazı veri setlerinde kolon dtype'ı yanlış (int) infer edilince
+    # jaro_winkler_similarity(INTEGER, INTEGER) hatası alınabiliyor.
+    for column in (
+        "clean_name",
+        "clean_name_ordered",
+        "clean_first_name",
+        "clean_surname",
+        "email_normalized_key",
+    ):
+        if column in df_input.columns:
+            df_input[column] = df_input[column].astype("string")
 
     return df_input
 
@@ -256,12 +286,198 @@ def _similarity_score(left: str, right: str) -> float:
     right_value = _safe_str(right)
     if not left_value or not right_value:
         return 0.0
+    if " " in left_value or " " in right_value:
+        return round(hybrid_name_similarity(left_value, right_value), 4)
     return round(jaro_winkler_similarity(left_value, right_value), 4)
 
 
 def _score_to_percent(score: float) -> int:
     bounded = max(0.0, min(1.0, _safe_float(score)))
     return int(round(bounded * 100))
+
+
+def _email_similarity(left_email: str, right_email: str) -> float:
+    """
+    İki email adresi arasında akıllı benzerlik skoru hesaplar.
+    - Tamamen aynıysa 1.0
+    - @ öncesi (local part) ve @ sonrası (domain) ayrı ayrı değerlendirilir
+    - Domain aynıysa (gmail.com gibi) bonus puan verilir
+    - Local part için SequenceMatcher + uzunluk farkı cezası uygulanır
+    Skor 0.0-1.0 arasında döner.
+    """
+    left = _safe_str(left_email).lower()
+    right = _safe_str(right_email).lower()
+    if not left or not right:
+        return 0.0
+    if left == right:
+        return 1.0
+
+    if "@" not in left or "@" not in right:
+        return round(SequenceMatcher(None, left, right).ratio(), 4)
+
+    left_local, left_domain = left.rsplit("@", 1)
+    right_local, right_domain = right.rsplit("@", 1)
+
+    domain_match = float(left_domain == right_domain)
+
+    local_sim = SequenceMatcher(None, left_local, right_local).ratio()
+
+    max_len = max(len(left_local), len(right_local))
+    min_len = min(len(left_local), len(right_local))
+    length_penalty = (max_len - min_len) / max_len if max_len > 0 else 0
+    adjusted_local_sim = local_sim * (1 - length_penalty * 0.3)
+
+    if domain_match:
+        score = 0.30 + (adjusted_local_sim * 0.70)
+    else:
+        score = adjusted_local_sim * 0.50
+
+    return round(min(score, 1.0), 4)
+
+
+def _build_email_field_comparison(
+    *,
+    raw_left_value: str,
+    raw_right_value: str,
+    normalized_left_value: str,
+    normalized_right_value: str,
+    gamma_value: Any,
+    clean_left_email: str = "",
+    clean_right_email: str = "",
+) -> dict[str, Any]:
+    """
+    Email karşılaştırması: exact match + fuzzy similarity hibrit.
+    email_normalized_key exact match önce denenir.
+    Farklıysa clean_email üzerinden fuzzy benzerlik hesaplanır.
+    """
+    if not normalized_left_value and not normalized_right_value:
+        # Normalized key yoksa ama clean_email varsa fuzzy ile yine skor üret.
+        if clean_left_email and clean_right_email:
+            similarity = email_similarity_score(
+                _safe_str(clean_left_email),
+                _safe_str(clean_right_email),
+            )
+            score = _score_to_percent(similarity)
+            if similarity >= 0.85:
+                result = "strong_match"
+                notes = f"E-posta yüksek benzerlik gösteriyor (skor: {score}/100). Muhtemelen aynı kişi."
+            elif similarity >= 0.60:
+                result = "partial_match"
+                notes = f"E-posta kısmi benzerlik gösteriyor (skor: {score}/100). Manuel inceleme önerilir."
+            elif similarity >= 0.20:
+                result = "weak_match"
+                notes = f"E-posta zayıf benzerlik gösteriyor (skor: {score}/100)."
+            else:
+                result = "mismatch"
+                notes = "E-posta adresleri belirgin şekilde farklı."
+            return {
+                "rawLeftValue": raw_left_value or None,
+                "rawRightValue": raw_right_value or None,
+                "normalizedLeftValue": None,
+                "normalizedRightValue": None,
+                "comparisonMethod": "splink_hybrid_email_similarity",
+                "comparisonResult": result,
+                "score0To100": score,
+                "exactMatch": False,
+                "notes": notes,
+            }
+        return {
+            "rawLeftValue": None,
+            "rawRightValue": None,
+            "normalizedLeftValue": None,
+            "normalizedRightValue": None,
+            "comparisonMethod": "splink_hybrid_email_similarity",
+            "comparisonResult": "missing",
+            "score0To100": 0,
+            "exactMatch": False,
+            "notes": "E-posta her iki kayıtta da boş.",
+        }
+    if not normalized_left_value or not normalized_right_value:
+        # Normalized key tek tarafta yoksa, clean_email varsa fuzzy hesapla.
+        if clean_left_email and clean_right_email:
+            similarity = email_similarity_score(
+                _safe_str(clean_left_email),
+                _safe_str(clean_right_email),
+            )
+            score = _score_to_percent(similarity)
+            if similarity >= 0.85:
+                result = "strong_match"
+                notes = f"E-posta yüksek benzerlik gösteriyor (skor: {score}/100). Muhtemelen aynı kişi."
+            elif similarity >= 0.60:
+                result = "partial_match"
+                notes = f"E-posta kısmi benzerlik gösteriyor (skor: {score}/100). Manuel inceleme önerilir."
+            elif similarity >= 0.20:
+                result = "weak_match"
+                notes = f"E-posta zayıf benzerlik gösteriyor (skor: {score}/100)."
+            else:
+                result = "mismatch"
+                notes = "E-posta adresleri belirgin şekilde farklı."
+            return {
+                "rawLeftValue": raw_left_value or None,
+                "rawRightValue": raw_right_value or None,
+                "normalizedLeftValue": normalized_left_value or None,
+                "normalizedRightValue": normalized_right_value or None,
+                "comparisonMethod": "splink_hybrid_email_similarity",
+                "comparisonResult": result,
+                "score0To100": score,
+                "exactMatch": False,
+                "notes": notes,
+            }
+        return {
+            "rawLeftValue": raw_left_value or None,
+            "rawRightValue": raw_right_value or None,
+            "normalizedLeftValue": normalized_left_value or None,
+            "normalizedRightValue": normalized_right_value or None,
+            "comparisonMethod": "splink_hybrid_email_similarity",
+            "comparisonResult": "missing",
+            "score0To100": 0,
+            "exactMatch": False,
+            "notes": "E-posta alanlarından biri boş.",
+        }
+
+    gamma = _safe_int(gamma_value, default=-999)
+    # JaroWinklerAtThresholds gamması (eşikler=[0.90,0.70]) için:
+    # 3: exact, 2: strong, 1: partial, 0: mismatch
+    exact_match = (gamma >= 3) or (normalized_left_value == normalized_right_value)
+
+    if exact_match:
+        score = 100
+        result = "exact_match"
+        notes = "Normalize edilmiş e-posta anahtarı birebir eşleşti."
+    else:
+        sim_on_key = email_similarity_score(normalized_left_value, normalized_right_value)
+        sim_on_raw = (
+            email_similarity_score(_safe_str(clean_left_email), _safe_str(clean_right_email))
+            if clean_left_email and clean_right_email
+            else 0.0
+        )
+        similarity = max(sim_on_key, sim_on_raw)
+        score = _score_to_percent(similarity)
+
+        if similarity >= 0.85:
+            result = "strong_match"
+            notes = f"E-posta yüksek benzerlik gösteriyor (skor: {score}/100). Muhtemelen aynı kişi."
+        elif similarity >= 0.60:
+            result = "partial_match"
+            notes = f"E-posta kısmi benzerlik gösteriyor (skor: {score}/100). Manuel inceleme önerilir."
+        elif similarity >= 0.20:
+            result = "weak_match"
+            notes = f"E-posta zayıf benzerlik gösteriyor (skor: {score}/100)."
+        else:
+            result = "mismatch"
+            notes = "E-posta adresleri belirgin şekilde farklı."
+
+    return {
+        "rawLeftValue": raw_left_value or None,
+        "rawRightValue": raw_right_value or None,
+        "normalizedLeftValue": normalized_left_value or None,
+        "normalizedRightValue": normalized_right_value or None,
+        "comparisonMethod": "splink_hybrid_email_similarity",
+        "comparisonResult": result,
+        "score0To100": score,
+        "exactMatch": exact_match,
+        "notes": notes,
+    }
 
 
 def _rename_output_column(comparison: Any, output_column_name: str) -> dict[str, Any]:
@@ -331,6 +547,93 @@ def _build_exact_field_comparison(
         "score0To100": score,
         "exactMatch": exact_match,
         "notes": final_notes,
+    }
+
+
+def _build_phone_field_comparison(
+    *,
+    raw_left_value: str,
+    raw_right_value: str,
+    normalized_left_value: str,
+    normalized_right_value: str,
+    gamma_value: Any,
+) -> dict[str, Any]:
+    """
+    Telefon karşılaştırması: exact match + kademeli fuzzy similarity.
+
+    Kademe sırası:
+    1. Exact match (normalize edilmiş numara birebir aynı)
+    2. Son 7 hane eşleşmesi (farklı alan kodu, aynı numara)
+    3. Son 6 hane eşleşmesi
+    4. Genel string similarity (SequenceMatcher)
+    """
+    if not normalized_left_value and not normalized_right_value:
+        return {
+            "rawLeftValue": None,
+            "rawRightValue": None,
+            "normalizedLeftValue": None,
+            "normalizedRightValue": None,
+            "comparisonMethod": "splink_tiered_phone_similarity",
+            "comparisonResult": "missing",
+            "score0To100": 0,
+            "exactMatch": False,
+            "notes": "Telefon her iki kayıtta da boş.",
+        }
+    if not normalized_left_value or not normalized_right_value:
+        return {
+            "rawLeftValue": raw_left_value or None,
+            "rawRightValue": raw_right_value or None,
+            "normalizedLeftValue": normalized_left_value or None,
+            "normalizedRightValue": normalized_right_value or None,
+            "comparisonMethod": "splink_tiered_phone_similarity",
+            "comparisonResult": "missing",
+            "score0To100": 0,
+            "exactMatch": False,
+            "notes": "Telefon alanlarından biri boş.",
+        }
+
+    gamma = _safe_int(gamma_value, default=-999)
+    exact_match = (gamma == 1) or (normalized_left_value == normalized_right_value)
+
+    if exact_match:
+        return {
+            "rawLeftValue": raw_left_value or None,
+            "rawRightValue": raw_right_value or None,
+            "normalizedLeftValue": normalized_left_value or None,
+            "normalizedRightValue": normalized_right_value or None,
+            "comparisonMethod": "splink_tiered_phone_similarity",
+            "comparisonResult": "exact_match",
+            "score0To100": 100,
+            "exactMatch": True,
+            "notes": "Telefon numarası normalize edilmiş şekilde birebir eşleşti.",
+        }
+
+    similarity = phone_similarity_score(normalized_left_value, normalized_right_value)
+    score = _score_to_percent(similarity)
+
+    if similarity >= 0.85:
+        result = "strong_match"
+        notes = f"Telefon numaraları güçlü benzerlik gösteriyor (skor: {score}/100)."
+    elif similarity >= 0.60:
+        result = "partial_match"
+        notes = f"Telefon numaraları kısmi benzerlik gösteriyor (skor: {score}/100)."
+    elif similarity >= 0.20:
+        result = "weak_match"
+        notes = f"Telefon numaraları zayıf benzerlik gösteriyor (skor: {score}/100)."
+    else:
+        result = "mismatch"
+        notes = "Telefon numaraları belirgin şekilde farklı."
+
+    return {
+        "rawLeftValue": raw_left_value or None,
+        "rawRightValue": raw_right_value or None,
+        "normalizedLeftValue": normalized_left_value or None,
+        "normalizedRightValue": normalized_right_value or None,
+        "comparisonMethod": "splink_tiered_phone_similarity",
+        "comparisonResult": result,
+        "score0To100": score,
+        "exactMatch": False,
+        "notes": notes,
     }
 
 
@@ -465,6 +768,8 @@ def _build_field_comparisons(
     raw_right_tc = _pick_mapping_value(right_record, "TC", "tcKimlikNo", "tc")
     raw_left_city = _pick_mapping_value(left_record, "Sehir", "Şehir", "city")
     raw_right_city = _pick_mapping_value(right_record, "Sehir", "Şehir", "city")
+    raw_left_address = _pick_mapping_value(left_record, "Adres", "adres", "address")
+    raw_right_address = _pick_mapping_value(right_record, "Adres", "adres", "address")
 
     normalized_left_full_name = _safe_str(left_record.get("clean_name"))
     normalized_right_full_name = _safe_str(right_record.get("clean_name"))
@@ -480,6 +785,8 @@ def _build_field_comparisons(
     normalized_right_email = _safe_str(right_record.get("email_normalized_key"))
     normalized_left_city = _safe_str(left_record.get("clean_city"))
     normalized_right_city = _safe_str(right_record.get("clean_city"))
+    normalized_left_address = _safe_str(left_record.get("clean_address"))
+    normalized_right_address = _safe_str(right_record.get("clean_address"))
 
     field_comparisons = {
         "fullName": _build_jw_field_comparison(
@@ -487,7 +794,7 @@ def _build_field_comparisons(
             raw_right_value=raw_right_name,
             normalized_left_value=normalized_left_full_name,
             normalized_right_value=normalized_right_full_name,
-            comparison_method="splink_jaro_winkler(clean_name)",
+            comparison_method="splink_hybrid_jaro_token_similarity(clean_name)",
             gamma_value=row.get("gamma_clean_name"),
             exact_level=3,
             strong_level=2,
@@ -547,25 +854,21 @@ def _build_field_comparisons(
             field_name="TC Kimlik No",
             use_conflict_label=True,
         ),
-        "phone": _build_exact_field_comparison(
+        "phone": _build_phone_field_comparison(
             raw_left_value=raw_left_phone,
             raw_right_value=raw_right_phone,
             normalized_left_value=normalized_left_phone,
             normalized_right_value=normalized_right_phone,
-            comparison_method="splink_exact_match(clean_phone)",
-            notes="Telefon numarasi normalize edilmis sekilde birebir eslesti.",
             gamma_value=row.get("gamma_clean_phone"),
-            field_name="Telefon",
         ),
-        "email": _build_exact_field_comparison(
+        "email": _build_email_field_comparison(
             raw_left_value=raw_left_email,
             raw_right_value=raw_right_email,
             normalized_left_value=normalized_left_email,
             normalized_right_value=normalized_right_email,
-            comparison_method="splink_exact_match(email_normalized_key)",
-            notes="Normalize edilmis e-posta anahtari birebir eslesti.",
             gamma_value=row.get("gamma_email"),
-            field_name="E-posta",
+            clean_left_email=_safe_str(left_record.get("clean_email")),
+            clean_right_email=_safe_str(right_record.get("clean_email")),
         ),
         "city": _build_exact_field_comparison(
             raw_left_value=raw_left_city,
@@ -576,6 +879,24 @@ def _build_field_comparisons(
             notes="Sehir normalize edilmis sekilde birebir eslesti.",
             gamma_value=row.get("gamma_clean_city"),
             field_name="Sehir",
+        ),
+        "address": _build_jw_field_comparison(
+            raw_left_value=raw_left_address,
+            raw_right_value=raw_right_address,
+            normalized_left_value=normalized_left_address,
+            normalized_right_value=normalized_right_address,
+            comparison_method="splink_jaro_winkler(clean_address)",
+            gamma_value=row.get("gamma_address"),
+            exact_level=3,
+            strong_level=2,
+            partial_level=1,
+            strong_threshold=0.95,
+            partial_threshold=0.80,
+            exact_note="Adres normalize edilmis sekilde birebir eslesti.",
+            strong_note="Adres alaninda guclu benzerlik var.",
+            partial_note="Adres alaninda kismi benzerlik var.",
+            mismatch_note="Adres alanlari belirgin sekilde farkli.",
+            field_name="Adres",
         ),
         "muhatapNo": _build_address_field_comparison(left_record, right_record),
     }
@@ -607,6 +928,8 @@ def _derive_features_from_field_comparisons(
     right_email_key = _safe_str(right_record.get("email_normalized_key"))
     left_city = _safe_str(left_record.get("clean_city"))
     right_city = _safe_str(right_record.get("clean_city"))
+    left_address = _safe_str(left_record.get("clean_address"))
+    right_address = _safe_str(right_record.get("clean_address"))
     left_muhatap = _safe_str(left_record.get("clean_muhatap_no"))
     right_muhatap = _safe_str(right_record.get("clean_muhatap_no"))
     left_name = _safe_str(left_record.get("clean_name"))
@@ -615,6 +938,8 @@ def _derive_features_from_field_comparisons(
     right_first = _safe_str(right_record.get("clean_first_name"))
     left_surname = _safe_str(left_record.get("clean_surname"))
     right_surname = _safe_str(right_record.get("clean_surname"))
+    left_ordered_name = _safe_str(left_record.get("clean_name_ordered")) or left_name
+    right_ordered_name = _safe_str(right_record.get("clean_name_ordered")) or right_name
     left_phonetic = _safe_str(left_record.get("name_phonetic_key"))
     right_phonetic = _safe_str(right_record.get("name_phonetic_key"))
     left_metaphone = _safe_str(left_record.get("name_metaphone_key"))
@@ -651,6 +976,9 @@ def _derive_features_from_field_comparisons(
             and first_name_similarity < 0.70
         )
     )
+    same_surname_name_conflict_flag = int(
+        same_surname_name_conflict(left_ordered_name, right_ordered_name)
+    )
 
     return {
         "tc_exact_match": int(field_comparisons["tc"]["exactMatch"]),
@@ -662,11 +990,21 @@ def _derive_features_from_field_comparisons(
             bool(left_muhatap and right_muhatap and left_muhatap != right_muhatap)
         ),
         "phone_exact_match": phone_exact,
+        "phone_match": phone_exact,
+        "phone_similarity": round(
+            field_comparisons["phone"]["score0To100"] / 100,
+            4,
+        ),
         "phone_last7_match": int(
             bool(left_phone and right_phone and left_phone[-7:] == right_phone[-7:])
         ),
         "email_exact_match": email_exact,
         "city_exact_match": int(field_comparisons["city"]["exactMatch"]),
+        "city_match": int(field_comparisons["city"]["exactMatch"]),
+        "address_similarity": round(
+            field_comparisons["address"]["score0To100"] / 100,
+            4,
+        ),
         "phonetic_exact_match": int(
             bool(left_phonetic and right_phonetic and left_phonetic == right_phonetic)
         ),
@@ -681,11 +1019,15 @@ def _derive_features_from_field_comparisons(
         ),
         "name_similarity": full_name_similarity,
         "name_jaro_winkler": _similarity_score(left_name, right_name),
+        "name_token_similarity": round(
+            token_name_similarity(left_ordered_name, right_ordered_name),
+            4,
+        ),
         "name_levenshtein_similarity": round(
             levenshtein_similarity(left_name, right_name),
             4,
         ),
-        "email_similarity": float(email_exact),
+        "email_similarity": round(field_comparisons["email"]["score0To100"] / 100, 4),
         "first_name_similarity": first_name_similarity,
         "surname_similarity": surname_similarity,
         "first_name_jaro_winkler": _similarity_score(left_first, right_first),
@@ -695,6 +1037,7 @@ def _derive_features_from_field_comparisons(
         "shared_contact_flag": shared_contact_flag,
         "shared_contact_name_conflict": shared_contact_name_conflict,
         "household_risk_flag": household_risk_flag,
+        "same_surname_name_conflict": same_surname_name_conflict_flag,
         "common_non_empty_fields": sum(
             [
                 int(bool(left_tc and right_tc)),
@@ -702,6 +1045,7 @@ def _derive_features_from_field_comparisons(
                 int(bool(left_email_key and right_email_key)),
                 int(bool(left_name and right_name)),
                 int(bool(left_city and right_city)),
+                int(bool(left_address and right_address)),
                 int(bool(left_muhatap and right_muhatap)),
             ]
         ),
@@ -721,6 +1065,31 @@ def _build_risk_flags(features: dict[str, Any]) -> list[str]:
         risk_flags.append("shared_contact_name_conflict")
     if features.get("household_risk_flag", 0):
         risk_flags.append("household_risk")
+    if features.get("same_surname_name_conflict", 0):
+        risk_flags.append("same_surname_name_conflict")
+    if (
+        float(features.get("email_similarity", 0.0) or 0.0) >= 0.85
+        and not features.get("tc_exact_match", 0)
+        and not features.get("phone_exact_match", 0)
+        and float(features.get("name_similarity", 0.0) or 0.0) < 0.80
+    ):
+        risk_flags.append("email_high_identity_weak")
+    if (
+        not features.get("tc_exact_match", 0)
+        and not features.get("tc_conflict", 0)
+        and not features.get("phone_exact_match", 0)
+        and not features.get("email_exact_match", 0)
+        and float(features.get("name_similarity", 0.0) or 0.0) >= 0.80
+    ):
+        risk_flags.append("weak_identity_evidence")
+    if (
+        not features.get("tc_exact_match", 0)
+        and not features.get("tc_conflict", 0)
+        and not features.get("phone_exact_match", 0)
+        and not features.get("email_exact_match", 0)
+        and not features.get("city_exact_match", 0)
+    ):
+        risk_flags.append("cross_city_contact_mismatch")
     if int(features.get("common_non_empty_fields", 0) or 0) <= 2:
         risk_flags.append("sparse_data")
 
@@ -760,16 +1129,18 @@ def _build_rule_reasons(
         reasons.append("Ortak iletisim bilgisi var ancak isim sinyali catismali.")
     if features.get("household_risk_flag", 0):
         reasons.append("Ortak iletisim household riski olusturuyor.")
+    if features.get("same_surname_name_conflict", 0):
+        reasons.append("Soyad ayni ancak ad sinyali belirgin sekilde farkli.")
     if int(features.get("common_non_empty_fields", 0) or 0) <= 2:
         reasons.append("Bos alanlar nedeniyle guven dusuruldu.")
 
     reasons.append(f"Splink eslesme olasiligi: {probability:.4f}")
 
-    if final_decision == "review":
+    if final_decision == "pending":
         reasons.append("Nihai karar manuel inceleme olarak birakildi.")
-    elif final_decision == "different_person":
+    elif final_decision == "rejected":
         reasons.append("Nihai karar farkli kisi yonunde.")
-    elif final_decision == "same_person":
+    elif final_decision == "approved":
         reasons.append("Nihai karar ayni kisi yonunde.")
 
     return reasons
@@ -789,15 +1160,40 @@ def _build_payload(df_clean: pd.DataFrame, row: dict[str, Any]) -> dict[str, Any
         field_comparisons,
     )
     splink_match_probability = _safe_float(row.get("match_probability"))
+    # Splink (EM) ham olasılığı bazı durumlarda çatışma sinyallerine rağmen çok yüksek dönebilir.
+    # UI'da yanıltıcı "skor %100" görünümünü engellemek için bazı çatışma tiplerinde tavan kırpılır.
+    tc_conflict = int(features.get("tc_conflict", 0) or 0) == 1
+    if tc_conflict:
+        # TC çatışması = maksimum "pending" bandında kalmalı (0.40-0.79)
+        # 0.80+ "approved" bandına girmesin
+        adjusted_probability = min(splink_match_probability, 0.75)
+    elif features.get("muhatap_no_conflict", 0):
+        adjusted_probability = min(splink_match_probability, 0.85)
+    else:
+        adjusted_probability = splink_match_probability
+    splink_match_probability = adjusted_probability
     splink_match_weight = _safe_float(row.get("match_weight"), default=0.0)
     final_decision = resolve_match_decision(splink_match_probability, features)
     risk_flags = _build_risk_flags(features)
+    decision_type = "auto"
+    review_required = final_decision == "pending"
+    if final_decision == "rejected" and "tc_conflict" in risk_flags and splink_match_probability >= 0.80:
+        decision_reason = (
+            "Benzerlik skoru yuksek ancak TC Kimlik No cakismasi nedeniyle otomatik birlestirme engellendi."
+        )
+    elif final_decision == "approved":
+        decision_reason = "Guclu kimlik sinyalleri nedeniyle otomatik onaylandi."
+    elif final_decision == "pending":
+        decision_reason = "Skor ve kimlik sinyalleri manuel inceleme gerektiriyor."
+    else:
+        decision_reason = "Guven skoru ve kimlik sinyalleri yetersiz oldugu icin otomatik reddedildi."
     rule_reasons = _build_rule_reasons(
         features=features,
         field_comparisons=field_comparisons,
         probability=splink_match_probability,
         final_decision=final_decision,
     )
+    rule_reasons.insert(0, decision_reason)
 
     return {
         "pairId": f"{left_index}-{right_index}",
@@ -814,6 +1210,9 @@ def _build_payload(df_clean: pd.DataFrame, row: dict[str, Any]) -> dict[str, Any
         "splinkMatchWeight": splink_match_weight,
         "ml_probability": splink_match_probability,
         "decision": final_decision,
+        "decision_type": decision_type,
+        "review_required": review_required,
+        "reason": decision_reason,
         "finalDecision": final_decision,
         "decisionSource": "splink_plus_rules",
     }
@@ -853,19 +1252,25 @@ def run_splink_detection(
     if df_clean.empty or len(df_clean) < 2:
         return DetectionResults([], candidate_pairs=0)
 
-    candidate_pairs = _estimate_candidate_pairs(df_clean)
+    effective_max_pairs = min(int(max_pairs), _max_pairs_limit())
+    candidate_pairs, candidate_meta = generate_candidate_pairs(
+        df_clean,
+        max_pairs=effective_max_pairs,
+        return_metadata=True,
+    )
     total_candidate_pairs = len(candidate_pairs)
-    bounded_candidate_pairs = min(total_candidate_pairs, int(max_pairs))
+    bounded_candidate_pairs = min(total_candidate_pairs, effective_max_pairs)
+    candidate_pairs_limited = bool(candidate_meta.get("limited", False))
 
     if total_candidate_pairs == 0:
         return DetectionResults([], candidate_pairs=0)
 
-    if total_candidate_pairs > int(max_pairs):
+    if candidate_pairs_limited or total_candidate_pairs > effective_max_pairs:
         logger.warning(
             "Splink candidate pair estimate exceeded cap; total=%s cap=%s. "
             "Predictions will be trimmed after scoring.",
             total_candidate_pairs,
-            max_pairs,
+            effective_max_pairs,
         )
 
     df_input = _prepare_splink_input(df_clean)
@@ -882,8 +1287,13 @@ def run_splink_detection(
             JaroWinklerAtThresholds("clean_surname", [0.95, 0.85]),
             "surname",
         ),
+        # Telefon: exact match yeterli (fuzzy post-processing'de yapılıyor)
         ExactMatch("clean_phone"),
-        _rename_output_column(ExactMatch("email_normalized_key"), "email"),
+        # Email: JaroWinkler ile fuzzy comparison (exact değil)
+        _rename_output_column(
+            JaroWinklerAtThresholds("email_normalized_key", [0.90, 0.70]),
+            "email",
+        ),
         ExactMatch("clean_city"),
         ExactMatch("name_phonetic_key"),
     ]
@@ -944,6 +1354,7 @@ def run_splink_detection(
             [],
             candidate_pairs=bounded_candidate_pairs,
             candidate_pairs_total=total_candidate_pairs,
+            candidate_pairs_limited=candidate_pairs_limited,
         )
 
     predictions_df = predictions_df.sort_values(
@@ -952,8 +1363,9 @@ def run_splink_detection(
         na_position="last",
     ).reset_index(drop=True)
 
-    if len(predictions_df) > int(max_pairs):
-        predictions_df = predictions_df.head(int(max_pairs)).copy()
+    if len(predictions_df) > effective_max_pairs:
+        predictions_df = predictions_df.head(effective_max_pairs).copy()
+        candidate_pairs_limited = True
 
     payloads = [
         _build_payload(df_clean, row)
@@ -964,4 +1376,5 @@ def run_splink_detection(
         payloads,
         candidate_pairs=bounded_candidate_pairs,
         candidate_pairs_total=total_candidate_pairs,
+        candidate_pairs_limited=candidate_pairs_limited,
     )

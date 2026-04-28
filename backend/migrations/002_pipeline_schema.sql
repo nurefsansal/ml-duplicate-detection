@@ -125,6 +125,18 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS jobs (
+    id SERIAL PRIMARY KEY,
+    type VARCHAR(64) NOT NULL,
+    status VARCHAR(32) NOT NULL DEFAULT 'pending',
+    progress FLOAT NOT NULL DEFAULT 0,
+    total_rows INT DEFAULT 0,
+    processed_rows INT DEFAULT 0,
+    error_message TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE INDEX IF NOT EXISTS idx_uploads_source_type ON uploads(source_type);
 CREATE INDEX IF NOT EXISTS idx_uploads_processing_stage ON uploads(processing_stage);
 CREATE INDEX IF NOT EXISTS idx_uploads_completed_at ON uploads(completed_at DESC);
@@ -176,3 +188,7 @@ CREATE INDEX IF NOT EXISTS idx_entity_memberships_normalized_record_id ON entity
 CREATE INDEX IF NOT EXISTS idx_audit_logs_action_type ON audit_logs(action_type);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_entity_lookup ON audit_logs(entity_type, entity_id);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_jobs_type ON jobs(type);
+CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
+CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_jobs_updated_at ON jobs(updated_at DESC);
