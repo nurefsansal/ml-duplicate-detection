@@ -3,7 +3,6 @@ import type {
   DetectDuplicatePair,
   FieldComparison,
 } from "../services/api";
-import type { DuplicateGroup } from "../mocks/records";
 
 export type FieldComparisonKey =
   | "fullName"
@@ -45,6 +44,8 @@ export type UiDuplicatePair = {
   splinkMatchProbability: number;
   splinkMatchWeight?: number | null;
   decisionReason?: string;
+  decisionType?: "auto" | "manual";
+  reviewRequired?: boolean;
   createdAt?: string | null;
   reviewedAt?: string | null;
   reviewNote?: string;
@@ -208,35 +209,108 @@ function buildRecordFromPendingMatch(
 }
 
 function buildMatchDetails(
+  features: Record<string, unknown>,
+  records: [UiPairRecord, UiPairRecord],
   fieldComparisons: Record<string, FieldComparison>,
 ): Record<string, number> {
+  const backendEmailSimilarity = Number(features.email_similarity);
+  let emailScore = Number.NaN;
+
+  if (!Number.isNaN(backendEmailSimilarity)) {
+    emailScore =
+      backendEmailSimilarity >= 0 && backendEmailSimilarity <= 1
+        ? backendEmailSimilarity * 100
+        : backendEmailSimilarity;
+  } else {
+    const comparisonScore = Number(fieldComparisons.email?.score0To100);
+    if (!Number.isNaN(comparisonScore)) {
+      emailScore =
+        comparisonScore >= 0 && comparisonScore <= 1
+          ? comparisonScore * 100
+          : comparisonScore;
+    }
+  }
+
+  if (Number.isNaN(emailScore)) {
+    const fallbackSimilarity = fallbackEmailSimilarity(
+      records[0].email,
+      records[1].email,
+    );
+    emailScore = fallbackSimilarity * 100;
+  }
+
   return {
     adSoyad: toPercent(fieldComparisons.fullName?.score0To100, 0),
     tcKimlikNo: toPercent(fieldComparisons.tc?.score0To100, 0),
     telefon: toPercent(fieldComparisons.phone?.score0To100, 0),
-    email: toPercent(fieldComparisons.email?.score0To100, 0),
+    email: toPercent(emailScore, 0),
     sehir: toPercent(fieldComparisons.city?.score0To100, 0),
   };
 }
 
+function normalizeEmailForSimilarity(email: string): {
+  username: string;
+  domain: string;
+  full: string;
+} {
+  const cleaned = String(email || "").trim().toLowerCase();
+  if (!cleaned || !cleaned.includes("@")) {
+    return { username: "", domain: "", full: "" };
+  }
+  const [rawUser, rawDomain] = cleaned.split("@", 2);
+  const userWithoutTag = rawUser.split("+")[0] || "";
+  const username = userWithoutTag.replace(/\./g, "");
+  const domain = rawDomain || "";
+  return { username, domain, full: `${username}@${domain}` };
+}
+
+function simpleStringSimilarity(a: string, b: string): number {
+  if (!a || !b) return 0;
+  if (a === b) return 1;
+  const aSet = new Set(a.split(""));
+  const bSet = new Set(b.split(""));
+  let intersection = 0;
+  for (const ch of aSet) {
+    if (bSet.has(ch)) intersection += 1;
+  }
+  const denom = Math.max(aSet.size, bSet.size, 1);
+  return intersection / denom;
+}
+
+function fallbackEmailSimilarity(leftEmail: string, rightEmail: string): number {
+  const left = normalizeEmailForSimilarity(leftEmail);
+  const right = normalizeEmailForSimilarity(rightEmail);
+  if (!left.full || !right.full) {
+    return 0;
+  }
+  if (left.full === right.full) {
+    return 0.95;
+  }
+  const usernameSim = simpleStringSimilarity(left.username, right.username);
+  if (left.domain && right.domain && left.domain === right.domain) {
+    return Math.max(0.6, 0.5 + usernameSim * 0.5);
+  }
+  return Math.max(0.2, usernameSim * 0.5);
+}
+
 export function finalDecisionLabel(value: string): string {
-  if (value === "same_person") {
-    return "Ayni Kisi";
+  if (value === "approved" || value === "same_person") {
+    return "Onaylandı";
   }
-  if (value === "different_person") {
-    return "Farkli Kisi";
+  if (value === "rejected" || value === "different_person") {
+    return "Reddedildi";
   }
-  if (value === "review") {
-    return "Manuel Inceleme";
+  if (value === "pending" || value === "review") {
+    return "Bekliyor";
   }
   return "Bilinmiyor";
 }
 
 export function finalDecisionTone(value: string): string {
-  if (value === "same_person") {
+  if (value === "approved" || value === "same_person") {
     return "bg-green-50 text-green-700";
   }
-  if (value === "different_person") {
+  if (value === "rejected" || value === "different_person") {
     return "bg-red-50 text-red-600";
   }
   return "bg-yellow-50 text-yellow-700";
@@ -247,6 +321,8 @@ export function mapDetectPairToView(
   index: number,
 ): UiDuplicatePair {
   const fieldComparisons = pair.fieldComparisons || {};
+  const leftRecord = buildRecordFromDetectPair(pair, "left");
+  const rightRecord = buildRecordFromDetectPair(pair, "right");
   const score = toPercentValue(
     pair.splinkMatchProbability ?? pair.ml_probability ?? 0,
     0,
@@ -255,23 +331,27 @@ export function mapDetectPairToView(
   return {
     id: `MG-${String(index + 1).padStart(3, "0")}`,
     pairId: pair.pairId,
-    records: [
-      buildRecordFromDetectPair(pair, "left"),
-      buildRecordFromDetectPair(pair, "right"),
-    ],
+    records: [leftRecord, rightRecord],
     score,
     workflowState: "bekleyen",
     finalDecision: pair.finalDecision || pair.decision,
     finalDecisionLabel: finalDecisionLabel(pair.finalDecision || pair.decision),
-    matchDetails: buildMatchDetails(fieldComparisons),
+    matchDetails: buildMatchDetails(
+      pair.features || {},
+      [leftRecord, rightRecord],
+      fieldComparisons,
+    ),
     fieldComparisons,
     riskFlags: pair.riskFlags || [],
     ruleReasons: pair.ruleReasons || pair.reasons || [],
     decisionSource: pair.decisionSource,
+    decisionType: pair.decision_type || "auto",
+    reviewRequired: Boolean(pair.review_required ?? pair.decision === "pending"),
     splinkMatchProbability: Number(
       pair.splinkMatchProbability ?? pair.ml_probability ?? 0,
     ),
     splinkMatchWeight: pair.splinkMatchWeight ?? null,
+    decisionReason: pair.reason || undefined,
   };
 }
 
@@ -279,6 +359,8 @@ export function mapPendingMatchToView(
   match: AdminPendingMatch,
 ): UiDuplicatePair {
   const fieldComparisons = match.fieldComparisons || {};
+  const leftRecord = buildRecordFromPendingMatch(match, "left");
+  const rightRecord = buildRecordFromPendingMatch(match, "right");
   const finalDecision =
     match.finalDecision || match.decision || match.decision_reason || "review";
   const rawScore =
@@ -288,21 +370,29 @@ export function mapPendingMatchToView(
     match.ml_score ??
     0;
 
+  const workflowState: PairWorkflowState =
+    match.decision === "approved"
+      ? "onaylandi"
+      : match.decision === "rejected"
+        ? "reddedildi"
+        : "bekleyen";
+
   return {
     id: String(match.id),
     pairId: `match-${match.id}`,
     backendMatchId: match.id,
     matchType: match.match_type || match.decisionSource || "unknown",
     backendDecision: match.decision || "pending",
-    records: [
-      buildRecordFromPendingMatch(match, "left"),
-      buildRecordFromPendingMatch(match, "right"),
-    ],
+    records: [leftRecord, rightRecord],
     score: toPercentValue(rawScore, 0),
-    workflowState: "bekleyen",
+    workflowState,
     finalDecision,
     finalDecisionLabel: finalDecisionLabel(finalDecision),
-    matchDetails: buildMatchDetails(fieldComparisons),
+    matchDetails: buildMatchDetails(
+      match.features || {},
+      [leftRecord, rightRecord],
+      fieldComparisons,
+    ),
     fieldComparisons,
     riskFlags: match.riskFlags || [],
     ruleReasons: match.ruleReasons || [],
@@ -310,130 +400,9 @@ export function mapPendingMatchToView(
     splinkMatchProbability: Number(rawScore),
     splinkMatchWeight: match.splinkMatchWeight ?? null,
     decisionReason: match.decision_reason || undefined,
+    decisionType: (match.decision_type as "auto" | "manual" | undefined) || "manual",
+    reviewRequired: Boolean(match.review_required ?? true),
     createdAt: match.created_at,
   };
 }
 
-function syntheticComparison(
-  leftValue: string,
-  rightValue: string,
-  score: number,
-  comparisonMethod: string,
-  notes: string,
-): FieldComparison {
-  const exactMatch = Boolean(leftValue && rightValue && leftValue === rightValue);
-  return {
-    rawLeftValue: leftValue,
-    rawRightValue: rightValue,
-    normalizedLeftValue: leftValue,
-    normalizedRightValue: rightValue,
-    comparisonMethod,
-    comparisonResult: exactMatch
-      ? "exact_match"
-      : score >= 85
-        ? "strong_match"
-        : score >= 60
-          ? "partial_match"
-          : "mismatch",
-    score0To100: score,
-    exactMatch,
-    notes,
-  };
-}
-
-export function mapMockGroupToView(group: DuplicateGroup): UiDuplicatePair {
-  const [leftRecord, rightRecord] = group.records;
-  const details = group.matchDetails || {};
-  const fieldComparisons: Record<string, FieldComparison> = {
-    fullName: syntheticComparison(
-      leftRecord.adSoyad,
-      rightRecord.adSoyad,
-      toPercent(details.adSoyad, 0),
-      "mock_similarity",
-      "Mock veri uzerinden olusturulan alan karsilastirmasi.",
-    ),
-    firstName: syntheticComparison(
-      leftRecord.adSoyad.split(" ")[0] || "",
-      rightRecord.adSoyad.split(" ")[0] || "",
-      toPercent(details.adSoyad, 0),
-      "mock_similarity",
-      "Mock veri uzerinden olusturulan ad karsilastirmasi.",
-    ),
-    surname: syntheticComparison(
-      leftRecord.adSoyad.split(" ").slice(-1)[0] || "",
-      rightRecord.adSoyad.split(" ").slice(-1)[0] || "",
-      toPercent(details.adSoyad, 0),
-      "mock_similarity",
-      "Mock veri uzerinden olusturulan soyad karsilastirmasi.",
-    ),
-    tc: syntheticComparison(
-      leftRecord.tcKimlikNo,
-      rightRecord.tcKimlikNo,
-      toPercent(details.tcKimlikNo, 0),
-      "mock_exact_match",
-      "Mock veri uzerinden olusturulan TC karsilastirmasi.",
-    ),
-    phone: syntheticComparison(
-      leftRecord.telefon,
-      rightRecord.telefon,
-      toPercent(details.telefon, 0),
-      "mock_exact_match",
-      "Mock veri uzerinden olusturulan telefon karsilastirmasi.",
-    ),
-    email: syntheticComparison(
-      leftRecord.email,
-      rightRecord.email,
-      toPercent(details.email, 0),
-      "mock_exact_match",
-      "Mock veri uzerinden olusturulan e-posta karsilastirmasi.",
-    ),
-    city: syntheticComparison(
-      leftRecord.sehir,
-      rightRecord.sehir,
-      toPercent(details.sehir, 0),
-      "mock_exact_match",
-      "Mock veri uzerinden olusturulan sehir karsilastirmasi.",
-    ),
-    muhatapNo: syntheticComparison(
-      leftRecord.muhatapNo || "",
-      rightRecord.muhatapNo || "",
-      0,
-      "mock_supporting",
-      "Mock veri uzerinden olusturulan muhatap kodu karsilastirmasi.",
-    ),
-  };
-
-  return {
-    id: group.id,
-    pairId: group.id,
-    records: [
-      {
-        adSoyad: leftRecord.adSoyad,
-        tcKimlikNo: leftRecord.tcKimlikNo,
-        telefon: leftRecord.telefon,
-        email: leftRecord.email,
-        sehir: leftRecord.sehir,
-        muhatapNo: leftRecord.muhatapNo,
-      },
-      {
-        adSoyad: rightRecord.adSoyad,
-        tcKimlikNo: rightRecord.tcKimlikNo,
-        telefon: rightRecord.telefon,
-        email: rightRecord.email,
-        sehir: rightRecord.sehir,
-        muhatapNo: rightRecord.muhatapNo,
-      },
-    ],
-    score: toPercent(group.score, 0),
-    workflowState: group.decision,
-    finalDecision: "review",
-    finalDecisionLabel: "Manuel Inceleme",
-    matchDetails: buildMatchDetails(fieldComparisons),
-    fieldComparisons,
-    riskFlags: [],
-    ruleReasons: [],
-    decisionSource: "mock_data",
-    splinkMatchProbability: group.score / 100,
-    splinkMatchWeight: null,
-  };
-}

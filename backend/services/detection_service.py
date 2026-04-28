@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 from src.db import create_db_engine
 from backend.models.database import DetectionRun, MatchCandidate, NormalizationRun, NormalizedRecord
+from backend.services.job_service import update_job_progress
 from backend.schemas.requests import RecordIn
 from backend.services.matching_service import (
     DEFAULT_MODEL_VERSION,
@@ -367,6 +368,14 @@ def _persist_match_candidates(
 ) -> int:
     inserted = 0
 
+    def _normalize_decision(value: Any) -> str:
+        normalized = _safe_str(value).lower()
+        if normalized in {"approved", "same_person"}:
+            return "approved"
+        if normalized in {"rejected", "different_person"}:
+            return "rejected"
+        return "pending"
+
     for payload in duplicates:
         left_index = int(payload.get("left_index", -1))
         right_index = int(payload.get("right_index", -1))
@@ -374,8 +383,24 @@ def _persist_match_candidates(
         right_id = index_to_normalized_id.get(right_index)
         if left_id is None or right_id is None or left_id == right_id:
             continue
+        # Canonical ordering to prevent (A,B) and (B,A) duplicates.
+        if left_id > right_id:
+            left_id, right_id = right_id, left_id
 
         confidence = extract_confidence(payload)
+        persisted_decision = _normalize_decision(
+            payload.get("decision") or payload.get("finalDecision")
+        )
+        # Deduplicate within the same detection run (same pair can appear via multiple sources).
+        existing = (
+            session.query(MatchCandidate.id)
+            .filter(MatchCandidate.detection_run_id == detection_run_id)
+            .filter(MatchCandidate.left_id == left_id)
+            .filter(MatchCandidate.right_id == right_id)
+            .first()
+        )
+        if existing is not None:
+            continue
         session.add(
             MatchCandidate(
                 detection_run_id=detection_run_id,
@@ -383,7 +408,7 @@ def _persist_match_candidates(
                 right_id=right_id,
                 score=confidence,
                 match_type=infer_match_type(payload),
-                decision="pending",
+                decision=persisted_decision,
                 confidence=confidence,
             )
         )
@@ -399,6 +424,7 @@ def run_detection_from_database(
     normalization_run_id: int | None,
     min_rules_to_match: int,
     session_id: str | None,
+    job_id: int | None = None,
 ) -> dict[str, Any]:
     resolved_session_id = _resolve_session_id(session_id)
     session = SessionLocal()
@@ -413,6 +439,14 @@ def run_detection_from_database(
     )
 
     try:
+        if job_id is not None:
+            update_job_progress(
+                session,
+                job_id=job_id,
+                status="running",
+                progress=5,
+            )
+
         resolved_upload_id, resolved_normalization_run_id, normalized_records = (
             _resolve_detection_scope(
                 session=session,
@@ -427,6 +461,15 @@ def run_detection_from_database(
             resolved_upload_id,
             resolved_normalization_run_id,
         )
+        if job_id is not None:
+            update_job_progress(
+                session,
+                job_id=job_id,
+                status="running",
+                progress=20,
+                total_rows=len(normalized_records),
+                processed_rows=0,
+            )
 
         detection_run = DetectionRun(
             upload_id=resolved_upload_id,
@@ -448,6 +491,9 @@ def run_detection_from_database(
         detection_run.model_version = resolved_model_version
 
         candidate_pairs = int(getattr(duplicates, "candidate_pairs", len(duplicates)))
+        candidate_pairs_limited = bool(
+            getattr(duplicates, "candidate_pairs_limited", False)
+        )
         duplicate_pairs = int(getattr(duplicates, "duplicate_pairs", len(duplicates)))
         logger.info(
             "[detect] Eşleştirme tamamlandı: %.2fs — model=%s — candidatePairs=%d duplicatePairs=%d",
@@ -456,6 +502,14 @@ def run_detection_from_database(
             candidate_pairs,
             duplicate_pairs,
         )
+        if job_id is not None:
+            update_job_progress(
+                session,
+                job_id=job_id,
+                status="running",
+                progress=70,
+                processed_rows=len(normalized_records),
+            )
 
         inserted = _persist_match_candidates(
             session=session,
@@ -464,6 +518,14 @@ def run_detection_from_database(
             index_to_normalized_id=index_to_normalized_id,
         )
         logger.info("[detect] MatchCandidate kaydedildi: %d satır", inserted)
+        if job_id is not None:
+            update_job_progress(
+                session,
+                job_id=job_id,
+                status="running",
+                progress=90,
+                processed_rows=len(normalized_records),
+            )
 
         # Connected-components: collapse pairs into groups (A-B + A-C + B-C = 1 group, 3 records)
         duplicate_group_count, affected_record_count = _compute_duplicate_groups(
@@ -480,16 +542,26 @@ def run_detection_from_database(
         detection_run.affected_record_count = affected_record_count
 
         session.commit()
+        if job_id is not None:
+            update_job_progress(
+                session,
+                job_id=job_id,
+                status="completed",
+                progress=100,
+                processed_rows=len(normalized_records),
+            )
 
         t_total = time.monotonic() - t_start
         logger.info("[detect] Toplam süre: %.2fs", t_total)
 
         return {
             "sessionId": resolved_session_id,
+            "jobId": job_id,
             "uploadId": resolved_upload_id,
             "normalizationRunId": resolved_normalization_run_id,
             "detectionRunId": int(detection_run.id),
             "candidatePairs": candidate_pairs,
+            "candidatePairsLimited": candidate_pairs_limited,
             "duplicatePairs": duplicate_pairs,
             "duplicateGroupCount": duplicate_group_count,
             "affectedRecordCount": affected_record_count,
@@ -499,10 +571,24 @@ def run_detection_from_database(
         }
     except HTTPException:
         session.rollback()
+        if job_id is not None:
+            update_job_progress(
+                session,
+                job_id=job_id,
+                status="failed",
+                error_message="Detection failed with HTTPException",
+            )
         raise
     except Exception as exc:
         session.rollback()
         logger.exception("[detect] Hata: %s", exc)
+        if job_id is not None:
+            update_job_progress(
+                session,
+                job_id=job_id,
+                status="failed",
+                error_message=str(exc),
+            )
         raise HTTPException(
             status_code=500, detail=f"Tespit sırasında hata oluştu: {exc}"
         ) from exc
@@ -518,6 +604,7 @@ def detect_core(
     session_id: str | None,
     upload_id: int | None = None,
     normalization_run_id: int | None = None,
+    job_id: int | None = None,
 ) -> dict[str, Any]:
     del save_to_db
 
@@ -527,6 +614,7 @@ def detect_core(
             normalization_run_id=normalization_run_id,
             min_rules_to_match=min_rules_to_match,
             session_id=session_id,
+            job_id=job_id,
         )
 
     if not records:
@@ -553,6 +641,7 @@ def detect_core(
         normalization_run_id=int(normalization_result["normalizationRunId"]),
         min_rules_to_match=min_rules_to_match,
         session_id=resolved_session_id,
+        job_id=job_id,
     )
 
 
@@ -565,6 +654,7 @@ def detect_file_dataframe(
     save_to_db: bool,
     session_id: str | None,
     upload_id: int | None = None,
+    job_id: int | None = None,
 ) -> dict[str, Any]:
     del save_to_db
 
@@ -594,4 +684,5 @@ def detect_file_dataframe(
         normalization_run_id=int(normalization_result["normalizationRunId"]),
         min_rules_to_match=min_rules_to_match,
         session_id=resolved_session_id,
+        job_id=job_id,
     )

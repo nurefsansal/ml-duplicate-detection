@@ -648,6 +648,30 @@ class AuditLog(Base):
         return f"<AuditLog(id={self.id}, action_type='{self.action_type}', entity_type='{self.entity_type}')>"
 
 
+class Job(Base):
+    __tablename__ = "jobs"
+
+    id = Column(Integer, primary_key=True)
+    type = Column(String(64), nullable=False)
+    status = Column(String(32), nullable=False, default="pending")
+    progress = Column(Float, nullable=False, default=0.0)
+    total_rows = Column(Integer, default=0)
+    processed_rows = Column(Integer, default=0)
+    error_message = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        Index("idx_jobs_type", "type"),
+        Index("idx_jobs_status", "status"),
+        Index("idx_jobs_created_at", "created_at"),
+        Index("idx_jobs_updated_at", "updated_at"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<Job(id={self.id}, type='{self.type}', status='{self.status}', progress={self.progress})>"
+
+
 __all__ = [
     "Base",
     "Upload",
@@ -665,4 +689,5 @@ __all__ = [
     "EntityMap",
     "EntityMembership",
     "AuditLog",
+    "Job",
 ]

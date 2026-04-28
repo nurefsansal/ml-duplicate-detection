@@ -8,6 +8,7 @@ import hashlib
 import io
 import json
 import os
+import tempfile
 from datetime import datetime
 from typing import Any
 
@@ -17,7 +18,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from backend.models.database import ColumnMapping, NormalizationRun, NormalizedRecord, RawRecord, Upload
-from backend.services.normalization_service import SOURCE_FIELD_TARGETS
+from backend.services.normalization_service import infer_target_field_name
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
@@ -57,6 +58,35 @@ def _ingestion_hash(payload: dict) -> str:
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
+def _suggested_target_field(source_column: str) -> str:
+    target_field = infer_target_field_name(source_column)
+    return "" if target_field == "ignored" else target_field
+
+
+def _insert_raw_batch(db: Session, *, upload_id: int, rows: list[dict]) -> None:
+    if not rows:
+        return
+    batch = []
+    for row in rows:
+        payload = _row_to_payload(row)
+        batch.append(
+            RawRecord(
+                upload_id=upload_id,
+                raw_payload=payload,
+                ingestion_hash=_ingestion_hash(payload),
+                row_status="pending",
+            )
+        )
+    db.bulk_save_objects(batch)
+
+
+def _iter_csv_chunks(file_path: str):
+    try:
+        return pd.read_csv(file_path, chunksize=2000, encoding="utf-8")
+    except UnicodeDecodeError:
+        return pd.read_csv(file_path, chunksize=2000, encoding="latin-1")
+
+
 router = APIRouter()
 
 
@@ -67,63 +97,102 @@ async def upload_file_only(
 ):
     """Dosyayı yükle: uploads + raw_records oluştur. Normalizasyon YAPMA."""
     filename = (file.filename or "").lower()
-    content = await file.read()
+    if not (
+        filename.endswith(".xlsx") or filename.endswith(".xls") or filename.endswith(".csv")
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Sadece .xlsx, .xls ve .csv dosyaları destekleniyor",
+        )
 
+    temp_file_path: str | None = None
+    file_size_bytes = 0
     try:
-        if filename.endswith(".xlsx") or filename.endswith(".xls"):
-            df = pd.read_excel(io.BytesIO(content))
-            source_type = "excel"
-        elif filename.endswith(".csv"):
-            try:
-                df = pd.read_csv(io.StringIO(content.decode("utf-8")))
-            except UnicodeDecodeError:
-                df = pd.read_csv(io.StringIO(content.decode("latin-1")))
-            source_type = "csv"
-        else:
-            raise HTTPException(
-                status_code=400,
-                detail="Sadece .xlsx, .xls ve .csv dosyaları destekleniyor",
-            )
-    except HTTPException:
-        raise
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{file.filename or 'upload'}") as temp_file:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                file_size_bytes += len(chunk)
+                temp_file.write(chunk)
+            temp_file_path = temp_file.name
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Dosya okunamadı: {exc}") from exc
 
-    source_columns = [str(col) for col in df.columns]
-    total_records = len(df)
-
-    suggested_mappings = {
-        col: SOURCE_FIELD_TARGETS.get(col.strip().lower(), "")
-        for col in source_columns
-    }
-
     try:
+        if filename.endswith(".xlsx") or filename.endswith(".xls"):
+            df = pd.read_excel(temp_file_path)
+            source_type = "excel"
+            source_columns = [str(col) for col in df.columns]
+            total_records = len(df)
+            suggested_mappings = {col: _suggested_target_field(col) for col in source_columns}
+
+            upload = Upload(
+                source_type=source_type,
+                source_name=file.filename or "uploaded_file",
+                file_name=file.filename or "uploaded_file",
+                file_size_bytes=file_size_bytes,
+                total_records=total_records,
+                status="uploaded",
+                processing_stage="raw",
+            )
+            db.add(upload)
+            db.flush()
+            _insert_raw_batch(
+                db,
+                upload_id=upload.id,
+                rows=[row.to_dict() for _, row in df.iterrows()],
+            )
+            db.commit()
+            db.refresh(upload)
+            return {
+                "success": True,
+                "upload_id": upload.id,
+                "file_name": upload.file_name,
+                "source_type": upload.source_type,
+                "total_records": total_records,
+                "source_columns": source_columns,
+                "suggested_mappings": suggested_mappings,
+            }
+
+        source_type = "csv"
         upload = Upload(
             source_type=source_type,
             source_name=file.filename or "uploaded_file",
             file_name=file.filename or "uploaded_file",
-            file_size_bytes=len(content),
-            total_records=total_records,
+            file_size_bytes=file_size_bytes,
+            total_records=0,
             status="uploaded",
             processing_stage="raw",
         )
         db.add(upload)
         db.flush()
 
-        for _, row in df.iterrows():
-            raw_payload = _row_to_payload(row.to_dict())
-            db.add(
-                RawRecord(
-                    upload_id=upload.id,
-                    raw_payload=raw_payload,
-                    ingestion_hash=_ingestion_hash(raw_payload),
-                    row_status="pending",
-                )
-            )
+        total_records = 0
+        source_columns: list[str] = []
+        batch_rows: list[dict] = []
+        for chunk_df in _iter_csv_chunks(temp_file_path):
+            if not source_columns:
+                source_columns = [str(col) for col in chunk_df.columns]
+            records = chunk_df.to_dict(orient="records")
+            total_records += len(records)
+            batch_rows.extend(records)
+            if len(batch_rows) >= 2000:
+                _insert_raw_batch(db, upload_id=upload.id, rows=batch_rows)
+                db.flush()
+                batch_rows = []
+
+        if batch_rows:
+            _insert_raw_batch(db, upload_id=upload.id, rows=batch_rows)
+
+        if not source_columns:
+            raise HTTPException(status_code=400, detail="CSV dosyası boş veya okunamadı")
+
+        upload.total_records = total_records
+        suggested_mappings = {col: _suggested_target_field(col) for col in source_columns}
 
         db.commit()
         db.refresh(upload)
-
         return {
             "success": True,
             "upload_id": upload.id,
@@ -133,11 +202,18 @@ async def upload_file_only(
             "source_columns": source_columns,
             "suggested_mappings": suggested_mappings,
         }
+    except HTTPException:
+        db.rollback()
+        raise
     except Exception as exc:
         db.rollback()
-        raise HTTPException(
-            status_code=500, detail=f"Upload kaydedilemedi: {exc}"
-        ) from exc
+        raise HTTPException(status_code=500, detail=f"Upload kaydedilemedi: {exc}") from exc
+    finally:
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                os.remove(temp_file_path)
+            except OSError:
+                pass
 
 
 @router.get("/uploads/{upload_id}/columns")
@@ -160,7 +236,7 @@ def get_upload_columns(upload_id: int, db: Session = Depends(get_db)):
 
     source_columns = list(first_raw.raw_payload.keys())
     suggested_mappings = {
-        col: SOURCE_FIELD_TARGETS.get(col.strip().lower(), "")
+        col: _suggested_target_field(col)
         for col in source_columns
     }
 

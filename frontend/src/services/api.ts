@@ -1,4 +1,5 @@
 import axios from "axios";
+import { getAuthToken, setAuthSession } from "./auth";
 
 const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
@@ -6,6 +7,15 @@ const API_BASE_URL =
 export const apiClient = axios.create({
   baseURL: API_BASE_URL,
   timeout: 60000,
+});
+
+apiClient.interceptors.request.use((config) => {
+  const token = getAuthToken();
+  if (token) {
+    config.headers = config.headers ?? {};
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+  return config;
 });
 
 // ─── Shared types ─────────────────────────────────────────────────────────────
@@ -45,6 +55,9 @@ export type DetectDuplicatePair = {
   splinkMatchWeight?: number | null;
   ml_probability?: number | null;
   decision: string;
+  decision_type?: "auto" | "manual";
+  review_required?: boolean;
+  reason?: string;
   finalDecision: string;
   decisionSource: string;
 };
@@ -261,6 +274,9 @@ export type AdminPendingMatch = {
   score?: number | null;
   match_type?: string | null;
   decision?: string | null;
+  decision_type?: "auto" | "manual" | null;
+  review_required?: boolean | null;
+  reason?: string | null;
   donor1_id: number;
   donor2_id: number;
   donor1_name: string;
@@ -289,8 +305,49 @@ export type AdminPendingMatch = {
 
 export type AdminPendingMatchesResponse = {
   success: boolean;
+  decision?: "pending" | "approved" | "rejected";
   count: number;
   matches: AdminPendingMatch[];
+};
+
+export type DuplicateGroupRecord = {
+  record_id: number;
+  raw_id: number;
+  upload_id: number;
+  clean_name: string;
+  clean_tc: string;
+  clean_phone: string;
+  clean_email: string;
+  clean_city: string;
+  clean_address: string;
+  clean_muhatap_no: string;
+  normalized_payload: Record<string, unknown>;
+  completeness_score: number;
+};
+
+export type DuplicateGroup = {
+  group_id: string;
+  record_ids: number[];
+  group_score: number;
+  group_score_max: number;
+  match_count: number;
+  records: DuplicateGroupRecord[];
+  golden_record: {
+    clean_name?: string;
+    clean_tc?: string;
+    clean_phone?: string;
+    clean_email?: string;
+    clean_city?: string;
+    clean_address?: string;
+    clean_muhatap_no?: string;
+  };
+};
+
+export type DuplicateGroupsResponse = {
+  success: boolean;
+  decision?: "pending" | "approved" | "rejected";
+  count: number;
+  groups: DuplicateGroup[];
 };
 
 export type AdminApproveResponse = {
@@ -323,11 +380,30 @@ export type DetectDuplicateOptions = {
   threshold?: number;
 };
 
+export type LoginResponse = {
+  success: boolean;
+  access_token: string;
+  token_type: "bearer";
+  user: { username: string };
+};
+
 // ─── Core API functions ────────────────────────────────────────────────────────
 
 export async function healthCheck() {
   const response = await apiClient.get("/health");
   return response.data;
+}
+
+export async function login(payload: {
+  username: string;
+  password: string;
+}): Promise<LoginResponse> {
+  const response = await apiClient.post("/api/v1/auth/login", payload);
+  const data = response.data as LoginResponse;
+  if (data?.access_token && data?.user?.username) {
+    setAuthSession(data.access_token, data.user.username);
+  }
+  return data;
 }
 
 // ─── Normalize (LEGACY) ────────────────────────────────────────────────────────
@@ -593,16 +669,118 @@ export async function getReportUploadHistory(params?: {
   return response.data;
 }
 
+function triggerCsvDownload(blob: Blob, filename: string): void {
+  const url = window.URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.URL.revokeObjectURL(url);
+}
+
+async function downloadReportCsv(
+  endpoint: string,
+  filename: string,
+  params?: Record<string, string | number | undefined>,
+): Promise<void> {
+  const response = await apiClient.get(endpoint, {
+    params,
+    responseType: "blob",
+  });
+  triggerCsvDownload(response.data as Blob, filename);
+}
+
+export async function downloadCleanDatasetCsv(options?: {
+  uploadId?: number;
+}): Promise<void> {
+  await downloadReportCsv(
+    "/api/v1/reports/export/clean_dataset.csv",
+    "clean_dataset.csv",
+    { upload_id: options?.uploadId },
+  );
+}
+
+export async function downloadDuplicateGroupsCsv(options?: {
+  uploadId?: number;
+  decision?: "pending" | "approved" | "rejected";
+}): Promise<void> {
+  await downloadReportCsv(
+    "/api/v1/reports/export/duplicate_groups.csv",
+    "duplicate_groups.csv",
+    {
+      upload_id: options?.uploadId,
+      decision: options?.decision,
+    },
+  );
+}
+
+export async function downloadApprovedMatchesCsv(options?: {
+  uploadId?: number;
+}): Promise<void> {
+  await downloadReportCsv(
+    "/api/v1/reports/export/approved_matches.csv",
+    "approved_matches.csv",
+    { upload_id: options?.uploadId },
+  );
+}
+
+export async function downloadGoldenRecordsCsv(options?: {
+  uploadId?: number;
+  decision?: "pending" | "approved" | "rejected";
+}): Promise<void> {
+  await downloadReportCsv(
+    "/api/v1/reports/export/golden_records.csv",
+    "golden_records.csv",
+    {
+      upload_id: options?.uploadId,
+      decision: options?.decision,
+    },
+  );
+}
+
 // ─── Admin ─────────────────────────────────────────────────────────────────────
 
 export async function getPendingMatches(options?: {
   uploadId?: number;
   limit?: number;
 }): Promise<AdminPendingMatchesResponse> {
-  const response = await apiClient.get("/api/v1/admin/pending-matches", {
+  const response = await apiClient.get("/api/v1/matches", {
     params: {
+      decision: "pending",
       upload_id: options?.uploadId,
       limit: options?.limit ?? 50,
+    },
+  });
+  return response.data;
+}
+
+export async function getMatches(options?: {
+  decision?: "pending" | "approved" | "rejected";
+  uploadId?: number;
+  limit?: number;
+}): Promise<AdminPendingMatchesResponse> {
+  const response = await apiClient.get("/api/v1/matches", {
+    params: {
+      decision: options?.decision ?? "pending",
+      upload_id: options?.uploadId,
+      limit: options?.limit ?? 100,
+    },
+  });
+  return response.data;
+}
+
+export async function getDuplicateGroups(options?: {
+  decision?: "pending" | "approved" | "rejected";
+  uploadId?: number;
+  limit?: number;
+}): Promise<DuplicateGroupsResponse> {
+  const response = await apiClient.get("/api/v1/duplicate-groups", {
+    params: {
+      decision: options?.decision ?? "approved",
+      upload_id: options?.uploadId,
+      limit: options?.limit ?? 5000,
     },
   });
   return response.data;

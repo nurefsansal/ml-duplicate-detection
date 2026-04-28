@@ -96,7 +96,15 @@ export default function MukerrerTespit() {
     setResults([]);
 
     const progressInterval = window.setInterval(() => {
-      setProgress((value) => Math.min(value + Math.floor(Math.random() * 5) + 1, 85));
+      setProgress((value) => {
+        if (value >= 85) {
+          return value;
+        }
+        if (value === 0) {
+          return 10;
+        }
+        return Math.min(value + 8, 85);
+      });
     }, 400);
 
     try {
@@ -428,6 +436,12 @@ export default function MukerrerTespit() {
                         : pair.score >= 80
                           ? "bg-orange-50 text-orange-500"
                           : "bg-yellow-50 text-yellow-600";
+                    const decisionTypeLabel =
+                      pair.finalDecision === "approved"
+                        ? "Otomatik Onaylandı"
+                        : pair.finalDecision === "rejected"
+                          ? "Otomatik Reddedildi"
+                          : "Manuel İnceleme";
                     return (
                       <tr key={pair.id} className="transition-colors hover:bg-gray-50/50">
                         <td className="px-5 py-3.5 font-medium text-gray-700">{pair.id}</td>
@@ -450,10 +464,10 @@ export default function MukerrerTespit() {
                         </td>
                         <td className="px-4 py-3.5">
                           <span className={`inline-block rounded-full px-2.5 py-1 text-[11px] font-medium ${finalDecisionTone(pair.finalDecision)}`}>
-                            {pair.finalDecisionLabel}
+                            {decisionTypeLabel}
                           </span>
                           <p className="mt-1 text-[11px] text-gray-400">
-                            {pair.ruleReasons[0] || "Ek açıklama yok"}
+                            {pair.decisionReason || pair.ruleReasons[0] || "Ek açıklama yok"}
                           </p>
                         </td>
                         <td className="px-4 py-3.5 text-gray-500">

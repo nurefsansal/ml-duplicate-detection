@@ -5,10 +5,13 @@ Reports API Routes - Gerçek veritabanı tablolarından rapor verileri.
 from __future__ import annotations
 
 import os
+import csv
+import io
 from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends
+from fastapi.responses import Response
 from sqlalchemy import create_engine, func
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -20,6 +23,7 @@ from backend.models.database import (
     ReviewAction,
     Upload,
 )
+from backend.services.review_service import get_duplicate_groups
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
@@ -49,6 +53,20 @@ def _parse_date(value: Optional[str]) -> Optional[datetime]:
 
 
 router = APIRouter()
+
+
+def _csv_response(rows: list[dict], *, filename: str) -> Response:
+    output = io.StringIO()
+    fieldnames = list(rows[0].keys()) if rows else []
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
+    if fieldnames:
+        writer.writeheader()
+        writer.writerows(rows)
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
 
 
 @router.get("/reports/overview")
@@ -284,3 +302,117 @@ def get_upload_history(
         return {"success": True, "count": len(result), "uploads": result}
     except Exception as exc:
         return {"success": False, "error": str(exc)}
+
+
+@router.get("/reports/export/clean_dataset.csv")
+def export_clean_dataset_csv(
+    upload_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+):
+    query = db.query(NormalizedRecord)
+    if upload_id is not None:
+        query = query.filter(NormalizedRecord.upload_id == upload_id)
+    records = query.order_by(NormalizedRecord.id.asc()).all()
+    rows = [
+        {
+            "id": record.id,
+            "upload_id": record.upload_id,
+            "normalization_run_id": record.normalization_run_id,
+            "clean_name": record.clean_name or "",
+            "first_name": record.first_name or "",
+            "last_name": record.last_name or "",
+            "clean_tc": record.clean_tc or "",
+            "clean_phone": record.clean_phone or "",
+            "clean_email": record.clean_email or "",
+            "clean_city": record.clean_city or "",
+            "clean_address": record.clean_address or "",
+            "clean_muhatap_no": record.clean_muhatap_no or "",
+            "is_valid": bool(record.is_valid),
+            "blocking_key": record.blocking_key or "",
+            "created_at": record.created_at.isoformat() if record.created_at else "",
+        }
+        for record in records
+    ]
+    return _csv_response(rows, filename="clean_dataset.csv")
+
+
+@router.get("/reports/export/approved_matches.csv")
+def export_approved_matches_csv(
+    upload_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+):
+    query = db.query(MatchCandidate).filter(MatchCandidate.decision == "approved")
+    if upload_id is not None:
+        query = query.join(DetectionRun).filter(DetectionRun.upload_id == upload_id)
+    matches = query.order_by(MatchCandidate.created_at.desc()).all()
+    rows = [
+        {
+            "match_id": match.id,
+            "detection_run_id": match.detection_run_id,
+            "left_id": match.left_id,
+            "right_id": match.right_id,
+            "score": match.score if match.score is not None else "",
+            "confidence": match.confidence if match.confidence is not None else "",
+            "match_type": match.match_type or "",
+            "decision": match.decision or "",
+            "created_at": match.created_at.isoformat() if match.created_at else "",
+        }
+        for match in matches
+    ]
+    return _csv_response(rows, filename="approved_matches.csv")
+
+
+@router.get("/reports/export/duplicate_groups.csv")
+def export_duplicate_groups_csv(
+    upload_id: Optional[int] = None,
+    decision: str = "approved",
+    db: Session = Depends(get_db),
+):
+    groups = get_duplicate_groups(
+        db,
+        upload_id=upload_id,
+        decision=decision,
+        limit=50_000,
+    )
+    rows = [
+        {
+            "group_id": group["group_id"],
+            "record_ids": ",".join(str(record_id) for record_id in group["record_ids"]),
+            "record_count": len(group["record_ids"]),
+            "group_score": group["group_score"],
+            "group_score_max": group["group_score_max"],
+            "match_count": group["match_count"],
+        }
+        for group in groups
+    ]
+    return _csv_response(rows, filename="duplicate_groups.csv")
+
+
+@router.get("/reports/export/golden_records.csv")
+def export_golden_records_csv(
+    upload_id: Optional[int] = None,
+    decision: str = "approved",
+    db: Session = Depends(get_db),
+):
+    groups = get_duplicate_groups(
+        db,
+        upload_id=upload_id,
+        decision=decision,
+        limit=50_000,
+    )
+    rows = [
+        {
+            "group_id": group["group_id"],
+            "record_count": len(group["record_ids"]),
+            "group_score": group["group_score"],
+            "clean_name": group["golden_record"].get("clean_name", ""),
+            "clean_tc": group["golden_record"].get("clean_tc", ""),
+            "clean_phone": group["golden_record"].get("clean_phone", ""),
+            "clean_email": group["golden_record"].get("clean_email", ""),
+            "clean_city": group["golden_record"].get("clean_city", ""),
+            "clean_address": group["golden_record"].get("clean_address", ""),
+            "clean_muhatap_no": group["golden_record"].get("clean_muhatap_no", ""),
+        }
+        for group in groups
+    ]
+    return _csv_response(rows, filename="golden_records.csv")

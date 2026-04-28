@@ -25,6 +25,9 @@ from backend.api.routes.normalized_records_route import router as normalized_rec
 from backend.api.routes.uploads_route import router as uploads_router
 from backend.api.routes.normalization_runs_route import router as normalization_runs_router
 from backend.api.routes.column_mappings_route import router as column_mappings_router
+from backend.api.routes.auth import router as auth_router
+from backend.api.routes.ml import router as ml_router
+from backend.api.routes.jobs import router as jobs_router
 
 app = FastAPI(title="Dedupli-AI API", version="0.2.0")
 
@@ -55,3 +58,6 @@ app.include_router(normalized_records_router, prefix="/api/v1")
 app.include_router(uploads_router, prefix="/api/v1")
 app.include_router(normalization_runs_router, prefix="/api/v1")
 app.include_router(column_mappings_router, prefix="/api/v1")
+app.include_router(auth_router, prefix="/api/v1")
+app.include_router(ml_router, prefix="/api/v1")
+app.include_router(jobs_router, prefix="/api/v1")
