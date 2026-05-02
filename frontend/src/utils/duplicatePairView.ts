@@ -405,4 +405,3 @@ export function mapPendingMatchToView(
     createdAt: match.created_at,
   };
 }
-

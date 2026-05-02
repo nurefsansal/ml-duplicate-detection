@@ -118,7 +118,7 @@ export type UploadListResponse = {
 
 export type UploadFileResponse = {
   success: boolean;
-  upload_id: number;
+  upload_id: number | null;
   file_name: string;
   source_type: string;
   total_records: number;
@@ -177,7 +177,10 @@ export type NormalizationRunResponse = {
 // ─── Normalized record types ───────────────────────────────────────────────────
 
 export type NormalizedRecordDb = {
+  source?: "entity" | "normalized_record";
   id: number;
+  entity_id?: number | null;
+  record_id?: number | null;
   upload_id: number;
   normalization_run_id: number | null;
   clean_name: string;
@@ -221,6 +224,9 @@ export type ReportDataQuality = {
   valid_records: number;
   invalid_records: number;
   validity_rate: number;
+  tc_fill_rate?: number;
+  phone_fill_rate?: number;
+  email_fill_rate?: number;
   normalization_runs: number;
   total_processed: number;
   total_success: number;
@@ -245,6 +251,16 @@ export type ReportReviewSummary = {
   total_reviews: number;
   approvals: number;
   rejections: number;
+  recent_reviews?: Array<{
+    id: number;
+    user: string;
+    decision: string;
+    date: string | null;
+    group_id: string;
+    match_id: number;
+    left_id?: number | null;
+    right_id?: number | null;
+  }>;
 };
 
 export type ReportUploadHistoryItem = {
@@ -314,6 +330,8 @@ export type DuplicateGroupRecord = {
   record_id: number;
   raw_id: number;
   upload_id: number;
+  membership_status?: "confirmed" | "pending" | "excluded";
+  entity_id?: number | null;
   clean_name: string;
   clean_tc: string;
   clean_phone: string;
@@ -321,16 +339,23 @@ export type DuplicateGroupRecord = {
   clean_city: string;
   clean_address: string;
   clean_muhatap_no: string;
+  raw_payload?: Record<string, unknown>;
   normalized_payload: Record<string, unknown>;
   completeness_score: number;
 };
 
 export type DuplicateGroup = {
   group_id: string;
+  entity_id?: number | null;
   record_ids: number[];
+  pair_count?: number;
+  avg_score?: number;
+  max_score?: number;
   group_score: number;
   group_score_max: number;
   match_count: number;
+  muhatap_codes?: string[];
+  different_muhatap_code?: boolean;
   records: DuplicateGroupRecord[];
   golden_record: {
     clean_name?: string;
@@ -348,6 +373,20 @@ export type DuplicateGroupsResponse = {
   decision?: "pending" | "approved" | "rejected";
   count: number;
   groups: DuplicateGroup[];
+};
+
+export type PartialApproveGroupResponse = {
+  entity_id: number;
+  confirmed_count: number;
+  excluded_count: number;
+  golden_record_id: number | null;
+};
+
+export type GoldenRecordUpdateResponse = {
+  success: boolean;
+  entity_id: number;
+  canonical_data: DuplicateGroup["golden_record"];
+  golden_record_id: number | null;
 };
 
 export type AdminApproveResponse = {
@@ -775,14 +814,54 @@ export async function getDuplicateGroups(options?: {
   decision?: "pending" | "approved" | "rejected";
   uploadId?: number;
   limit?: number;
+  differentMuhatapCode?: boolean;
 }): Promise<DuplicateGroupsResponse> {
   const response = await apiClient.get("/api/v1/duplicate-groups", {
     params: {
       decision: options?.decision ?? "approved",
       upload_id: options?.uploadId,
       limit: options?.limit ?? 5000,
+      different_muhatap_code: options?.differentMuhatapCode || undefined,
     },
   });
+  return response.data;
+}
+
+export async function partialApproveGroup(payload: {
+  groupId: string;
+  recordIds: number[];
+  approvedRecordIds: number[];
+  rejectedRecordIds: number[];
+  uploadId?: number;
+  decision?: "pending" | "approved" | "rejected";
+  note?: string;
+}): Promise<PartialApproveGroupResponse> {
+  const response = await apiClient.post(
+    `/api/v1/matches/group/${encodeURIComponent(payload.groupId)}/partial-approve`,
+    {
+      record_ids: payload.recordIds,
+      approved_record_ids: payload.approvedRecordIds,
+      rejected_record_ids: payload.rejectedRecordIds,
+      upload_id: payload.uploadId,
+      decision: payload.decision,
+      note: payload.note,
+    },
+  );
+  return response.data;
+}
+
+export async function updateGoldenRecord(payload: {
+  entityId: number;
+  fields: DuplicateGroup["golden_record"];
+  note?: string;
+}): Promise<GoldenRecordUpdateResponse> {
+  const response = await apiClient.patch(
+    `/api/v1/entities/${payload.entityId}/golden-record`,
+    {
+      fields: payload.fields,
+      note: payload.note,
+    },
+  );
   return response.data;
 }
 
@@ -812,4 +891,13 @@ export async function rejectPendingMatch(payload: {
   if (payload.reason) body.reason = payload.reason;
   const response = await apiClient.post("/api/v1/admin/reject-match", body);
   return response.data;
+}
+
+export async function getSettings(): Promise<Record<string, any>> {
+  const response = await apiClient.get("/api/settings");
+  return response.data;
+}
+
+export async function saveSettings(settings: Record<string, any>): Promise<void> {
+  await apiClient.post("/api/settings/batch", { settings });
 }

@@ -14,7 +14,7 @@ from typing import Any
 
 import pandas as pd
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from backend.models.database import ColumnMapping, NormalizationRun, NormalizedRecord, RawRecord, Upload
@@ -58,20 +58,59 @@ def _ingestion_hash(payload: dict) -> str:
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
+def _ensure_import_batch(db: Session, *, upload_id: int) -> str:
+    batch_id = f"upload-{upload_id}"
+    db.execute(
+        text(
+            """
+            INSERT INTO import_batches (
+                batch_id,
+                source_name,
+                source_type,
+                status,
+                record_count,
+                created_at
+            )
+            SELECT
+                :batch_id,
+                uploads.file_name,
+                COALESCE(uploads.source_type, 'unknown'),
+                COALESCE(uploads.status, 'uploaded'),
+                COALESCE(uploads.total_records, 0),
+                COALESCE(uploads.created_at, CURRENT_TIMESTAMP)
+            FROM uploads
+            WHERE uploads.id = :upload_id
+            ON CONFLICT (batch_id) DO NOTHING
+            """
+        ),
+        {"batch_id": batch_id, "upload_id": upload_id},
+    )
+    return batch_id
+
+
 def _suggested_target_field(source_column: str) -> str:
     target_field = infer_target_field_name(source_column)
     return "" if target_field == "ignored" else target_field
 
 
-def _insert_raw_batch(db: Session, *, upload_id: int, rows: list[dict]) -> None:
+def _insert_raw_batch(
+    db: Session,
+    *,
+    upload_id: int,
+    rows: list[dict],
+    start_index: int = 1,
+) -> None:
     if not rows:
         return
     batch = []
-    for row in rows:
+    batch_id = _ensure_import_batch(db, upload_id=upload_id)
+    for offset, row in enumerate(rows, start=start_index):
         payload = _row_to_payload(row)
         batch.append(
             RawRecord(
                 upload_id=upload_id,
+                batch_id=batch_id,
+                row_index=offset,
                 raw_payload=payload,
                 ingestion_hash=_ingestion_hash(payload),
                 row_status="pending",
@@ -142,6 +181,7 @@ async def upload_file_only(
                 db,
                 upload_id=upload.id,
                 rows=[row.to_dict() for _, row in df.iterrows()],
+                start_index=1,
             )
             db.commit()
             db.refresh(upload)
@@ -178,12 +218,22 @@ async def upload_file_only(
             total_records += len(records)
             batch_rows.extend(records)
             if len(batch_rows) >= 2000:
-                _insert_raw_batch(db, upload_id=upload.id, rows=batch_rows)
+                _insert_raw_batch(
+                    db,
+                    upload_id=upload.id,
+                    rows=batch_rows,
+                    start_index=total_records - len(batch_rows) + 1,
+                )
                 db.flush()
                 batch_rows = []
 
         if batch_rows:
-            _insert_raw_batch(db, upload_id=upload.id, rows=batch_rows)
+            _insert_raw_batch(
+                db,
+                upload_id=upload.id,
+                rows=batch_rows,
+                start_index=total_records - len(batch_rows) + 1,
+            )
 
         if not source_columns:
             raise HTTPException(status_code=400, detail="CSV dosyası boş veya okunamadı")

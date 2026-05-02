@@ -13,7 +13,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends
 from fastapi.responses import Response
 from sqlalchemy import create_engine, func
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session, joinedload, sessionmaker
 
 from backend.models.database import (
     DetectionRun,
@@ -23,6 +23,7 @@ from backend.models.database import (
     ReviewAction,
     Upload,
 )
+from backend.api.routes.normalized_records_route import build_clean_dataset_rows
 from backend.services.review_service import get_duplicate_groups
 
 DATABASE_URL = os.getenv(
@@ -138,6 +139,18 @@ def get_data_quality(
         total = norm_rec_q.with_entities(func.count(NormalizedRecord.id)).scalar() or 0
         valid = norm_rec_q.filter(NormalizedRecord.is_valid.is_(True)).with_entities(func.count(NormalizedRecord.id)).scalar() or 0
         invalid = total - valid
+        tc_filled = norm_rec_q.filter(
+            NormalizedRecord.clean_tc.isnot(None),
+            NormalizedRecord.clean_tc != "",
+        ).with_entities(func.count(NormalizedRecord.id)).scalar() or 0
+        phone_filled = norm_rec_q.filter(
+            NormalizedRecord.clean_phone.isnot(None),
+            NormalizedRecord.clean_phone != "",
+        ).with_entities(func.count(NormalizedRecord.id)).scalar() or 0
+        email_filled = norm_rec_q.filter(
+            NormalizedRecord.clean_email.isnot(None),
+            NormalizedRecord.clean_email != "",
+        ).with_entities(func.count(NormalizedRecord.id)).scalar() or 0
 
         runs_q = db.query(NormalizationRun)
         if dt_from:
@@ -160,6 +173,9 @@ def get_data_quality(
             "total_processed": total_processed,
             "total_success": total_success,
             "total_failed": total_failed,
+            "tc_fill_rate": round(tc_filled / total * 100, 2) if total > 0 else 0,
+            "phone_fill_rate": round(phone_filled / total * 100, 2) if total > 0 else 0,
+            "email_fill_rate": round(email_filled / total * 100, 2) if total > 0 else 0,
         }
     except Exception as exc:
         return {"success": False, "error": str(exc)}
@@ -250,12 +266,31 @@ def get_review_summary(
         total_reviews = q.with_entities(func.count(ReviewAction.id)).scalar() or 0
         approvals = q.filter(ReviewAction.decision == "approved").with_entities(func.count(ReviewAction.id)).scalar() or 0
         rejections = q.filter(ReviewAction.decision == "rejected").with_entities(func.count(ReviewAction.id)).scalar() or 0
+        recent_reviews = (
+            q.options(joinedload(ReviewAction.match_candidate))
+            .order_by(ReviewAction.decided_at.desc(), ReviewAction.id.desc())
+            .limit(5)
+            .all()
+        )
 
         return {
             "success": True,
             "total_reviews": total_reviews,
             "approvals": approvals,
             "rejections": rejections,
+            "recent_reviews": [
+                {
+                    "id": review.id,
+                    "user": review.decided_by or "system",
+                    "decision": review.decision,
+                    "date": review.decided_at.isoformat() if review.decided_at else None,
+                    "group_id": f"match_{review.match_id}",
+                    "match_id": review.match_id,
+                    "left_id": review.match_candidate.left_id if review.match_candidate else None,
+                    "right_id": review.match_candidate.right_id if review.match_candidate else None,
+                }
+                for review in recent_reviews
+            ],
         }
     except Exception as exc:
         return {"success": False, "error": str(exc)}
@@ -309,30 +344,7 @@ def export_clean_dataset_csv(
     upload_id: Optional[int] = None,
     db: Session = Depends(get_db),
 ):
-    query = db.query(NormalizedRecord)
-    if upload_id is not None:
-        query = query.filter(NormalizedRecord.upload_id == upload_id)
-    records = query.order_by(NormalizedRecord.id.asc()).all()
-    rows = [
-        {
-            "id": record.id,
-            "upload_id": record.upload_id,
-            "normalization_run_id": record.normalization_run_id,
-            "clean_name": record.clean_name or "",
-            "first_name": record.first_name or "",
-            "last_name": record.last_name or "",
-            "clean_tc": record.clean_tc or "",
-            "clean_phone": record.clean_phone or "",
-            "clean_email": record.clean_email or "",
-            "clean_city": record.clean_city or "",
-            "clean_address": record.clean_address or "",
-            "clean_muhatap_no": record.clean_muhatap_no or "",
-            "is_valid": bool(record.is_valid),
-            "blocking_key": record.blocking_key or "",
-            "created_at": record.created_at.isoformat() if record.created_at else "",
-        }
-        for record in records
-    ]
+    rows = build_clean_dataset_rows(db, upload_id=upload_id)
     return _csv_response(rows, filename="clean_dataset.csv")
 
 

@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import DashboardLayout from "../../components/feature/DashboardLayout";
 import Header from "../../components/feature/Header";
+import { getSettings, saveSettings } from "../../services/api";
 
 const defaultWeights = { adSoyad: 30, tcKimlikNo: 35, telefon: 15, email: 10, muhatapNo: 10 };
 const weightLabels: Record<string, string> = {
@@ -32,35 +33,39 @@ export default function Ayarlar() {
   const [approvalLimitDays, setApprovalLimitDays] = useState(7);
   const [emailNotification, setEmailNotification] = useState("Sadece kritik");
   const [loading, setLoading] = useState(false);
+  const [initialLoading, setInitialLoading] = useState(true);
+  const [saveError, setSaveError] = useState(false);
 
-  // Load settings from localStorage on mount
   useEffect(() => {
-    const savedSettings = localStorage.getItem("ml-duplicate-settings");
-    if (savedSettings) {
-      try {
-        const parsed: Settings = JSON.parse(savedSettings);
-        setWeights(parsed.weights || defaultWeights);
-        setThresholds(parsed.thresholds || defaultThresholds);
-        setAlgo(parsed.algorithms || ["levenshtein", "jaro"]);
+    let alive = true;
+    getSettings()
+      .then((settings) => {
+        if (!alive) return;
+        const parsed = settings as Partial<Settings>;
+        setWeights({ ...defaultWeights, ...(parsed.weights || {}) });
+        setThresholds({ ...defaultThresholds, ...(parsed.thresholds || {}) });
+        setAlgo(Array.isArray(parsed.algorithms) ? parsed.algorithms : ["levenshtein", "jaro"]);
         setAutoDetectPeriod(parsed.autoDetectPeriod || "Her hafta");
-        setMaxFileSize(parsed.maxFileSize || 50);
-        setApprovalLimitDays(parsed.approvalLimitDays || 7);
+        setMaxFileSize(Number(parsed.maxFileSize || 50));
+        setApprovalLimitDays(Number(parsed.approvalLimitDays || 7));
         setEmailNotification(parsed.emailNotification || "Sadece kritik");
-      } catch (e) {
+      })
+      .catch((e) => {
         console.error("Error loading settings:", e);
-      }
-    }
+      })
+      .finally(() => {
+        if (alive) setInitialLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
   }, []);
 
   const totalWeight = Object.values(weights).reduce((a, b) => a + b, 0);
 
   const handleSave = async () => {
     setLoading(true);
-    
-    // Simulate API call
-    await new Promise(resolve => setTimeout(resolve, 500));
-    
-    // Save to localStorage
+    setSaveError(false);
     const settings: Settings = {
       weights,
       thresholds,
@@ -70,11 +75,18 @@ export default function Ayarlar() {
       approvalLimitDays,
       emailNotification,
     };
-    localStorage.setItem("ml-duplicate-settings", JSON.stringify(settings));
-    
-    setLoading(false);
-    setSaved(true);
-    setTimeout(() => setSaved(false), 2500);
+
+    try {
+      await saveSettings(settings);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2500);
+    } catch (e) {
+      console.error("Error saving settings:", e);
+      setSaveError(true);
+      setTimeout(() => setSaveError(false), 3000);
+    } finally {
+      setLoading(false);
+    }
   };
 
   const toggleAlgo = (id: string) =>
@@ -91,7 +103,7 @@ export default function Ayarlar() {
         actions={
           <button
             onClick={handleSave}
-            disabled={loading || totalWeight !== 100}
+            disabled={initialLoading || loading || totalWeight !== 100}
             className={`flex items-center gap-2 text-sm font-medium px-5 py-2 rounded-lg cursor-pointer transition-colors whitespace-nowrap disabled:opacity-50 ${
               saved 
                 ? "bg-green-600 text-white" 
@@ -105,8 +117,22 @@ export default function Ayarlar() {
       />
 
       <div className="flex-1 overflow-y-auto p-6 space-y-5">
+        {initialLoading && (
+          <div className="rounded-xl border border-gray-100 bg-white p-8 text-center text-sm text-gray-500">
+            <i className="ri-loader-4-line mb-2 block animate-spin text-xl text-red-600" />
+            Ayarlar yükleniyor...
+          </div>
+        )}
+
+        {saveError && (
+          <div className="rounded-xl border border-red-100 bg-red-50 p-4 flex items-center gap-3">
+            <i className="ri-error-warning-fill text-red-600 text-lg" />
+            <p className="text-sm text-red-700">Ayarlar kaydedilemedi</p>
+          </div>
+        )}
+
         {/* Warning if weights don't sum to 100 */}
-        {totalWeight !== 100 && (
+        {!initialLoading && totalWeight !== 100 && (
           <div className="rounded-xl p-4 border bg-yellow-50 border-yellow-100 flex items-center gap-3">
             <i className="ri-alert-line text-yellow-600 text-lg"></i>
             <p className="text-sm text-yellow-700">
@@ -115,7 +141,7 @@ export default function Ayarlar() {
           </div>
         )}
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+        {!initialLoading && <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
           {/* Alan Ağırlıkları */}
           <div className="bg-white rounded-xl p-5 border border-gray-100">
             <div className="flex items-center justify-between mb-4">
@@ -284,7 +310,7 @@ export default function Ayarlar() {
               </div>
             </div>
           </div>
-        </div>
+        </div>}
       </div>
     </DashboardLayout>
   );

@@ -237,7 +237,7 @@ export default function YoneticiOnayi() {
   return (
     <DashboardLayout>
       <Header
-        title="Yonetici Onayi"
+        title="Yönetici Onayı"
         subtitle="Bekleyen eşleşmeleri doğrudan backend API verileri üzerinden yönetin"
         actions={
           <div className="flex items-center gap-3">

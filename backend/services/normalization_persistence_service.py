@@ -7,6 +7,7 @@ import json
 from typing import Any
 
 import pandas as pd
+from sqlalchemy import text
 from sqlalchemy.orm import sessionmaker
 
 from src.db import create_db_engine
@@ -32,6 +33,42 @@ DEFAULT_NORMALIZATION_PROFILE = "default_person_normalization_v1"
 
 ENGINE = create_db_engine()
 SessionLocal = sessionmaker(bind=ENGINE)
+
+
+def _ensure_import_batch(session, upload: Upload) -> str:
+    batch_id = f"upload-{upload.id}"
+    session.execute(
+        text(
+            """
+            INSERT INTO import_batches (
+                batch_id,
+                source_name,
+                source_type,
+                status,
+                record_count,
+                created_at
+            )
+            VALUES (
+                :batch_id,
+                :source_name,
+                :source_type,
+                :status,
+                :record_count,
+                COALESCE(:created_at, CURRENT_TIMESTAMP)
+            )
+            ON CONFLICT (batch_id) DO NOTHING
+            """
+        ),
+        {
+            "batch_id": batch_id,
+            "source_name": upload.file_name or upload.source_name or f"upload-{upload.id}",
+            "source_type": upload.source_type or "unknown",
+            "status": upload.status or "uploaded",
+            "record_count": upload.total_records or 0,
+            "created_at": upload.created_at,
+        },
+    )
+    return batch_id
 
 
 def _to_jsonable(value: Any) -> Any:
@@ -230,13 +267,19 @@ def persist_normalization_pipeline(
         )
 
         raw_records: list[RawRecord] = []
-        for row_payload, (row_status, validation_payload) in zip(
-            original_payloads,
-            validation_rows,
-            strict=True,
+        batch_id = _ensure_import_batch(session, upload)
+        for row_index, (row_payload, (row_status, validation_payload)) in enumerate(
+            zip(
+                original_payloads,
+                validation_rows,
+                strict=True,
+            ),
+            start=1,
         ):
             raw_record = RawRecord(
                 upload_id=upload.id,
+                batch_id=batch_id,
+                row_index=row_index,
                 raw_payload=row_payload,
                 ingestion_hash=generate_ingestion_hash(row_payload),
                 row_status=row_status,
