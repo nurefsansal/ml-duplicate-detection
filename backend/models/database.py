@@ -247,6 +247,8 @@ class RawRecord(Base):
 
     id = Column(Integer, primary_key=True)
     upload_id = Column(Integer, ForeignKey("uploads.id", ondelete="CASCADE"), nullable=False)
+    batch_id = Column(String)
+    row_index = Column(Integer)
     raw_payload = Column(JSONB, nullable=False, default=dict)
     ingestion_hash = Column(String(128))
     row_status = Column(String(32), default="pending")
@@ -262,6 +264,7 @@ class RawRecord(Base):
 
     __table_args__ = (
         Index("idx_raw_records_upload_id", "upload_id"),
+        Index("idx_raw_records_batch_id", "batch_id"),
         Index("idx_raw_records_ingestion_hash", "ingestion_hash"),
         Index("idx_raw_records_row_status", "row_status"),
     )
@@ -533,6 +536,8 @@ class Entity(Base):
 
     # New production field
     canonical_tc = Column(String)
+    canonical_data = Column(JSONB, default=dict)
+    golden_record_id = Column(Integer, ForeignKey("normalized_records.id", ondelete="SET NULL"))
     confidence = Column(Float)
 
     # Legacy/current metadata
@@ -554,6 +559,7 @@ class Entity(Base):
         back_populates="entity",
         cascade="all, delete-orphan",
     )
+    golden_record = relationship("NormalizedRecord", foreign_keys=[golden_record_id])
 
     __table_args__ = (
         Index("idx_entities_canonical_name", "canonical_name"),
@@ -561,6 +567,7 @@ class Entity(Base):
         Index("idx_entities_canonical_phone", "canonical_phone"),
         Index("idx_entities_canonical_city", "canonical_city"),
         Index("idx_entities_canonical_tc", "canonical_tc"),
+        Index("idx_entities_golden_record_id", "golden_record_id"),
         Index("idx_entities_created_at", "created_at"),
     )
 
@@ -605,6 +612,7 @@ class EntityMembership(Base):
         nullable=False,
     )
     confidence_at_merge = Column(Float)
+    status = Column(String(32), nullable=False, default="pending")
     created_at = Column(DateTime, default=datetime.utcnow)
 
     entity = relationship("Entity", back_populates="memberships")
@@ -618,6 +626,7 @@ class EntityMembership(Base):
         ),
         Index("idx_entity_memberships_entity_id", "entity_id"),
         Index("idx_entity_memberships_normalized_record_id", "normalized_record_id"),
+        Index("idx_entity_memberships_status", "status"),
     )
 
     def __repr__(self) -> str:
@@ -646,6 +655,24 @@ class AuditLog(Base):
 
     def __repr__(self) -> str:
         return f"<AuditLog(id={self.id}, action_type='{self.action_type}', entity_type='{self.entity_type}')>"
+
+
+class AppSettings(Base):
+    __tablename__ = "app_settings"
+
+    id = Column(Integer, primary_key=True)
+    key = Column(String(128), unique=True, nullable=False)
+    value = Column(JSONB, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_by = Column(String(255))
+
+    __table_args__ = (
+        Index("idx_app_settings_key", "key"),
+        Index("idx_app_settings_updated_at", "updated_at"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<AppSettings(key='{self.key}')>"
 
 
 class Job(Base):
@@ -689,5 +716,6 @@ __all__ = [
     "EntityMap",
     "EntityMembership",
     "AuditLog",
+    "AppSettings",
     "Job",
 ]

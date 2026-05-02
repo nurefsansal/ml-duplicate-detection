@@ -22,6 +22,21 @@ function Badge({ ok }: { ok: boolean }) {
   );
 }
 
+function SourceBadge({ source }: { source?: string }) {
+  if (source === "entity") {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-blue-50 px-2 py-0.5 text-[11px] font-medium text-blue-700">
+        <i className="ri-links-line text-[10px]" /> Entity
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-1 rounded-full bg-gray-50 px-2 py-0.5 text-[11px] font-medium text-gray-600">
+      <i className="ri-file-list-3-line text-[10px]" /> Tekil
+    </span>
+  );
+}
+
 export default function TemizVeriSeti() {
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
@@ -270,28 +285,31 @@ export default function TemizVeriSeti() {
                   <th className="px-4 py-3 text-left font-medium text-gray-400">Şehir</th>
                   <th className="px-4 py-3 text-left font-medium text-gray-400">Muhatap No</th>
                   <th className="px-4 py-3 text-left font-medium text-gray-400">Upload</th>
+                  <th className="px-4 py-3 text-left font-medium text-gray-400">Kaynak</th>
                   <th className="px-4 py-3 text-left font-medium text-gray-400">Durum</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-50">
                 {loading ? (
                   <tr>
-                    <td colSpan={9} className="px-5 py-10 text-center text-gray-400">
+                    <td colSpan={10} className="px-5 py-10 text-center text-gray-400">
                       <i className="ri-loader-4-line animate-spin text-xl block mb-2" />
                       Yükleniyor…
                     </td>
                   </tr>
                 ) : records.length === 0 ? (
                   <tr>
-                    <td colSpan={9} className="px-5 py-10 text-center text-gray-400">
+                    <td colSpan={10} className="px-5 py-10 text-center text-gray-400">
                       Kayıt bulunamadı.
                       {total === 0 && " Önce Veri Yükleme veya Veri Normalizasyon adımını tamamlayın."}
                     </td>
                   </tr>
                 ) : (
                   records.map((r) => (
-                    <tr key={r.id} className="hover:bg-gray-50/50 transition-colors">
-                      <td className="px-4 py-3 text-gray-500 font-mono">#{r.id}</td>
+                    <tr key={`${r.source ?? "normalized_record"}-${r.id}`} className="hover:bg-gray-50/50 transition-colors">
+                      <td className="px-4 py-3 text-gray-500 font-mono">
+                        {r.source === "entity" ? `E#${r.entity_id ?? r.id}` : `#${r.id}`}
+                      </td>
                       <td className="px-4 py-3 font-medium text-gray-800">{r.clean_name || "-"}</td>
                       <td className="px-4 py-3 text-gray-600">{r.clean_email || "-"}</td>
                       <td className="px-4 py-3 text-gray-600">{r.clean_phone || "-"}</td>
@@ -299,6 +317,7 @@ export default function TemizVeriSeti() {
                       <td className="px-4 py-3 text-gray-600">{r.clean_city || "-"}</td>
                       <td className="px-4 py-3 text-gray-600 font-mono">{r.clean_muhatap_no || "-"}</td>
                       <td className="px-4 py-3 text-gray-400">#{r.upload_id}</td>
+                      <td className="px-4 py-3"><SourceBadge source={r.source} /></td>
                       <td className="px-4 py-3"><Badge ok={r.is_valid} /></td>
                     </tr>
                   ))

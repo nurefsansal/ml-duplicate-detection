@@ -28,6 +28,7 @@ from backend.api.routes.column_mappings_route import router as column_mappings_r
 from backend.api.routes.auth import router as auth_router
 from backend.api.routes.ml import router as ml_router
 from backend.api.routes.jobs import router as jobs_router
+from backend.api.routes.settings import router as settings_router
 
 app = FastAPI(title="Dedupli-AI API", version="0.2.0")
 
@@ -61,3 +62,4 @@ app.include_router(column_mappings_router, prefix="/api/v1")
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(ml_router, prefix="/api/v1")
 app.include_router(jobs_router, prefix="/api/v1")
+app.include_router(settings_router, prefix="/api")

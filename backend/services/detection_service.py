@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from datetime import UTC, datetime
 from typing import Any
@@ -43,6 +44,7 @@ ENGINE = create_db_engine()
 SessionLocal = sessionmaker(bind=ENGINE)
 
 DEFAULT_DETECTION_THRESHOLD = 0.30
+DETECTION_SYNC_MAX_RECORDS = int(os.getenv("DETECTION_SYNC_MAX_RECORDS", "50000"))
 
 
 def _resolve_session_id(session_id: str | None) -> str:
@@ -314,6 +316,101 @@ def _resolve_detection_scope(
     return int(resolved_upload_id), resolved_normalization_run_id, normalized_records
 
 
+def _resolve_detection_scope_for_sync(
+    *,
+    session,
+    upload_id: int | None,
+    normalization_run_id: int | None,
+    max_records: int,
+) -> tuple[int, int | None, int, list[NormalizedRecord]]:
+    t_scope = time.monotonic()
+    if upload_id is None and normalization_run_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Mükerrer tespit için uploadId veya normalizationRunId zorunludur.",
+        )
+
+    resolved_upload_id = upload_id
+    resolved_normalization_run_id = normalization_run_id
+
+    if resolved_normalization_run_id is not None:
+        normalization_run = (
+            session.query(NormalizationRun)
+            .filter(NormalizationRun.id == resolved_normalization_run_id)
+            .first()
+        )
+        if normalization_run is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Normalizasyon çalışması bulunamadı: ID={resolved_normalization_run_id}",
+            )
+        resolved_upload_id = int(normalization_run.upload_id)
+    elif resolved_upload_id is not None:
+        latest_run = (
+            session.query(NormalizationRun)
+            .filter(NormalizationRun.upload_id == resolved_upload_id)
+            .order_by(NormalizationRun.created_at.desc(), NormalizationRun.id.desc())
+            .first()
+        )
+        if latest_run is not None:
+            resolved_normalization_run_id = int(latest_run.id)
+
+    count_query = session.query(NormalizedRecord.id)
+    if resolved_normalization_run_id is not None:
+        count_query = count_query.filter(
+            NormalizedRecord.normalization_run_id == resolved_normalization_run_id
+        )
+    else:
+        count_query = count_query.filter(NormalizedRecord.upload_id == resolved_upload_id)
+
+    record_count = count_query.count()
+    logger.info(
+        "[detect] Scope count: uploadId=%s normalizationRunId=%s record_count=%d elapsed=%.2fs",
+        resolved_upload_id,
+        resolved_normalization_run_id,
+        record_count,
+        time.monotonic() - t_scope,
+    )
+
+    if record_count > max_records:
+        logger.warning(
+            "[detect] Sync limit exceeded: uploadId=%s normalizationRunId=%s record_count=%d limit=%d",
+            resolved_upload_id,
+            resolved_normalization_run_id,
+            record_count,
+            max_records,
+        )
+        raise HTTPException(
+            status_code=413,
+            detail="Bu veri seti senkron mükerrer tespit için çok büyük. Background job gereklidir.",
+        )
+
+    if record_count == 0:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "Bu yükleme için normalize edilmiş kayıt bulunamadı. "
+                "Önce Veri Normalizasyon adımını tamamlayın."
+            ),
+        )
+
+    query = session.query(NormalizedRecord).options(joinedload(NormalizedRecord.raw_record))
+    if resolved_normalization_run_id is not None:
+        query = query.filter(
+            NormalizedRecord.normalization_run_id == resolved_normalization_run_id
+        )
+    else:
+        query = query.filter(NormalizedRecord.upload_id == resolved_upload_id)
+
+    normalized_records = query.order_by(NormalizedRecord.id.asc()).all()
+    return (
+        int(resolved_upload_id),
+        resolved_normalization_run_id,
+        record_count,
+        normalized_records,
+    )
+
+
 def _compute_duplicate_groups(
     duplicates: list[dict[str, Any]],
     index_to_normalized_id: dict[int, int],
@@ -424,6 +521,7 @@ def run_detection_from_database(
     normalization_run_id: int | None,
     min_rules_to_match: int,
     session_id: str | None,
+    save_to_db: bool,
     job_id: int | None = None,
 ) -> dict[str, Any]:
     resolved_session_id = _resolve_session_id(session_id)
@@ -447,17 +545,23 @@ def run_detection_from_database(
                 progress=5,
             )
 
-        resolved_upload_id, resolved_normalization_run_id, normalized_records = (
-            _resolve_detection_scope(
+        (
+            resolved_upload_id,
+            resolved_normalization_run_id,
+            record_count,
+            normalized_records,
+        ) = (
+            _resolve_detection_scope_for_sync(
                 session=session,
                 upload_id=upload_id,
                 normalization_run_id=normalization_run_id,
+                max_records=DETECTION_SYNC_MAX_RECORDS,
             )
         )
 
         logger.info(
             "[detect] Analiz edilecek kayıt sayısı: %d (upload_id=%s, normalization_run_id=%s)",
-            len(normalized_records),
+            record_count,
             resolved_upload_id,
             resolved_normalization_run_id,
         )
@@ -467,19 +571,25 @@ def run_detection_from_database(
                 job_id=job_id,
                 status="running",
                 progress=20,
-                total_rows=len(normalized_records),
+                total_rows=record_count,
                 processed_rows=0,
             )
 
-        detection_run = DetectionRun(
-            upload_id=resolved_upload_id,
-            normalization_run_id=resolved_normalization_run_id,
-            model_version=DEFAULT_MODEL_VERSION,
-            threshold=DEFAULT_DETECTION_THRESHOLD,
-        )
-        session.add(detection_run)
-        session.flush()
-        logger.info("[detect] DetectionRun oluşturuldu: id=%s", detection_run.id)
+        detection_run = None
+        detection_run_id: int | None = None
+        if save_to_db:
+            detection_run = DetectionRun(
+                upload_id=resolved_upload_id,
+                normalization_run_id=resolved_normalization_run_id,
+                model_version=DEFAULT_MODEL_VERSION,
+                threshold=DEFAULT_DETECTION_THRESHOLD,
+            )
+            session.add(detection_run)
+            session.flush()
+            detection_run_id = int(detection_run.id)
+            logger.info("[detect] DetectionRun olusturuldu: id=%s", detection_run_id)
+        else:
+            logger.info("[detect] saveToDb=false; detection_run ve match_candidates yazilmayacak.")
 
         t_match = time.monotonic()
         df_clean, index_to_normalized_id = _build_matching_dataframe(normalized_records)
@@ -488,7 +598,8 @@ def run_detection_from_database(
             min_rules_to_match=min_rules_to_match,
         )
         t_match_elapsed = time.monotonic() - t_match
-        detection_run.model_version = resolved_model_version
+        if detection_run is not None:
+            detection_run.model_version = resolved_model_version
 
         candidate_pairs = int(getattr(duplicates, "candidate_pairs", len(duplicates)))
         candidate_pairs_limited = bool(
@@ -511,13 +622,17 @@ def run_detection_from_database(
                 processed_rows=len(normalized_records),
             )
 
-        inserted = _persist_match_candidates(
-            session=session,
-            detection_run_id=int(detection_run.id),
-            duplicates=list(duplicates),
-            index_to_normalized_id=index_to_normalized_id,
-        )
-        logger.info("[detect] MatchCandidate kaydedildi: %d satır", inserted)
+        inserted = 0
+        if save_to_db and detection_run_id is not None:
+            inserted = _persist_match_candidates(
+                session=session,
+                detection_run_id=detection_run_id,
+                duplicates=list(duplicates),
+                index_to_normalized_id=index_to_normalized_id,
+            )
+            logger.info("[detect] MatchCandidate kaydedildi: %d satir", inserted)
+        else:
+            logger.info("[detect] saveToDb=false; MatchCandidate insert atlandi.")
         if job_id is not None:
             update_job_progress(
                 session,
@@ -538,10 +653,12 @@ def run_detection_from_database(
         )
 
         # Persist group metrics on the DetectionRun row
-        detection_run.duplicate_group_count = duplicate_group_count
-        detection_run.affected_record_count = affected_record_count
+        if detection_run is not None:
+            detection_run.duplicate_group_count = duplicate_group_count
+            detection_run.affected_record_count = affected_record_count
 
-        session.commit()
+        if save_to_db:
+            session.commit()
         if job_id is not None:
             update_job_progress(
                 session,
@@ -550,6 +667,7 @@ def run_detection_from_database(
                 progress=100,
                 processed_rows=len(normalized_records),
             )
+            session.commit()
 
         t_total = time.monotonic() - t_start
         logger.info("[detect] Toplam süre: %.2fs", t_total)
@@ -559,14 +677,14 @@ def run_detection_from_database(
             "jobId": job_id,
             "uploadId": resolved_upload_id,
             "normalizationRunId": resolved_normalization_run_id,
-            "detectionRunId": int(detection_run.id),
+            "detectionRunId": detection_run_id,
             "candidatePairs": candidate_pairs,
             "candidatePairsLimited": candidate_pairs_limited,
             "duplicatePairs": duplicate_pairs,
             "duplicateGroupCount": duplicate_group_count,
             "affectedRecordCount": affected_record_count,
             "insertedRows": inserted,
-            "totalRecords": len(normalized_records),
+            "totalRecords": record_count,
             "duplicates": list(duplicates),
         }
     except HTTPException:
@@ -606,42 +724,19 @@ def detect_core(
     normalization_run_id: int | None = None,
     job_id: int | None = None,
 ) -> dict[str, Any]:
-    del save_to_db
-
     if normalization_run_id is not None or upload_id is not None:
         return run_detection_from_database(
             upload_id=upload_id,
             normalization_run_id=normalization_run_id,
             min_rules_to_match=min_rules_to_match,
             session_id=session_id,
+            save_to_db=save_to_db,
             job_id=job_id,
         )
 
-    if not records:
-        raise HTTPException(
-            status_code=400,
-            detail="Either uploadId, normalizationRunId or records must be provided",
-        )
-
-    resolved_session_id = _resolve_session_id(session_id)
-    df_raw = to_dataframe(records)
-    mapping_definitions = build_column_mapping_definitions(list(df_raw.columns))
-    normalization_result = persist_normalization_pipeline(
-        original_df=df_raw.copy(),
-        processing_df=df_raw,
-        source_type="api",
-        source_name="detect_api",
-        file_name=f"detect_{resolved_session_id}.json",
-        created_by="api_detect",
-        mapping_definitions=mapping_definitions,
-    )
-
-    return run_detection_from_database(
-        upload_id=int(normalization_result["uploadId"]),
-        normalization_run_id=int(normalization_result["normalizationRunId"]),
-        min_rules_to_match=min_rules_to_match,
-        session_id=resolved_session_id,
-        job_id=job_id,
+    raise HTTPException(
+        status_code=400,
+        detail="Mükerrer tespit için uploadId veya normalizationRunId zorunludur.",
     )
 
 
@@ -656,8 +751,6 @@ def detect_file_dataframe(
     upload_id: int | None = None,
     job_id: int | None = None,
 ) -> dict[str, Any]:
-    del save_to_db
-
     resolved_session_id = _resolve_session_id(session_id)
     mapping_definitions = build_column_mapping_definitions(
         [str(column) for column in df_original.columns]
@@ -684,5 +777,6 @@ def detect_file_dataframe(
         normalization_run_id=int(normalization_result["normalizationRunId"]),
         min_rules_to_match=min_rules_to_match,
         session_id=resolved_session_id,
+        save_to_db=save_to_db,
         job_id=job_id,
     )

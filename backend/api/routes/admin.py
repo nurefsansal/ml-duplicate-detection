@@ -4,17 +4,21 @@ Admin API Routes - Operatorun match'leri onaylamasi/reddetmesi
 
 from datetime import datetime
 from typing import Any, Optional
+import logging
 import os
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import create_engine
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
-from backend.models.database import Entity, EntityMap
+from backend.models.database import AuditLog, Entity, EntityMap
 from backend.services.database_service import EntityMapService
 from backend.services.review_service import (
     approve_match_candidate,
+    approve_group_partial,
     get_duplicate_groups,
     get_match_candidates,
     get_entity_memberships,
@@ -32,6 +36,7 @@ DATABASE_URL = os.getenv(
 )
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine)
+logger = logging.getLogger(__name__)
 
 
 def get_db():
@@ -99,6 +104,24 @@ class RejectMatchRequest(BaseModel):
     match_id: int
     rejected_by: str = "admin"
     reason: Optional[str] = None
+
+
+class PartialApproveGroupRequest(BaseModel):
+    """Duplicate group icinde kayit bazli karar istegi."""
+
+    record_ids: list[int] = Field(default_factory=list)
+    approved_record_ids: list[int] = Field(default_factory=list)
+    rejected_record_ids: list[int] = Field(default_factory=list)
+    upload_id: Optional[int] = None
+    decision: Optional[str] = Field(default=None, pattern="^(pending|approved|rejected)$")
+    note: Optional[str] = None
+
+
+class GoldenRecordUpdateRequest(BaseModel):
+    """Entity canonical_data alanini guncelleme istegi."""
+
+    fields: dict[str, Any] = Field(default_factory=dict)
+    note: Optional[str] = None
 
 
 @router.get("/admin/pending-matches")
@@ -170,6 +193,7 @@ def list_duplicate_groups(
     decision: str = Query("approved", pattern="^(pending|approved|rejected)$"),
     upload_id: Optional[int] = None,
     limit: int = 5000,
+    different_muhatap_code: bool = False,
     db: Session = Depends(get_db),
 ):
     """
@@ -181,6 +205,7 @@ def list_duplicate_groups(
             upload_id=upload_id,
             decision=decision,
             limit=limit,
+            different_muhatap_code=different_muhatap_code,
         )
         return {
             "success": True,
@@ -188,8 +213,85 @@ def list_duplicate_groups(
             "count": len(groups),
             "groups": groups,
         }
+    except SQLAlchemyError as exc:
+        logger.exception("Database error while fetching duplicate groups")
+        return JSONResponse(
+            status_code=200,
+            content={
+                "success": False,
+                "decision": decision,
+                "count": 0,
+                "groups": [],
+                "error": "Duplicate group verisi okunurken veritabanı kaynaklı bir sorun oluştu.",
+                "detail": str(getattr(exc, "orig", exc)),
+            },
+        )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching duplicate groups: {str(e)}")
+        logger.exception("Unexpected error while fetching duplicate groups")
+        return JSONResponse(
+            status_code=200,
+            content={
+                "success": False,
+                "decision": decision,
+                "count": 0,
+                "groups": [],
+                "error": "Duplicate group verisi şu anda alınamadı.",
+                "detail": str(e),
+            },
+        )
+
+
+@router.post("/matches/group/{group_id}/partial-approve")
+def partial_approve_group(
+    group_id: str,
+    request: PartialApproveGroupRequest,
+    db: Session = Depends(get_db),
+    current_user: str = Depends(get_current_user),
+):
+    """
+    Duplicate group icinde kayit bazli confirmed / pending / excluded karari verir.
+    """
+    try:
+        if not request.record_ids:
+            raise HTTPException(
+                status_code=400,
+                detail="Kısmi onay için group içindeki record_ids bilgisi zorunludur.",
+            )
+        if request.upload_id is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Kısmi onay için seçili yükleme bilgisi (upload_id) zorunludur.",
+            )
+        result = approve_group_partial(
+            db,
+            group_id,
+            request.approved_record_ids,
+            request.rejected_record_ids,
+            record_ids=request.record_ids,
+            upload_id=request.upload_id,
+            decision=request.decision,
+            note=request.note,
+            reviewed_by=current_user,
+        )
+        if result is None:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    "Grup bulunamadı. Runtime group_id yerine record_ids, upload_id ve "
+                    "decision bilgileriyle tekrar deneyin."
+                ),
+            )
+
+        db.commit()
+        return result
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error approving group: {str(e)}")
 
 
 @router.post("/admin/approve-match")
@@ -444,6 +546,75 @@ def delete_entity_mapping(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Error removing mapping: {str(e)}")
+
+
+@router.patch("/entities/{entity_id}/golden-record")
+def update_golden_record(
+    entity_id: int,
+    request: GoldenRecordUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: str = Depends(get_current_user),
+):
+    """
+    Entity canonical_data JSON alanini ve uyumlu canonical kolonlari gunceller.
+    """
+    allowed_fields = {
+        "clean_name",
+        "clean_tc",
+        "clean_phone",
+        "clean_email",
+        "clean_city",
+        "clean_address",
+        "clean_muhatap_no",
+    }
+    try:
+        entity = db.query(Entity).filter(Entity.id == entity_id).first()
+        if entity is None:
+            raise HTTPException(status_code=404, detail="Entity not found")
+
+        updates = {
+            key: value
+            for key, value in request.fields.items()
+            if key in allowed_fields
+        }
+        if not updates:
+            raise HTTPException(status_code=400, detail="No valid golden record fields")
+
+        canonical_data = dict(entity.canonical_data or {})
+        canonical_data.update({key: str(value).strip() if value is not None else "" for key, value in updates.items()})
+        entity.canonical_data = canonical_data
+        entity.canonical_name = canonical_data.get("clean_name") or entity.canonical_name
+        entity.canonical_tc = canonical_data.get("clean_tc") or None
+        entity.canonical_phone = canonical_data.get("clean_phone") or None
+        entity.canonical_email = canonical_data.get("clean_email") or None
+        entity.canonical_city = canonical_data.get("clean_city") or None
+        entity.updated_at = datetime.utcnow()
+
+        db.add(
+            AuditLog(
+                action_type="golden_record_update",
+                entity_type="entity",
+                entity_id=entity.id,
+                payload={
+                    "updated_fields": sorted(updates.keys()),
+                    "fields": updates,
+                    "note": request.note,
+                },
+                created_by=current_user,
+            )
+        )
+        db.commit()
+        return {
+            "success": True,
+            "entity_id": entity.id,
+            "canonical_data": entity.canonical_data,
+            "golden_record_id": entity.golden_record_id,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error updating golden record: {str(e)}")
 
 
 __all__ = ["router"]
