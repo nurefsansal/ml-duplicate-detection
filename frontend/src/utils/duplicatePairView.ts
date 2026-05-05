@@ -204,6 +204,9 @@ function buildRecordFromPendingMatch(
       "",
     muhatapNo:
       fieldValue(comparisons.muhatapNo, side) ||
+      (side === "left"
+        ? toText(match.donor1_muhatap_no)
+        : toText(match.donor2_muhatap_no)) ||
       "",
   };
 }
@@ -323,10 +326,13 @@ export function mapDetectPairToView(
   const fieldComparisons = pair.fieldComparisons || {};
   const leftRecord = buildRecordFromDetectPair(pair, "left");
   const rightRecord = buildRecordFromDetectPair(pair, "right");
-  const score = toPercentValue(
-    pair.splinkMatchProbability ?? pair.ml_probability ?? 0,
-    0,
-  );
+  const score =
+    typeof pair.final_score === "number" && !Number.isNaN(pair.final_score)
+      ? Number(pair.final_score)
+      : toPercentValue(
+          pair.splinkMatchProbability ?? pair.ml_probability ?? 0,
+          0,
+        );
 
   return {
     id: `MG-${String(index + 1).padStart(3, "0")}`,
@@ -369,6 +375,8 @@ export function mapPendingMatchToView(
     match.splinkMatchProbability ??
     match.ml_score ??
     0;
+  const useFinalScore =
+    typeof match.final_score === "number" && !Number.isNaN(match.final_score);
 
   const workflowState: PairWorkflowState =
     match.decision === "approved"
@@ -384,7 +392,7 @@ export function mapPendingMatchToView(
     matchType: match.match_type || match.decisionSource || "unknown",
     backendDecision: match.decision || "pending",
     records: [leftRecord, rightRecord],
-    score: toPercentValue(rawScore, 0),
+    score: useFinalScore ? Number(match.final_score) : toPercentValue(rawScore, 0),
     workflowState,
     finalDecision,
     finalDecisionLabel: finalDecisionLabel(finalDecision),
@@ -397,7 +405,9 @@ export function mapPendingMatchToView(
     riskFlags: match.riskFlags || [],
     ruleReasons: match.ruleReasons || [],
     decisionSource: match.decisionSource || "fallback_legacy",
-    splinkMatchProbability: Number(rawScore),
+    splinkMatchProbability: Number(
+      match.splinkMatchProbability ?? match.confidence ?? rawScore,
+    ),
     splinkMatchWeight: match.splinkMatchWeight ?? null,
     decisionReason: match.decision_reason || undefined,
     decisionType: (match.decision_type as "auto" | "manual" | undefined) || "manual",

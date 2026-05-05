@@ -16,7 +16,12 @@ from backend.services.advanced_matching_service import (
 )
 from backend.services.feature_service import email_similarity_score, phone_similarity_score
 from backend.services.blocking_service import generate_candidate_pairs
-from backend.services.resolution_service import resolve_match_decision
+from backend.services.resolution_service import resolve_match_decision_with_trace
+from backend.services.decision_thresholds import DecisionThresholdsProb
+from backend.services.scoring_app_settings import (
+    compute_weighted_score_breakdown,
+    load_scoring_app_settings,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1146,12 +1151,25 @@ def _build_rule_reasons(
     return reasons
 
 
-def _build_payload(df_clean: pd.DataFrame, row: dict[str, Any]) -> dict[str, Any]:
+def _build_payload(
+    df_clean: pd.DataFrame,
+    row: dict[str, Any],
+    *,
+    scoring_weights: dict[str, float] | None = None,
+    decision_thresholds: DecisionThresholdsProb | None = None,
+) -> dict[str, Any]:
     left_index = int(row["unique_id_l"])
     right_index = int(row["unique_id_r"])
 
     left_record = df_clean.loc[left_index].to_dict()
     right_record = df_clean.loc[right_index].to_dict()
+
+    sw = scoring_weights
+    dt = decision_thresholds
+    if sw is None or dt is None:
+        default_w, default_t = load_scoring_app_settings(None)
+        sw = sw or default_w
+        dt = dt or default_t
 
     field_comparisons = _build_field_comparisons(row, left_record, right_record)
     features = _derive_features_from_field_comparisons(
@@ -1173,7 +1191,12 @@ def _build_payload(df_clean: pd.DataFrame, row: dict[str, Any]) -> dict[str, Any
         adjusted_probability = splink_match_probability
     splink_match_probability = adjusted_probability
     splink_match_weight = _safe_float(row.get("match_weight"), default=0.0)
-    final_decision = resolve_match_decision(splink_match_probability, features)
+    final_decision, safety_overrides = resolve_match_decision_with_trace(
+        splink_match_probability,
+        features,
+        thresholds=dt,
+    )
+    score_breakdown = compute_weighted_score_breakdown(features, sw)
     risk_flags = _build_risk_flags(features)
     decision_type = "auto"
     review_required = final_decision == "pending"
@@ -1215,6 +1238,11 @@ def _build_payload(df_clean: pd.DataFrame, row: dict[str, Any]) -> dict[str, Any
         "reason": decision_reason,
         "finalDecision": final_decision,
         "decisionSource": "splink_plus_rules",
+        "final_score": score_breakdown["general_weighted_percent"],
+        "score_source": "splink_plus_rules",
+        "score_breakdown": score_breakdown,
+        "applied_thresholds": dt.as_percent_dict(),
+        "safety_overrides": safety_overrides,
     }
 
 
@@ -1242,6 +1270,9 @@ def _should_surface_low_probability_pair(
 def run_splink_detection(
     df_clean: pd.DataFrame,
     max_pairs: int = MAX_PAIRS,
+    *,
+    scoring_weights: dict[str, float] | None = None,
+    decision_thresholds: DecisionThresholdsProb | None = None,
 ) -> list[dict]:
     """
     Uses Splink + DuckDB to generate candidate pairs and score probable duplicates.
@@ -1368,7 +1399,12 @@ def run_splink_detection(
         candidate_pairs_limited = True
 
     payloads = [
-        _build_payload(df_clean, row)
+        _build_payload(
+            df_clean,
+            row,
+            scoring_weights=scoring_weights,
+            decision_thresholds=decision_thresholds,
+        )
         for row in predictions_df.to_dict(orient="records")
     ]
 

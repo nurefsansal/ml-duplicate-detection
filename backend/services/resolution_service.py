@@ -1,14 +1,44 @@
-def resolve_match_decision(probability: float, features: dict) -> str:
+from __future__ import annotations
+
+from typing import Any
+
+from backend.services.decision_thresholds import DecisionThresholdsProb
+
+
+def resolve_match_decision(
+    probability: float,
+    features: dict,
+    *,
+    thresholds: DecisionThresholdsProb | None = None,
+) -> str:
+    """Backward-compatible: returns only the decision string."""
+    decision, _ = resolve_match_decision_with_trace(probability, features, thresholds=thresholds)
+    return decision
+
+
+def resolve_match_decision_with_trace(
+    probability: float,
+    features: dict,
+    *,
+    thresholds: DecisionThresholdsProb | None = None,
+) -> tuple[str, list[dict[str, Any]]]:
     """
-    TC-first karar motoru.
+    TC-first karar motoru + Ayarlar eşikleri (olasılık 0–1).
 
     Kural hiyerarşisi:
-    1. TC varsa → TC'ye göre karar ver (diğer sinyaller ikincil)
-    2. TC yoksa → çoklu güçlü sinyal gereksinimi (sadece isim yetmez)
+    1. TC çatışması / hanehalkı riski gibi güvenlik kuralları ayarlardan güçlüdür.
+    2. Otomatik onay / bekleme / red için olasılık eşikleri (otoOnayla, bayrakla, yoksay).
 
-    Returns: approved | pending | rejected
+    Returns:
+        (decision, safety_overrides) where safety_overrides entries look like
+        {"rule": str, "effect": str, "detail": str}.
     """
+    t = thresholds or DecisionThresholdsProb.from_raw(None)
     score = float(probability or 0.0)
+    safety_overrides: list[dict[str, Any]] = []
+
+    def _override(rule: str, effect: str, detail: str) -> None:
+        safety_overrides.append({"rule": rule, "effect": effect, "detail": detail})
 
     tc_conflict = features.get("tc_conflict", 0) == 1
     tc_exact = features.get("tc_exact_match", 0) == 1
@@ -38,36 +68,63 @@ def resolve_match_decision(probability: float, features: dict) -> str:
         and not tc_exact
     )
 
-    # 1) TC conflict varsa approved kesinlikle yasak.
-    if tc_conflict:
-        if strong_identity_signal:
-            return "pending"
-        return "rejected"
+    t_reject = t.reject
+    t_manual = t.manual_review
+    t_auto = t.auto_approve
 
-    # 2) TC exact varsa kural tabanli oncelik.
+    # 1) TC conflict — settings cannot approve.
+    if tc_conflict:
+        _override("tc_conflict", "safety", "TC Kimlik No çakışması; otomatik onay engellendi.")
+        if strong_identity_signal:
+            return "pending", safety_overrides
+        return "rejected", safety_overrides
+
+    # 2) TC exact — safety branches before score thresholds.
     if tc_exact:
         if household_risk or muhatap_conflict or same_surname_name_conflict:
-            return "pending"
-        return "approved"
+            if household_risk:
+                _override("household_risk_flag", "safety", "Hanehalkı riski; manuel inceleme.")
+            if muhatap_conflict:
+                _override("muhatap_no_conflict", "safety", "Muhatap kodu çakışması; manuel inceleme.")
+            if same_surname_name_conflict:
+                _override("same_surname_name_conflict", "safety", "İsim-soyad çelişkisi; manuel inceleme.")
+            return "pending", safety_overrides
+        return "approved", safety_overrides
 
-    # 3) TC iki tarafta da yoksa name-only ile approved verme.
+    # 3) TC yokken name-only ile approved verme.
     if name_only_risk:
-        return "pending" if score >= 0.40 else "rejected"
+        _override("name_only_risk", "safety", "Yalnızca isim sinyali; kimlik doğrulaması zayıf.")
+        if score >= t_reject:
+            return "pending", safety_overrides
+        return "rejected", safety_overrides
 
-    # 4) Fuzzy sinyaller yardimci; tek basina approved olmasin.
+    # 4) Household — stronger than auto-approve band.
     if household_risk:
-        return "pending"
+        _override("household_risk_flag", "safety", "Hanehalkı riski; otomatik onay yok.")
+        return "pending", safety_overrides
+
     if muhatap_conflict:
-        return "pending" if score >= 0.60 else "rejected"
+        _override("muhatap_no_conflict", "safety", "Muhatap kodu çakışması.")
+        if score >= t_manual:
+            return "pending", safety_overrides
+        return "rejected", safety_overrides
+
     if same_surname_name_conflict and not strong_identity_signal:
-        return "pending" if score >= 0.40 else "rejected"
+        _override("same_surname_name_conflict", "safety", "Soyad aynı, ad sinyali zayıf.")
+        if score >= t_reject:
+            return "pending", safety_overrides
+        return "rejected", safety_overrides
 
-    # TC yokken approved icin en az bir guclu identity sinyali zorunlu.
-    if strong_identity_signal and name_is_strong and score >= 0.60:
-        return "approved"
+    # TC yokken approved için en az bir güçlü identity sinyali zorunlu.
+    if strong_identity_signal and name_is_strong and score >= t_auto:
+        return "approved", safety_overrides
     if strong_identity_signal:
-        return "pending"
+        if score >= t_manual:
+            return "pending", safety_overrides
+        return "rejected", safety_overrides
     if name_is_strong or city_exact:
-        return "pending" if score >= 0.50 else "rejected"
+        if score >= t_manual:
+            return "pending", safety_overrides
+        return "rejected", safety_overrides
 
-    return "rejected"
+    return "rejected", safety_overrides

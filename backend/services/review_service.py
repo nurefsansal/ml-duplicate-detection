@@ -22,6 +22,9 @@ from backend.services.advanced_matching_service import (
     token_name_similarity,
 )
 from backend.services.feature_service import email_similarity_score, phone_similarity_score
+from backend.services.ml_service import predict_match_probability
+from backend.services.resolution_service import resolve_match_decision_with_trace
+from backend.services.scoring_app_settings import compute_weighted_score_breakdown, load_scoring_app_settings
 
 
 def _safe_str(value: Any) -> str:
@@ -609,7 +612,17 @@ def _decision_to_final_decision(decision: str) -> str:
     return _normalize_decision(decision)
 
 
-def serialize_match_candidate(match_candidate: MatchCandidate) -> dict[str, Any]:
+def _score_source_from_match_type(match_type: str) -> str:
+    mt = _safe_str(match_type).lower()
+    if "splink" in mt:
+        return "splink_plus_rules"
+    return "fallback_legacy"
+
+
+def serialize_match_candidate(
+    match_candidate: MatchCandidate,
+    session: Session | None = None,
+) -> dict[str, Any]:
     left_record = match_candidate.left_record
     right_record = match_candidate.right_record
 
@@ -635,6 +648,12 @@ def serialize_match_candidate(match_candidate: MatchCandidate) -> dict[str, Any]
     else:
         reason = "Kayit manuel inceleme gerektiriyor."
 
+    weights, thresholds = load_scoring_app_settings(session)
+    ml_prob = float(predict_match_probability(features))
+    _, safety_replay = resolve_match_decision_with_trace(ml_prob, features, thresholds=thresholds)
+    score_breakdown = compute_weighted_score_breakdown(features, weights)
+    score_source = _score_source_from_match_type(_safe_str(match_candidate.match_type))
+
     return {
         "id": match_candidate.id,
         "left_id": match_candidate.left_id,
@@ -652,11 +671,13 @@ def serialize_match_candidate(match_candidate: MatchCandidate) -> dict[str, Any]
         "donor1_phone": _safe_str(left_record.clean_phone) or None,
         "donor1_city": _safe_str(left_record.clean_city) or None,
         "donor1_tc": _safe_str(left_record.clean_tc) or None,
+        "donor1_muhatap_no": _safe_str(left_record.clean_muhatap_no) or None,
         "donor2_name": _safe_str(right_record.clean_name),
         "donor2_email": _safe_str(right_record.clean_email) or None,
         "donor2_phone": _safe_str(right_record.clean_phone) or None,
         "donor2_city": _safe_str(right_record.clean_city) or None,
         "donor2_tc": _safe_str(right_record.clean_tc) or None,
+        "donor2_muhatap_no": _safe_str(right_record.clean_muhatap_no) or None,
         "ml_score": confidence,
         "decision_reason": reason,
         "reason": reason,
@@ -669,6 +690,11 @@ def serialize_match_candidate(match_candidate: MatchCandidate) -> dict[str, Any]
         "splinkMatchProbability": confidence,
         "splinkMatchWeight": None,
         "created_at": match_candidate.created_at.isoformat() if match_candidate.created_at else None,
+        "final_score": score_breakdown["general_weighted_percent"],
+        "score_source": score_source,
+        "score_breakdown": score_breakdown,
+        "applied_thresholds": thresholds.as_percent_dict(),
+        "safety_overrides": safety_replay,
     }
 
 
@@ -1058,6 +1084,9 @@ def get_duplicate_groups(
                 "group_score": group_score,
                 "group_score_max": score_max,
                 "match_count": len(match_candidates_in_group),
+                "match_candidate_ids": sorted(
+                    {int(c.id) for c in match_candidates_in_group},
+                ),
                 "muhatap_codes": muhatap_codes,
                 "different_muhatap_code": has_different_muhatap_code,
                 "records": serialized_records,
@@ -1115,6 +1144,7 @@ def _get_or_create_entity_for_group(
         canonical_email=_safe_str(golden_record.get("clean_email")) or None,
         canonical_city=_safe_str(golden_record.get("clean_city")) or None,
         canonical_tc=_safe_str(golden_record.get("clean_tc")) or None,
+        canonical_muhatap_no=_safe_str(golden_record.get("clean_muhatap_no")) or None,
         canonical_data=golden_record,
         donor_count=len(records),
         confidence_score=1.0,
@@ -1283,6 +1313,7 @@ def approve_group_partial(
     entity.canonical_email = _safe_str(canonical_data.get("clean_email")) or None
     entity.canonical_city = _safe_str(canonical_data.get("clean_city")) or None
     entity.canonical_tc = _safe_str(canonical_data.get("clean_tc")) or None
+    entity.canonical_muhatap_no = _safe_str(canonical_data.get("clean_muhatap_no")) or None
     entity.donor_count = len(approved_set)
     entity.updated_at = datetime.utcnow()
 
@@ -1387,28 +1418,47 @@ def approve_match_candidate(
     if merge_into_entity and match_candidate.left_record and match_candidate.right_record:
         left_record = match_candidate.left_record
         right_record = match_candidate.right_record
+        golden = _build_golden_record([left_record, right_record])
+        ordered_for_golden = sorted(
+            [left_record, right_record],
+            key=lambda record: (_record_completeness_score(record), -int(record.id)),
+            reverse=True,
+        )
+        golden_record_id = int(ordered_for_golden[0].id)
         entity = Entity(
             canonical_name=(
                 _safe_str(canonical_name)
                 or _pick_canonical_value(left_record.clean_name, right_record.clean_name)
+                or _safe_str(golden.get("clean_name"))
                 or f"Entity {match_candidate.id}"
             ),
             canonical_phone=_pick_canonical_value(
                 left_record.clean_phone,
                 right_record.clean_phone,
-            ),
+            )
+            or _safe_str(golden.get("clean_phone"))
+            or None,
             canonical_email=_pick_canonical_value(
                 left_record.clean_email,
                 right_record.clean_email,
-            ),
+            )
+            or _safe_str(golden.get("clean_email"))
+            or None,
             canonical_city=_pick_canonical_value(
                 left_record.clean_city,
                 right_record.clean_city,
-            ),
+            )
+            or _safe_str(golden.get("clean_city"))
+            or None,
             canonical_tc=_pick_canonical_value(
                 left_record.clean_tc,
                 right_record.clean_tc,
-            ),
+            )
+            or _safe_str(golden.get("clean_tc"))
+            or None,
+            canonical_muhatap_no=_safe_str(golden.get("clean_muhatap_no")) or None,
+            canonical_data=golden,
+            golden_record_id=golden_record_id,
             confidence=confidence,
             donor_count=2,
             merged_count=1,
@@ -1492,6 +1542,83 @@ def reject_match_candidate(
                 "match_type": match_candidate.match_type,
             },
             created_by=rejected_by,
+        )
+    )
+    session.flush()
+    return match_candidate
+
+
+def reset_match_candidate(
+    session: Session,
+    *,
+    match_id: int,
+    reason: str | None,
+    reset_by: str | None,
+) -> MatchCandidate | None:
+    """
+    Onay/red kararını geri alır: match pending olur; ilgili üyelikler pending'e çekilir.
+    Ham/normalize kayıtlar silinmez.
+    """
+    match_candidate = get_match_candidate(session, match_id)
+    if match_candidate is None:
+        return None
+    if match_candidate.decision not in {"approved", "rejected"}:
+        raise ValueError("Yalnızca onaylanmış veya reddedilmiş eşleşmeler sıfırlanabilir.")
+
+    target_records = {int(match_candidate.left_id), int(match_candidate.right_id)}
+    memberships = (
+        session.query(EntityMembership)
+        .filter(EntityMembership.normalized_record_id.in_(target_records))
+        .all()
+    )
+    entity_ids: set[int] = set()
+    for membership in memberships:
+        if int(membership.normalized_record_id) not in target_records:
+            continue
+        entity_ids.add(int(membership.entity_id))
+        membership.status = "pending"
+
+    now = datetime.utcnow()
+    for entity_id in entity_ids:
+        entity = session.query(Entity).filter(Entity.id == entity_id).first()
+        if entity is None:
+            continue
+        confirmed = (
+            session.query(EntityMembership)
+            .filter(
+                EntityMembership.entity_id == entity_id,
+                EntityMembership.status == "confirmed",
+            )
+            .count()
+        )
+        entity.donor_count = int(confirmed)
+        if confirmed == 0:
+            entity.golden_record_id = None
+        entity.updated_at = now
+
+    match_candidate.decision = "pending"
+    session.add(
+        ReviewAction(
+            match_id=match_candidate.id,
+            decision="pending",
+            decided_by=reset_by,
+            decided_at=now,
+            reason=reason or "Karar geri alındı",
+        )
+    )
+    session.add(
+        AuditLog(
+            action_type="match_reset",
+            entity_type="match",
+            entity_id=match_candidate.id,
+            payload={
+                "match_id": match_candidate.id,
+                "left_id": match_candidate.left_id,
+                "right_id": match_candidate.right_id,
+                "reason": reason,
+                "entity_ids_touched": sorted(entity_ids),
+            },
+            created_by=reset_by,
         )
     )
     session.flush()

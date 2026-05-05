@@ -31,6 +31,7 @@ const goldenFields: Array<{ key: GoldenField; label: string }> = [
   { key: "clean_email", label: "E-posta" },
   { key: "clean_city", label: "Şehir" },
   { key: "clean_address", label: "Adres" },
+  { key: "clean_muhatap_no", label: "Muhatap Kodu" },
 ];
 
 function pct(value: number): string {

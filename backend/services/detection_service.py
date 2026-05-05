@@ -22,6 +22,7 @@ from backend.services.matching_service import (
     infer_match_type,
     run_matching,
 )
+from backend.services.scoring_app_settings import load_scoring_app_settings
 from backend.services.normalization_persistence_service import (
     persist_normalization_pipeline,
 )
@@ -593,9 +594,12 @@ def run_detection_from_database(
 
         t_match = time.monotonic()
         df_clean, index_to_normalized_id = _build_matching_dataframe(normalized_records)
+        scoring_weights, decision_thresholds = load_scoring_app_settings(session)
         duplicates, resolved_model_version = run_matching(
             df_clean=df_clean,
             min_rules_to_match=min_rules_to_match,
+            scoring_weights=scoring_weights,
+            decision_thresholds=decision_thresholds,
         )
         t_match_elapsed = time.monotonic() - t_match
         if detection_run is not None:

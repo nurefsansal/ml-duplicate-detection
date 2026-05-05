@@ -536,6 +536,7 @@ class Entity(Base):
 
     # New production field
     canonical_tc = Column(String)
+    canonical_muhatap_no = Column(String)
     canonical_data = Column(JSONB, default=dict)
     golden_record_id = Column(Integer, ForeignKey("normalized_records.id", ondelete="SET NULL"))
     confidence = Column(Float)
@@ -567,6 +568,7 @@ class Entity(Base):
         Index("idx_entities_canonical_phone", "canonical_phone"),
         Index("idx_entities_canonical_city", "canonical_city"),
         Index("idx_entities_canonical_tc", "canonical_tc"),
+        Index("idx_entities_canonical_muhatap_no", "canonical_muhatap_no"),
         Index("idx_entities_golden_record_id", "golden_record_id"),
         Index("idx_entities_created_at", "created_at"),
     )

@@ -26,6 +26,7 @@ from backend.services.review_service import (
     get_pending_match_candidates,
     reject_match_candidate,
     remove_entity_membership,
+    reset_match_candidate,
     serialize_match_candidate,
 )
 from backend.services.auth_service import get_current_user
@@ -124,6 +125,12 @@ class GoldenRecordUpdateRequest(BaseModel):
     note: Optional[str] = None
 
 
+class ResetMatchRequest(BaseModel):
+    """Eşleşme kararını geri alma."""
+
+    reason: Optional[str] = None
+
+
 @router.get("/admin/pending-matches")
 def get_pending_matches(
     upload_id: Optional[int] = None,
@@ -144,7 +151,7 @@ def get_pending_matches(
             limit=limit,
         )
 
-        result = [serialize_match_candidate(match) for match in pending_matches]
+        result = [serialize_match_candidate(match, db) for match in pending_matches]
 
         return {
             "success": True,
@@ -177,7 +184,7 @@ def list_matches(
             decision=decision,
             limit=limit,
         )
-        result = [serialize_match_candidate(match) for match in matches]
+        result = [serialize_match_candidate(match, db) for match in matches]
         return {
             "success": True,
             "decision": decision,
@@ -341,6 +348,42 @@ def approve_match(
         raise HTTPException(status_code=500, detail=f"Error approving match: {str(e)}")
 
 
+@router.post("/admin/matches/{match_id}/reset")
+def reset_match_decision(
+    match_id: int,
+    request: ResetMatchRequest,
+    db: Session = Depends(get_db),
+    current_user: str = Depends(get_current_user),
+):
+    """
+    Onay veya red kararını geri alır; eşleşmeyi tekrar inceleme kuyruğuna alır.
+    """
+    try:
+        match = reset_match_candidate(
+            db,
+            match_id=match_id,
+            reason=request.reason,
+            reset_by=current_user,
+        )
+        if not match:
+            raise HTTPException(status_code=404, detail="Match not found")
+        db.commit()
+        return {
+            "success": True,
+            "match_id": match.id,
+            "status": match.decision,
+            "reset_by": current_user,
+        }
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error resetting match: {str(e)}")
+
+
 @router.post("/admin/reject-match")
 def reject_match(
     request: RejectMatchRequest,
@@ -420,6 +463,7 @@ def get_entities(
                     "canonical_email": entity.canonical_email,
                     "canonical_phone": entity.canonical_phone,
                     "canonical_city": entity.canonical_city,
+                    "canonical_muhatap_no": getattr(entity, "canonical_muhatap_no", None),
                     "donor_count": entity.donor_count,
                     "merged_count": entity.merged_count,
                     "confidence_score": entity.confidence_score,
@@ -467,6 +511,7 @@ def get_entity_donors(
                         "city": donor.clean_city,
                         "upload_id": donor.upload_id,
                         "tc": donor.clean_tc,
+                        "clean_muhatap_no": getattr(donor, "clean_muhatap_no", None) or "",
                     }
                 )
         else:
@@ -488,6 +533,7 @@ def get_entity_donors(
             "entity": {
                 "id": entity.id,
                 "canonical_name": entity.canonical_name,
+                "canonical_muhatap_no": getattr(entity, "canonical_muhatap_no", None),
                 "donor_count": entity.donor_count,
             },
             "donors": donor_list,
@@ -588,6 +634,7 @@ def update_golden_record(
         entity.canonical_phone = canonical_data.get("clean_phone") or None
         entity.canonical_email = canonical_data.get("clean_email") or None
         entity.canonical_city = canonical_data.get("clean_city") or None
+        entity.canonical_muhatap_no = canonical_data.get("clean_muhatap_no") or None
         entity.updated_at = datetime.utcnow()
 
         db.add(

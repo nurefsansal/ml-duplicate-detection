@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from backend.models.database import AppSettings
 from backend.services.auth_service import get_current_user
+from backend.services.scoring_app_settings import load_scoring_app_settings
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
@@ -65,6 +66,18 @@ def _upsert_setting(
 def get_settings(db: Session = Depends(get_db)):
     rows = db.query(AppSettings).order_by(AppSettings.key.asc()).all()
     return {row.key: row.value for row in rows}
+
+
+@router.get("/settings/scoring")
+def get_scoring_settings(db: Session = Depends(get_db)):
+    """
+    Tespit / karar motorunda kullanılan ağırlık ve olasılık eşikleri (0–100 yüzde).
+    """
+    weights, thresholds = load_scoring_app_settings(db)
+    return {
+        "weights": weights,
+        "thresholds_percent": thresholds.as_percent_dict(),
+    }
 
 
 @router.post("/settings")

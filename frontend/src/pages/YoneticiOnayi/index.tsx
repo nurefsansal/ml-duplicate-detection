@@ -1,476 +1,554 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import axios from "axios";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 
 import DashboardLayout from "../../components/feature/DashboardLayout";
-import FieldComparisonsPanel from "../../components/feature/FieldComparisonsPanel";
 import Header from "../../components/feature/Header";
 import {
-  approvePendingMatch,
-  getMatches,
-  rejectPendingMatch,
+  getDuplicateGroups,
+  listUploads,
+  partialApproveGroup,
+  resetMatchDecision,
+  updateGoldenRecord,
+  type DuplicateGroup,
+  type DuplicateGroupRecord,
+  type UploadItem,
 } from "../../services/api";
-import {
-  finalDecisionLabel,
-  finalDecisionTone,
-  mapPendingMatchToView,
-  type UiDuplicatePair,
-} from "../../utils/duplicatePairView";
 
-function formatScore(value: number): string {
-  return `${value.toFixed(2)}%`;
+type RecordDecision = "confirmed" | "pending" | "excluded";
+type GoldenField =
+  | "clean_name"
+  | "clean_tc"
+  | "clean_phone"
+  | "clean_email"
+  | "clean_city"
+  | "clean_address"
+  | "clean_muhatap_no";
+
+const goldenFields: Array<{ key: GoldenField; label: string }> = [
+  { key: "clean_name", label: "Ad Soyad" },
+  { key: "clean_tc", label: "TC" },
+  { key: "clean_phone", label: "Telefon" },
+  { key: "clean_email", label: "E-posta" },
+  { key: "clean_city", label: "Şehir" },
+  { key: "clean_address", label: "Adres" },
+  { key: "clean_muhatap_no", label: "Muhatap Kodu" },
+];
+
+function pct(value: number): string {
+  return `%${(Number(value || 0) * 100).toFixed(1)}`;
 }
 
-function algorithmLabel(value?: string): string {
-  return value ? value.toUpperCase() : "Bilinmiyor";
+function filterClass(active: boolean): string {
+  return active
+    ? "bg-red-600 text-white"
+    : "border border-gray-200 text-gray-600 hover:bg-gray-50";
 }
 
-function recordMeta(record: UiDuplicatePair["records"][number]): string {
-  return [record.telefon, record.email, record.tcKimlikNo]
-    .filter(Boolean)
-    .join(" | ");
+function muhatapConflictFilterClass(active: boolean): string {
+  return active
+    ? "bg-purple-600 text-white shadow-sm"
+    : "border border-gray-200 text-gray-600 hover:bg-gray-50";
 }
 
-function pairSearchText(group: UiDuplicatePair): string {
-  return [
-    String(group.backendMatchId ?? group.id),
-    group.records[0].adSoyad,
-    group.records[1].adSoyad,
-    group.records[0].telefon,
-    group.records[1].telefon,
-    group.records[0].email,
-    group.records[1].email,
-    group.records[0].tcKimlikNo,
-    group.records[1].tcKimlikNo,
-  ]
-    .join(" ")
-    .toLowerCase();
+function pickMuhatapScalar(v: unknown): string {
+  if (v == null) return "";
+  return String(v).trim();
+}
+
+function getErrorMessage(error: unknown, fallback: string): string {
+  if (axios.isAxiosError(error)) {
+    const detail = error.response?.data?.detail ?? error.response?.data?.error;
+    if (typeof detail === "string" && detail.trim()) return detail;
+  }
+  return error instanceof Error ? error.message : fallback;
+}
+
+/** Çakışma filtresi: backend'in group.muhatap_codes alanıyla aynı önceliği izler. */
+function getRecordMuhatapNoForConflict(record: DuplicateGroupRecord): string {
+  const clean = pickMuhatapScalar(record.clean_muhatap_no);
+  const normalizedClean = pickMuhatapScalar(record.normalized_payload?.clean_muhatap_no);
+  const normalizedSnake = pickMuhatapScalar(record.normalized_payload?.muhatap_no);
+  const normalizedTitle = pickMuhatapScalar(record.normalized_payload?.["Muhatap No"]);
+  return clean || normalizedClean || normalizedSnake || normalizedTitle;
+}
+
+/** Tablo ve detay gösterimi: üstteki kaynaklar + raw payload yedeği. */
+function getRecordMuhatapNoDisplay(record: DuplicateGroupRecord): string {
+  const fromPayload = getRecordMuhatapNoForConflict(record);
+  if (fromPayload) return fromPayload;
+  return pickMuhatapScalar(record.raw_payload?.muhatap_no);
+}
+
+function formatUploadDate(iso: string | null): string {
+  if (!iso) return "—";
+  try {
+    return new Date(iso).toLocaleString("tr-TR", {
+      dateStyle: "short",
+      timeStyle: "short",
+    });
+  } catch {
+    return iso;
+  }
+}
+
+function groupDistinctMuhatapValues(
+  group: DuplicateGroup,
+  getter: (r: DuplicateGroupRecord) => string,
+): string[] {
+  const set = new Set<string>();
+  for (const r of group.records) {
+    const m = getter(r);
+    if (m) set.add(m);
+  }
+  return [...set].sort();
+}
+
+function groupHasDistinctMuhatapConflict(group: DuplicateGroup): boolean {
+  if (typeof group.different_muhatap_code === "boolean") {
+    return group.different_muhatap_code;
+  }
+  if (group.muhatap_codes && group.muhatap_codes.length > 0) {
+    return group.muhatap_codes.length > 1;
+  }
+  return groupDistinctMuhatapValues(group, getRecordMuhatapNoForConflict).length > 1;
 }
 
 export default function YoneticiOnayi() {
-  const [activeDecision, setActiveDecision] = useState<
+  const [searchParams, setSearchParams] = useSearchParams();
+  const uploadIdParam = searchParams.get("upload_id");
+  const decisionParam = searchParams.get("decision");
+
+  const [decisionFilter, setDecisionFilter] = useState<
     "pending" | "approved" | "rejected"
-  >("pending");
-  const [detailGroup, setDetailGroup] = useState<UiDuplicatePair | null>(null);
-  const [searchText, setSearchText] = useState("");
+  >(
+    decisionParam === "pending" || decisionParam === "rejected" || decisionParam === "approved"
+      ? decisionParam
+      : "pending",
+  );
+  const [search, setSearch] = useState("");
+  const [filterMuhatapConflict, setFilterMuhatapConflict] = useState(false);
+  const [detailGroup, setDetailGroup] = useState<DuplicateGroup | null>(null);
   const [loading, setLoading] = useState(false);
-  const [matches, setMatches] = useState<UiDuplicatePair[]>([]);
-  const [decisionCounts, setDecisionCounts] = useState({
-    pending: 0,
-    approved: 0,
-    rejected: 0,
-  });
-  const [decisionNote, setDecisionNote] = useState("");
+  const [groups, setGroups] = useState<DuplicateGroup[]>([]);
+  const [uploads, setUploads] = useState<UploadItem[]>([]);
   const [apiError, setApiError] = useState("");
-  const [lastUploadId, setLastUploadId] = useState<number | null>(null);
-  const [backendHealthy, setBackendHealthy] = useState<boolean | null>(null);
+  const [recordDecisions, setRecordDecisions] = useState<Record<number, RecordDecision>>({});
+  const [goldenDraft, setGoldenDraft] = useState<Record<GoldenField, string>>({
+    clean_name: "",
+    clean_tc: "",
+    clean_phone: "",
+    clean_email: "",
+    clean_city: "",
+    clean_address: "",
+    clean_muhatap_no: "",
+  });
+  const [editingGoldenField, setEditingGoldenField] = useState<GoldenField | null>(null);
+  const [savingPartial, setSavingPartial] = useState(false);
+  const [savingGolden, setSavingGolden] = useState(false);
+  const [resettingMatchId, setResettingMatchId] = useState<number | null>(null);
   const isMountedRef = useRef(true);
 
-  const refreshMatches = async (
-    uploadId: number | undefined,
-    decision: "pending" | "approved" | "rejected",
-  ) => {
-    setLoading(true);
-    setApiError("");
-
-    try {
-      const response = await getMatches({
-        decision,
-        uploadId,
-        limit: 100,
-      });
-
-      if (!isMountedRef.current) {
-        return;
+  const [selectedUploadId, setSelectedUploadId] = useState<number | undefined>(
+    () => {
+      if (uploadIdParam && !Number.isNaN(Number(uploadIdParam))) {
+        return Number(uploadIdParam);
       }
-
-      setMatches((response.matches || []).map(mapPendingMatchToView));
-    } catch (error) {
-      if (!isMountedRef.current) {
-        return;
-      }
-      setApiError(
-        error instanceof Error
-          ? error.message
-          : "Kayıtlar alınamadı.",
-      );
-    } finally {
-      if (isMountedRef.current) {
-        setLoading(false);
-      }
-    }
-  };
-
-  const refreshDecisionCounts = async (uploadId: number | undefined) => {
-    try {
-      const [pendingRes, approvedRes, rejectedRes] = await Promise.all([
-        getMatches({ decision: "pending", uploadId, limit: 1_000_000 }),
-        getMatches({ decision: "approved", uploadId, limit: 1_000_000 }),
-        getMatches({ decision: "rejected", uploadId, limit: 1_000_000 }),
-      ]);
-      if (!isMountedRef.current) {
-        return;
-      }
-      setDecisionCounts({
-        pending: pendingRes.count ?? 0,
-        approved: approvedRes.count ?? 0,
-        rejected: rejectedRes.count ?? 0,
-      });
-    } catch {
-      if (isMountedRef.current) {
-        setDecisionCounts({ pending: 0, approved: 0, rejected: 0 });
-      }
-    }
-  };
+      const ls = localStorage.getItem("lastDetectUploadId");
+      if (ls && !Number.isNaN(Number(ls))) return Number(ls);
+      return undefined;
+    },
+  );
 
   useEffect(() => {
-    isMountedRef.current = true;
+    if (uploadIdParam && !Number.isNaN(Number(uploadIdParam))) {
+      setSelectedUploadId(Number(uploadIdParam));
+    }
+  }, [uploadIdParam]);
 
-    import("../../services/api")
-      .then(({ healthCheck }) => healthCheck())
-      .then(() => {
-        if (!isMountedRef.current) {
-          return;
-        }
+  useEffect(() => {
+    if (decisionParam === "pending" || decisionParam === "approved" || decisionParam === "rejected") {
+      setDecisionFilter(decisionParam);
+    }
+  }, [decisionParam]);
 
-        setBackendHealthy(true);
-
-        const storedUpload = localStorage.getItem("lastDetectUploadId");
-        const parsedUpload = storedUpload ? Number(storedUpload) : Number.NaN;
-        const uploadId = Number.isFinite(parsedUpload) ? parsedUpload : undefined;
-        setLastUploadId(uploadId ?? null);
-        refreshMatches(uploadId, "pending");
-        refreshDecisionCounts(uploadId);
-      })
-      .catch(() => {
-        if (isMountedRef.current) {
-          setBackendHealthy(false);
-        }
-      });
-
-    return () => {
-      isMountedRef.current = false;
-    };
+  useEffect(() => {
+    listUploads(100)
+      .then((d) => setUploads(d.uploads ?? []))
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
-    if (backendHealthy === false) {
+    if (!detailGroup) return;
+
+    const nextDecisions: Record<number, RecordDecision> = {};
+    for (const record of detailGroup.records) {
+      nextDecisions[record.record_id] = record.membership_status ?? "pending";
+    }
+    setRecordDecisions(nextDecisions);
+    setGoldenDraft({
+      clean_name: detailGroup.golden_record.clean_name ?? "",
+      clean_tc: detailGroup.golden_record.clean_tc ?? "",
+      clean_phone: detailGroup.golden_record.clean_phone ?? "",
+      clean_email: detailGroup.golden_record.clean_email ?? "",
+      clean_city: detailGroup.golden_record.clean_city ?? "",
+      clean_address: detailGroup.golden_record.clean_address ?? "",
+      clean_muhatap_no: detailGroup.golden_record.clean_muhatap_no ?? "",
+    });
+    setEditingGoldenField(null);
+  }, [detailGroup]);
+
+  const fetchGroups = useCallback(async () => {
+    setLoading(true);
+    setApiError("");
+    try {
+      const response = await getDuplicateGroups({
+        decision: decisionFilter,
+        uploadId: selectedUploadId,
+        limit: 5000,
+        differentMuhatapCode: filterMuhatapConflict,
+      });
+      if (!isMountedRef.current) return;
+      setGroups(response.groups || []);
+    } catch (error) {
+      if (!isMountedRef.current) return;
+      setApiError(
+        error instanceof Error ? error.message : "Duplicate group verisi alınamadı.",
+      );
+    } finally {
+      if (isMountedRef.current) setLoading(false);
+    }
+  }, [decisionFilter, filterMuhatapConflict, selectedUploadId]);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    fetchGroups();
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, [fetchGroups]);
+
+  const filtered = useMemo(() => {
+    let list = groups;
+    if (search) {
+      const text = search.toLowerCase();
+      list = list.filter((group) => {
+        if (group.group_id.toLowerCase().includes(text)) return true;
+        return group.records.some(
+          (record) =>
+            record.clean_name.toLowerCase().includes(text) ||
+            record.clean_tc.includes(search) ||
+            record.clean_phone.includes(search) ||
+            record.clean_email.toLowerCase().includes(text),
+        );
+      });
+    }
+    return list;
+  }, [groups, search]);
+
+  const selectUpload = (raw: string) => {
+    if (raw === "") {
+      setSelectedUploadId(undefined);
+      localStorage.removeItem("lastDetectUploadId");
+      setSearchParams((p) => {
+        p.delete("upload_id");
+        return p;
+      });
       return;
     }
-    refreshMatches(lastUploadId ?? undefined, activeDecision);
-  }, [activeDecision]);
+    const id = Number(raw);
+    if (Number.isNaN(id)) return;
+    setSelectedUploadId(id);
+    localStorage.setItem("lastDetectUploadId", String(id));
+    setSearchParams((p) => {
+      p.set("upload_id", String(id));
+      return p;
+    });
+  };
 
-  const filteredMatches = useMemo(
-    () =>
-      matches.filter(
-        (group) =>
-          !searchText ||
-          pairSearchText(group).includes(searchText.toLowerCase()),
-      ),
-    [matches, searchText],
+  const confirmedCount = useMemo(
+    () => Object.values(recordDecisions).filter((decision) => decision === "confirmed").length,
+    [recordDecisions],
   );
 
-  const handleApprove = async (groupId: string) => {
-    const target = matches.find((group) => group.id === groupId);
-    if (!target?.backendMatchId) {
-      return;
-    }
+  const excludedCount = useMemo(
+    () => Object.values(recordDecisions).filter((decision) => decision === "excluded").length,
+    [recordDecisions],
+  );
 
-    setLoading(true);
+  const entityIdForDetail = useMemo(() => {
+    if (!detailGroup) return null;
+    return (
+      detailGroup.entity_id ??
+      detailGroup.records.find((record) => record.entity_id != null)?.entity_id ??
+      null
+    );
+  }, [detailGroup]);
+
+  const changedGoldenFields = useMemo(() => {
+    if (!detailGroup) return [];
+    return goldenFields
+      .filter(({ key }) => goldenDraft[key] !== (detailGroup.golden_record[key] ?? ""))
+      .map(({ key }) => key);
+  }, [detailGroup, goldenDraft]);
+
+  const setRecordDecision = (recordId: number, decision: RecordDecision) => {
+    setRecordDecisions((prev) => ({ ...prev, [recordId]: decision }));
+  };
+
+  const savePartialDecisions = async () => {
+    if (!detailGroup) return;
+    setSavingPartial(true);
     setApiError("");
-
     try {
-      await approvePendingMatch({
-        matchId: target.backendMatchId,
-        mergeIntoEntity: true,
-        canonicalName: target.records[0].adSoyad || target.records[1].adSoyad,
-      });
+      const approvedRecordIds = Object.entries(recordDecisions)
+        .filter(([, decision]) => decision === "confirmed")
+        .map(([recordId]) => Number(recordId));
+      const rejectedRecordIds = Object.entries(recordDecisions)
+        .filter(([, decision]) => decision === "excluded")
+        .map(([recordId]) => Number(recordId));
 
-      setMatches((prev) => prev.filter((group) => group.id !== groupId));
+      await partialApproveGroup({
+        groupId: detailGroup.group_id,
+        recordIds: detailGroup.record_ids,
+        approvedRecordIds,
+        rejectedRecordIds,
+        uploadId: selectedUploadId ?? detailGroup.records[0]?.upload_id,
+        decision: decisionFilter,
+      });
       setDetailGroup(null);
-      setDecisionNote("");
-      await Promise.all([
-        refreshMatches(lastUploadId ?? undefined, activeDecision),
-        refreshDecisionCounts(lastUploadId ?? undefined),
-      ]);
+      await fetchGroups();
     } catch (error) {
-      setApiError(
-        error instanceof Error ? error.message : "Onay işlemi başarısız.",
-      );
-      setLoading(false);
+      setApiError(getErrorMessage(error, "Kısmi onay kaydedilemedi."));
+    } finally {
+      setSavingPartial(false);
     }
   };
 
-  const handleReject = async (groupId: string) => {
-    const target = matches.find((group) => group.id === groupId);
-    if (!target?.backendMatchId) {
-      return;
-    }
-
-    setLoading(true);
+  const handleResetMatch = async (matchId: number) => {
+    setResettingMatchId(matchId);
     setApiError("");
-
     try {
-      await rejectPendingMatch({
-        matchId: target.backendMatchId,
-        reason: decisionNote || "Kayıt reddedildi.",
+      await resetMatchDecision({
+        matchId,
+        reason: "Yönetici kararı geri alındı",
       });
-
-      setMatches((prev) => prev.filter((group) => group.id !== groupId));
       setDetailGroup(null);
-      setDecisionNote("");
-      await Promise.all([
-        refreshMatches(lastUploadId ?? undefined, activeDecision),
-        refreshDecisionCounts(lastUploadId ?? undefined),
-      ]);
+      await fetchGroups();
     } catch (error) {
-      setApiError(
-        error instanceof Error ? error.message : "Reddetme işlemi başarısız.",
-      );
-      setLoading(false);
+      setApiError(getErrorMessage(error, "Karar geri alınamadı."));
+    } finally {
+      setResettingMatchId(null);
     }
   };
 
-  const refreshLabel = lastUploadId
-    ? `Yenile (Upload ${lastUploadId})`
-    : "Tümünü Yenile";
-  const canTakeAction = activeDecision === "pending";
+  const saveGoldenRecord = async () => {
+    if (!entityIdForDetail || changedGoldenFields.length === 0) return;
+    setSavingGolden(true);
+    setApiError("");
+    try {
+      const fields = changedGoldenFields.reduce<DuplicateGroup["golden_record"]>(
+        (acc, key) => {
+          acc[key] = goldenDraft[key];
+          return acc;
+        },
+        {},
+      );
+      await updateGoldenRecord({ entityId: entityIdForDetail, fields });
+      setDetailGroup((prev) =>
+        prev
+          ? {
+              ...prev,
+              golden_record: {
+                ...prev.golden_record,
+                ...fields,
+              },
+            }
+          : prev,
+      );
+      await fetchGroups();
+    } catch (error) {
+      setApiError(
+        error instanceof Error ? error.message : "Golden record güncellenemedi.",
+      );
+    } finally {
+      setSavingGolden(false);
+    }
+  };
 
   return (
     <DashboardLayout>
       <Header
         title="Yönetici Onayı"
-        subtitle="Bekleyen eşleşmeleri doğrudan backend API verileri üzerinden yönetin"
+        subtitle="Grup bazlı inceleme: kayıtları onaylayın veya hariç tutun; golden record düzenleyin"
         actions={
-          <div className="flex items-center gap-3">
-            {backendHealthy === false && (
-              <span className="rounded bg-red-50 px-2 py-1 text-xs text-red-600">
-                Backend: Erişilemiyor
-              </span>
-            )}
-            <button
-              onClick={() =>
-                Promise.all([
-                  refreshMatches(lastUploadId ?? undefined, activeDecision),
-                  refreshDecisionCounts(lastUploadId ?? undefined),
-                ])
-              }
-              disabled={loading || backendHealthy === false}
-              className="flex cursor-pointer items-center gap-2 rounded-lg border border-gray-200 px-4 py-2 text-sm text-gray-600 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              <i
-                className={
-                  loading ? "ri-loader-4-line animate-spin" : "ri-refresh-line"
-                }
-              />
-              {refreshLabel}
-            </button>
-          </div>
+          <button
+            onClick={() => fetchGroups()}
+            disabled={loading}
+            className="flex cursor-pointer items-center gap-2 rounded-lg border border-gray-200 px-4 py-2 text-sm text-gray-600 transition-colors hover:bg-gray-50 disabled:opacity-60"
+          >
+            <i className={loading ? "ri-loader-4-line animate-spin" : "ri-refresh-line"} />
+            Yenile
+          </button>
         }
       />
 
-      <div className="flex-1 space-y-5 overflow-y-auto p-6">
-        {lastUploadId && (
-          <div className="flex items-center gap-3 rounded-xl border border-amber-100 bg-amber-50 p-4">
-            <i className="ri-information-line text-lg text-amber-600" />
-            <p className="text-sm text-amber-700">
-              Liste son detect çalışmasındaki upload için filtreleniyor. Upload
-              ID: {lastUploadId}
-            </p>
+      <div className="flex-1 space-y-4 overflow-y-auto p-6">
+        <div className="flex flex-wrap items-end gap-3">
+          <div>
+            <label className="mb-1 block text-xs font-medium text-gray-600">
+              Yükleme Seçin
+            </label>
+            <select
+              value={selectedUploadId ?? ""}
+              onChange={(e) => selectUpload(e.target.value)}
+              className="min-w-[280px] cursor-pointer rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm focus:border-red-400 focus:outline-none focus:ring-1 focus:ring-red-100"
+            >
+              <option value="">Tüm yüklemeler</option>
+              {uploads.map((u) => (
+                <option key={u.id} value={u.id}>
+                  #{u.id} — {u.file_name} ({u.total_records} kayıt,{" "}
+                  {formatUploadDate(u.created_at)})
+                </option>
+              ))}
+            </select>
           </div>
-        )}
+        </div>
 
         <div className="flex flex-wrap items-center gap-2">
           <button
-            onClick={() => setActiveDecision("pending")}
-            className={`cursor-pointer rounded-lg px-3 py-2 text-xs font-medium transition-colors ${
-              activeDecision === "pending"
-                ? "bg-yellow-500 text-white"
-                : "border border-gray-200 text-gray-600 hover:bg-gray-50"
-            }`}
+            onClick={() => setDecisionFilter("pending")}
+            className={`cursor-pointer rounded-lg px-3 py-2 text-xs font-medium transition-colors ${filterClass(
+              decisionFilter === "pending",
+            )}`}
           >
-            Bekleyen: {decisionCounts.pending}
+            Bekliyor
           </button>
           <button
-            onClick={() => setActiveDecision("approved")}
-            className={`cursor-pointer rounded-lg px-3 py-2 text-xs font-medium transition-colors ${
-              activeDecision === "approved"
-                ? "bg-green-600 text-white"
-                : "border border-gray-200 text-gray-600 hover:bg-gray-50"
-            }`}
+            onClick={() => setDecisionFilter("approved")}
+            className={`cursor-pointer rounded-lg px-3 py-2 text-xs font-medium transition-colors ${filterClass(
+              decisionFilter === "approved",
+            )}`}
           >
-            Onaylanan: {decisionCounts.approved}
+            Onaylandı
           </button>
           <button
-            onClick={() => setActiveDecision("rejected")}
-            className={`cursor-pointer rounded-lg px-3 py-2 text-xs font-medium transition-colors ${
-              activeDecision === "rejected"
-                ? "bg-red-600 text-white"
-                : "border border-gray-200 text-gray-600 hover:bg-gray-50"
-            }`}
+            onClick={() => setDecisionFilter("rejected")}
+            className={`cursor-pointer rounded-lg px-3 py-2 text-xs font-medium transition-colors ${filterClass(
+              decisionFilter === "rejected",
+            )}`}
           >
-            Reddedilen: {decisionCounts.rejected}
+            Reddedildi
+          </button>
+          <button
+            type="button"
+            onClick={() => setFilterMuhatapConflict((prev) => !prev)}
+            className={`flex cursor-pointer items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-medium transition-colors ${muhatapConflictFilterClass(
+              filterMuhatapConflict,
+            )}`}
+          >
+            <i className="ri-git-branch-line" />
+            Farklı Muhatap Kodlu
           </button>
         </div>
 
-        {apiError && (
-          <div className="flex items-center gap-3 rounded-xl border border-red-100 bg-red-50 p-4">
-            <i className="ri-error-warning-fill text-lg text-red-600" />
-            <p className="text-sm text-red-700">{apiError}</p>
-          </div>
-        )}
-
-        {loading && (
-          <div className="flex items-center gap-3 rounded-xl border border-blue-100 bg-blue-50 p-4">
-            <i className="ri-loader-4-line animate-spin text-lg text-blue-600" />
-            <p className="text-sm text-blue-700">Backend verileri yükleniyor...</p>
-          </div>
-        )}
-
-        <div className="relative">
+        <div className="relative w-full">
           <i className="ri-search-line absolute left-3 top-1/2 -translate-y-1/2 text-sm text-gray-400" />
           <input
             type="text"
-            value={searchText}
-            onChange={(event) => setSearchText(event.target.value)}
-            placeholder="Match ID veya kişi adı ara..."
-            className="w-full rounded-lg border border-gray-200 py-2.5 pl-9 pr-4 text-sm focus:border-red-400 focus:outline-none"
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Group ID, ad, tc, telefon, email ara..."
+            className="w-full rounded-lg border border-gray-200 py-2.5 pl-9 pr-4 text-sm focus:border-red-400 focus:outline-none focus:ring-1 focus:ring-red-100"
           />
         </div>
+
+        {apiError && (
+          <div className="rounded-xl border border-red-100 bg-red-50 p-4 text-sm text-red-700">
+            {apiError}
+          </div>
+        )}
 
         <div className="overflow-hidden rounded-xl border border-gray-100 bg-white">
           <div className="border-b border-gray-50 px-5 py-4">
             <h3 className="text-sm font-semibold text-gray-900">
-              Eşleşme Kayıtları
+              Duplicate gruplar — {decisionFilter === "pending" ? "bekleyen" : decisionFilter === "approved" ? "onaylanan" : "reddedilen"}
             </h3>
-            <p className="mt-0.5 text-xs text-gray-400">
-              Bu liste backend API&apos;dan gelen{" "}
-              {activeDecision === "pending"
-                ? "bekleyen"
-                : activeDecision === "approved"
-                  ? "onaylanan"
-                  : "reddedilen"}{" "}
-              eşleşmeleri gösterir.
+            <p className="mt-1 text-xs text-gray-400">
+              Çift bazlı eski akış kaldırıldı; tüm kararlar grup üzerinden verilir.
             </p>
           </div>
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[940px] text-sm">
+            <table className="w-full min-w-[1040px] text-xs">
               <thead>
                 <tr className="border-b border-gray-100 bg-gray-50/70">
-                  <th className="px-5 py-3 text-left font-medium text-gray-400">
-                    Match ID
-                  </th>
-                  <th className="px-4 py-3 text-left font-medium text-gray-400">
-                    Left Record
-                  </th>
-                  <th className="px-4 py-3 text-left font-medium text-gray-400">
-                    Right Record
-                  </th>
-                  <th className="px-4 py-3 text-left font-medium text-gray-400">
-                    Score
-                  </th>
-                  <th className="px-4 py-3 text-left font-medium text-gray-400">
-                    Durum
-                  </th>
-                  <th className="px-4 py-3 text-left font-medium text-gray-400">
-                    Action
-                  </th>
+                  <th className="px-4 py-3 text-left font-medium text-gray-400">Group ID</th>
+                  <th className="px-4 py-3 text-left font-medium text-gray-400">Kayıt Sayısı</th>
+                  <th className="px-4 py-3 text-left font-medium text-gray-400">Eşleşme</th>
+                  <th className="px-4 py-3 text-left font-medium text-gray-400">Skor</th>
+                  <th className="px-4 py-3 text-left font-medium text-gray-400">Golden Record</th>
+                  <th className="px-4 py-3 text-left font-medium text-gray-400">Muhatap Kodları</th>
+                  <th className="px-4 py-3 text-center font-medium text-gray-400">İşlem</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-50">
-                {filteredMatches.map((group) => (
-                  <tr
-                    key={group.id}
-                    className="align-top transition-colors hover:bg-gray-50/50"
-                  >
-                    <td className="px-5 py-4">
-                      <div className="font-semibold text-gray-800">
-                        #{group.backendMatchId ?? group.id}
-                      </div>
-                      <div className="mt-1 text-xs text-gray-400">
-                        {algorithmLabel(group.matchType)}
-                      </div>
-                    </td>
-                    <td className="px-4 py-4">
-                      <div className="font-medium text-gray-800">
-                        {group.records[0].adSoyad || "-"}
-                      </div>
-                      <div className="mt-1 text-xs text-gray-500">
-                        {recordMeta(group.records[0]) || "-"}
-                      </div>
-                    </td>
-                    <td className="px-4 py-4">
-                      <div className="font-medium text-gray-800">
-                        {group.records[1].adSoyad || "-"}
-                      </div>
-                      <div className="mt-1 text-xs text-gray-500">
-                        {recordMeta(group.records[1]) || "-"}
-                      </div>
-                    </td>
-                    <td className="px-4 py-4">
-                      <div className="font-semibold text-gray-900">
-                        {formatScore(group.score)}
-                      </div>
-                      <div className="mt-1 text-xs text-gray-400">
-                        {group.decisionReason ||
-                          "Confidence / score alanından hesaplandı"}
-                      </div>
-                    </td>
-                    <td className="px-4 py-4">
-                      <span
-                        className={`inline-block rounded-full px-2.5 py-1 text-[11px] font-medium ${finalDecisionTone(
-                          group.backendDecision || group.finalDecision,
-                        )}`}
-                      >
-                        {finalDecisionLabel(
-                          group.backendDecision || group.finalDecision,
-                        )}
-                      </span>
-                    </td>
-                    <td className="px-4 py-4">
-                      <div className="flex flex-wrap gap-2">
+                {filtered.map((group) => {
+                  const displayVals =
+                    group.muhatap_codes && group.muhatap_codes.length > 0
+                      ? group.muhatap_codes
+                      : groupDistinctMuhatapValues(group, getRecordMuhatapNoDisplay);
+                  const line = displayVals.join(", ");
+                  const distinctNonEmpty = displayVals.length;
+                  const showConflictBadge = groupHasDistinctMuhatapConflict(group);
+                  const muhatapCellClass = filterMuhatapConflict
+                    ? "bg-amber-100/90 text-gray-800"
+                    : "";
+
+                  return (
+                    <tr key={group.group_id} className="transition-colors hover:bg-gray-50/50">
+                      <td className="px-4 py-3.5 font-medium text-gray-800">{group.group_id}</td>
+                      <td className="px-4 py-3.5 text-gray-600">{group.record_ids.length}</td>
+                      <td className="px-4 py-3.5 text-gray-600">{group.match_count}</td>
+                      <td className="px-4 py-3.5 text-gray-600">{pct(group.group_score)}</td>
+                      <td className="px-4 py-3.5 text-gray-700">
+                        {group.golden_record.clean_name || "-"}
+                      </td>
+                      <td className={`px-4 py-3.5 ${muhatapCellClass}`}>
+                        <div className="flex flex-wrap items-center gap-2">
+                          {showConflictBadge && (
+                            <span className="inline-flex items-center rounded-md bg-amber-200 px-2 py-0.5 text-[11px] font-semibold text-amber-900">
+                              ⚠ {distinctNonEmpty} farklı
+                            </span>
+                          )}
+                          <span
+                            className={
+                              showConflictBadge
+                                ? "text-gray-700"
+                                : "text-gray-400"
+                            }
+                          >
+                            {line || "—"}
+                          </span>
+                        </div>
+                      </td>
+                      <td className="px-4 py-3.5 text-center">
                         <button
                           onClick={() => setDetailGroup(group)}
-                          className="cursor-pointer rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-700 transition-colors hover:bg-gray-50"
+                          className="cursor-pointer text-xs font-medium text-red-600 hover:underline"
                         >
                           Detay
                         </button>
-                        {canTakeAction ? (
-                          <>
-                            <button
-                              onClick={() => handleApprove(group.id)}
-                              disabled={loading}
-                              className="cursor-pointer rounded-lg bg-green-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-60"
-                            >
-                              Onayla
-                            </button>
-                            <button
-                              onClick={() => handleReject(group.id)}
-                              disabled={loading}
-                              className="cursor-pointer rounded-lg border border-red-200 px-3 py-1.5 text-xs font-medium text-red-600 transition-colors hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60"
-                            >
-                              Reddet
-                            </button>
-                          </>
-                        ) : (
-                          <span className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-500">
-                            İşlem yok
-                          </span>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-                {filteredMatches.length === 0 && !loading && (
-                  <tr>
-                    <td
-                      colSpan={6}
-                      className="px-5 py-10 text-center text-sm text-gray-400"
-                    >
-                      Bu filtre için kayıt yok.
-                    </td>
-                  </tr>
-                )}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
+            {filtered.length === 0 && !loading && (
+              <div className="py-10 text-center text-sm text-gray-400">
+                Bu filtre için duplicate group bulunmuyor.
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -481,17 +559,16 @@ export default function YoneticiOnayi() {
           onClick={() => setDetailGroup(null)}
         >
           <div
-            className="max-h-[85vh] w-full max-w-4xl overflow-y-auto rounded-2xl bg-white"
+            className="flex max-h-[85vh] w-full max-w-5xl flex-col rounded-2xl bg-white"
             onClick={(event) => event.stopPropagation()}
           >
             <div className="flex items-center justify-between border-b border-gray-100 px-6 py-4">
               <div>
                 <h2 className="text-base font-bold text-gray-900">
-                  Tam Alan Karşılaştırması - Match #
-                  {detailGroup.backendMatchId ?? detailGroup.id}
+                  Duplicate Group: {detailGroup.group_id}
                 </h2>
                 <p className="mt-0.5 text-xs text-gray-400">
-                  Gerçek backend match verisi ve alan bazlı karşılaştırmalar
+                  Grup kayıtları, golden record ve çift bazlı karar geri alma
                 </p>
               </div>
               <button
@@ -502,116 +579,217 @@ export default function YoneticiOnayi() {
               </button>
             </div>
 
-            <div className="space-y-5 p-6">
-              <div className="grid grid-cols-1 gap-3 rounded-xl border border-gray-100 bg-gray-50 p-4 md:grid-cols-4">
-                <div>
-                  <p className="text-[11px] text-gray-400">Match ID</p>
-                  <p className="text-sm font-semibold text-gray-800">
-                    #{detailGroup.backendMatchId ?? detailGroup.id}
-                  </p>
+            <div className="flex-1 space-y-5 overflow-y-auto p-6">
+              <div className="rounded-xl border border-green-100 bg-green-50 p-4">
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <h3 className="text-sm font-semibold text-green-800">Golden Record</h3>
+                  <button
+                    type="button"
+                    onClick={saveGoldenRecord}
+                    disabled={
+                      savingGolden ||
+                      changedGoldenFields.length === 0 ||
+                      !entityIdForDetail
+                    }
+                    className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg bg-green-700 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-green-800 disabled:cursor-not-allowed disabled:bg-gray-300"
+                  >
+                    <i className={savingGolden ? "ri-loader-4-line animate-spin" : "ri-save-line"} />
+                    Golden Record'u Güncelle
+                  </button>
                 </div>
-                <div>
-                  <p className="text-[11px] text-gray-400">Algoritma</p>
-                  <p className="text-sm font-semibold text-gray-800">
-                    {algorithmLabel(detailGroup.matchType)}
-                  </p>
+                <div className="grid grid-cols-1 gap-3 text-xs md:grid-cols-2">
+                  {goldenFields.map(({ key, label }) => {
+                    const changed =
+                      goldenDraft[key] !== (detailGroup.golden_record[key] ?? "");
+                    const isEditing = editingGoldenField === key;
+                    return (
+                      <div
+                        key={key}
+                        className={`rounded-lg border bg-white px-3 py-2 ${
+                          changed ? "border-yellow-300" : "border-green-100"
+                        }`}
+                      >
+                        <div className="mb-1 flex items-center justify-between gap-2">
+                          <span className="font-medium text-gray-500">{label}</span>
+                          <button
+                            type="button"
+                            onClick={() => setEditingGoldenField(isEditing ? null : key)}
+                            className="flex h-6 w-6 cursor-pointer items-center justify-center rounded-md text-green-700 hover:bg-green-50"
+                            title={`${label} düzenle`}
+                          >
+                            <i className="ri-pencil-line" />
+                          </button>
+                        </div>
+                        {isEditing ? (
+                          <input
+                            value={goldenDraft[key]}
+                            onChange={(event) =>
+                              setGoldenDraft((prev) => ({
+                                ...prev,
+                                [key]: event.target.value,
+                              }))
+                            }
+                            className={`w-full rounded-md border bg-white px-2 py-1 text-xs text-gray-800 focus:border-green-500 focus:outline-none ${
+                              changed ? "border-yellow-300" : "border-gray-200"
+                            }`}
+                            autoFocus
+                          />
+                        ) : (
+                          <div className="min-h-6 break-words text-gray-800">
+                            {goldenDraft[key] || "-"}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
-                <div>
-                  <p className="text-[11px] text-gray-400">Skor</p>
-                  <p className="text-sm font-semibold text-gray-800">
-                    {formatScore(detailGroup.score)}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-[11px] text-gray-400">Kayıtlar</p>
-                  <p className="text-sm font-semibold text-gray-800">
-                    {detailGroup.records[0].adSoyad || "-"} /{" "}
-                    {detailGroup.records[1].adSoyad || "-"}
-                  </p>
+                <div className="hidden">
+                  <div>
+                    <span className="text-gray-500">Ad Soyad:</span>{" "}
+                    {detailGroup.golden_record.clean_name || "-"}
+                  </div>
+                  <div>
+                    <span className="text-gray-500">TC:</span>{" "}
+                    {detailGroup.golden_record.clean_tc || "-"}
+                  </div>
+                  <div>
+                    <span className="text-gray-500">Telefon:</span>{" "}
+                    {detailGroup.golden_record.clean_phone || "-"}
+                  </div>
+                  <div>
+                    <span className="text-gray-500">E-posta:</span>{" "}
+                    {detailGroup.golden_record.clean_email || "-"}
+                  </div>
+                  <div>
+                    <span className="text-gray-500">Şehir:</span>{" "}
+                    {detailGroup.golden_record.clean_city || "-"}
+                  </div>
+                  <div>
+                    <span className="text-gray-500">Adres:</span>{" "}
+                    {detailGroup.golden_record.clean_address || "-"}
+                  </div>
                 </div>
               </div>
 
-              <FieldComparisonsPanel
-                fieldComparisons={detailGroup.fieldComparisons}
-                overallScore={detailGroup.score}
-                finalDecision={detailGroup.finalDecision}
-                finalDecisionLabel={detailGroup.finalDecisionLabel}
-                riskFlags={detailGroup.riskFlags}
-                ruleReasons={detailGroup.ruleReasons}
-              />
+              {decisionFilter !== "pending" &&
+                (detailGroup.match_candidate_ids?.length ?? 0) > 0 && (
+                  <div className="rounded-xl border border-amber-100 bg-amber-50/80 p-4">
+                    <h3 className="mb-2 text-sm font-semibold text-amber-900">
+                      Çift kararlarını geri al
+                    </h3>
+                    <p className="mb-3 text-xs text-amber-800">
+                      Onaylanmış veya reddedilmiş eşleşmeleri tekrar inceleme kuyruğuna alır. İlgili
+                      üyelikler güvenli şekilde beklemede bırakılır.
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      {(detailGroup.match_candidate_ids ?? []).map((mid) => (
+                        <button
+                          key={mid}
+                          type="button"
+                          disabled={resettingMatchId === mid}
+                          onClick={() => handleResetMatch(mid)}
+                          className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-amber-300 bg-white px-3 py-1.5 text-xs font-medium text-amber-900 transition-colors hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          <i
+                            className={
+                              resettingMatchId === mid
+                                ? "ri-loader-4-line animate-spin"
+                                : "ri-arrow-go-back-line"
+                            }
+                          />
+                          Match #{mid} — Kararı geri al
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
 
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                {detailGroup.records.map((record, index) => (
-                  <div
-                    key={`${detailGroup.id}-${index}-${record.muhatapNo}`}
-                    className={`rounded-xl border-2 p-4 ${
-                      index === 0
-                        ? "border-gray-200"
-                        : "border-red-200 bg-red-50/20"
-                    }`}
-                  >
-                    <span
-                      className={`mb-3 inline-block rounded-full px-2 py-0.5 text-[10px] font-bold ${
-                        index === 0
-                          ? "bg-gray-100 text-gray-600"
-                          : "bg-red-100 text-red-600"
-                      }`}
-                    >
-                      Kayıt {index + 1} - {record.muhatapNo}
-                    </span>
-                    {[
-                      ["Ad Soyad", record.adSoyad],
-                      ["TC Kimlik", record.tcKimlikNo],
-                      ["Telefon", record.telefon],
-                      ["E-posta", record.email],
-                      ["Şehir", record.sehir],
-                      ["Muhatap Kodu", record.muhatapNo || "-"],
-                    ].map(([label, value]) => (
-                      <div key={label} className="mb-2">
-                        <p className="text-[10px] text-gray-400">{label}</p>
-                        <p className="break-words text-xs font-medium text-gray-800">
-                          {value}
-                        </p>
+                {detailGroup.records.map((record) => (
+                  <div key={record.record_id} className="rounded-xl border border-gray-200 p-4">
+                    <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <span className="mb-1 inline-flex rounded-md bg-gray-100 px-2 py-0.5 text-[11px] font-medium text-gray-600">
+                          Yükleme #{record.upload_id}
+                        </span>
+                        <div className="text-xs font-semibold text-gray-700">
+                          Record #{record.record_id}
+                        </div>
                       </div>
-                    ))}
+                      <div className="inline-flex overflow-hidden rounded-lg border border-gray-200 bg-white text-[11px]">
+                        {[
+                          { value: "confirmed", label: "✓ Onayla" },
+                          { value: "pending", label: "— Beklet" },
+                          { value: "excluded", label: "✗ Reddet" },
+                        ].map((option) => {
+                          const active = recordDecisions[record.record_id] === option.value;
+                          return (
+                            <button
+                              key={option.value}
+                              type="button"
+                              onClick={() =>
+                                setRecordDecision(record.record_id, option.value as RecordDecision)
+                              }
+                              className={`cursor-pointer px-2.5 py-1 font-medium transition-colors ${
+                                active
+                                  ? option.value === "confirmed"
+                                    ? "bg-green-600 text-white"
+                                    : option.value === "excluded"
+                                      ? "bg-red-600 text-white"
+                                      : "bg-gray-700 text-white"
+                                  : "text-gray-500 hover:bg-gray-50"
+                              }`}
+                            >
+                              {option.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                    <div className="space-y-1 text-xs text-gray-700">
+                      <div>
+                        <span className="text-gray-500">Yükleme:</span> #{record.upload_id}
+                      </div>
+                      <div>
+                        <span className="text-gray-500">Muhatap kodu:</span>{" "}
+                        {getRecordMuhatapNoDisplay(record) || "—"}
+                      </div>
+                      <div>
+                        <span className="text-gray-500">Ad Soyad:</span> {record.clean_name || "-"}
+                      </div>
+                      <div>
+                        <span className="text-gray-500">TC:</span> {record.clean_tc || "-"}
+                      </div>
+                      <div>
+                        <span className="text-gray-500">Telefon:</span> {record.clean_phone || "-"}
+                      </div>
+                      <div>
+                        <span className="text-gray-500">E-posta:</span> {record.clean_email || "-"}
+                      </div>
+                      <div>
+                        <span className="text-gray-500">Şehir:</span> {record.clean_city || "-"}
+                      </div>
+                      <div>
+                        <span className="text-gray-500">Adres:</span> {record.clean_address || "-"}
+                      </div>
+                    </div>
                   </div>
                 ))}
               </div>
-
-              <div>
-                <label className="mb-1.5 block text-xs font-medium text-gray-700">
-                  Karar Notu (Opsiyonel)
-                </label>
-                <textarea
-                  rows={2}
-                  placeholder="Karar gerekçenizi yazın..."
-                  className="w-full resize-none rounded-lg border border-gray-200 px-3 py-2.5 text-sm focus:border-red-400 focus:outline-none"
-                  maxLength={500}
-                  value={decisionNote}
-                  onChange={(event) => setDecisionNote(event.target.value)}
-                />
+            </div>
+            <div className="flex flex-wrap items-center justify-between gap-3 border-t border-gray-100 bg-white px-6 py-4">
+              <div className="text-sm font-medium text-gray-700">
+                {confirmedCount} kayıt onaylandı, {excludedCount} kayıt reddedildi
               </div>
-
-              {canTakeAction && (
-                <div className="flex gap-3">
-                  <button
-                    onClick={() => handleApprove(detailGroup.id)}
-                    disabled={loading}
-                    className="flex-1 cursor-pointer whitespace-nowrap rounded-lg bg-green-600 py-2.5 text-sm font-semibold text-white hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-60"
-                  >
-                    <i className="ri-checkbox-circle-line mr-1.5" />
-                    Onayla
-                  </button>
-                  <button
-                    onClick={() => handleReject(detailGroup.id)}
-                    disabled={loading}
-                    className="flex-1 cursor-pointer whitespace-nowrap rounded-lg border-2 border-red-200 py-2.5 text-sm font-semibold text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60"
-                  >
-                    <i className="ri-close-circle-line mr-1.5" />
-                    Reddet
-                  </button>
-                </div>
-              )}
+              <button
+                type="button"
+                onClick={savePartialDecisions}
+                disabled={savingPartial}
+                className="inline-flex cursor-pointer items-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                <i className={savingPartial ? "ri-loader-4-line animate-spin" : "ri-save-line"} />
+                Kaydet
+              </button>
             </div>
           </div>
         </div>

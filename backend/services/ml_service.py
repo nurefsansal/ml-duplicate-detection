@@ -13,6 +13,11 @@ from sklearn.model_selection import train_test_split
 from sqlalchemy.orm import Session
 
 from backend.models.database import MatchCandidate, ReviewAction
+from backend.services.decision_thresholds import DecisionThresholdsProb
+from backend.services.scoring_app_settings import (
+    compute_weighted_score_breakdown,
+    load_scoring_app_settings,
+)
 
 
 MODEL_PATH = Path("backend/models/model.pkl")
@@ -305,3 +310,18 @@ def predict_same_person_probability(features: dict[str, Any]) -> float:
     """
     prepared = _extract_training_features(features)
     return predict_match_probability(prepared)
+
+
+def load_ml_scoring_settings(session: Session | None) -> tuple[dict[str, float], DecisionThresholdsProb]:
+    """Ayarlar tablosundan ağırlık ve eşikleri okur (session None → varsayılanlar)."""
+    return load_scoring_app_settings(session)
+
+
+def weighted_score_breakdown_from_features(
+    features: dict[str, Any],
+    *,
+    session: Session | None = None,
+) -> dict[str, Any]:
+    """Ayarlar ağırlıklarıyla 0–100 alan kırılımı (model olasılığından bağımsız)."""
+    weights, _ = load_scoring_app_settings(session)
+    return compute_weighted_score_breakdown(features, weights)
