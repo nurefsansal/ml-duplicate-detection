@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import DashboardLayout from "../../components/feature/DashboardLayout";
 import Header from "../../components/feature/Header";
@@ -10,9 +11,10 @@ import {
   type UploadFileResponse,
   uploadFileOnly,
   healthCheck,
+  apiClient,
 } from "../../services/api";
 
-type SourceType = "excel" | "csv" | "api" | "manuel";
+type SourceType = "excel" | "csv" | "api" | "manuel" | "institution";
 
 export default function VeriYukleme() {
   const navigate = useNavigate();
@@ -24,14 +26,36 @@ export default function VeriYukleme() {
   const [statusMessage, setStatusMessage] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
   const [result, setResult] = useState<UploadFileResponse | null>(null);
+  const [connectorProfile, setConnectorProfile] = useState<any | null>(null);
+  const [connectorTables, setConnectorTables] = useState<Array<{table_schema:string;table_name:string}>>([]);
+  const [selectedConnectorTable, setSelectedConnectorTable] = useState<string | null>(null);
+  const [instLoading, setInstLoading] = useState(false);
+  const [instStatus, setInstStatus] = useState("");
+  const [instError, setInstError] = useState("");
+  const [connectorPassword, setConnectorPassword] = useState<string>("");
+  const connectorPasswordRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     let mounted = true;
     healthCheck()
       .then(() => { if (mounted) setBackendHealthy(true); })
       .catch(() => { if (mounted) setBackendHealthy(false); });
+    // load saved connector profile if any
+    try {
+      const p = localStorage.getItem("institution-db-profile");
+      if (p) setConnectorProfile(JSON.parse(p));
+    } catch (e) {
+      // ignore
+    }
     return () => { mounted = false; };
   }, []);
+
+  useEffect(() => {
+    // Eğer kullanıcı 'Kurum DB' kaynağını seçtiyse, parola alanına odaklansın
+    if (source === "institution") {
+      setTimeout(() => connectorPasswordRef.current?.focus(), 50);
+    }
+  }, [source]);
 
   const getError = (error: unknown) => {
     if (typeof error === "object" && error && "response" in error) {
@@ -176,6 +200,90 @@ export default function VeriYukleme() {
                 seçeneğini kullanarak verilerinizi dışa aktarın ve yükleyin.
               </p>
             </div>
+          </div>
+        )}
+
+        {/* Institution DB source */}
+        {source === "institution" && (
+          <div className="bg-white rounded-xl p-5 border border-gray-100">
+            <h3 className="text-sm font-semibold text-gray-900 mb-3">Kurum Veritabanından İçeri Aktar</h3>
+            <p className="text-xs text-gray-400 mb-3">Ayarlar sayfasında kaydettiğiniz bağlantıyı kullanarak kurum veritabanındaki bir tabloyu içe aktarabilirsiniz.</p>
+            <div className="mb-3">
+              <p className="text-xs text-gray-600">Kayıtlı Profil:</p>
+              <div className="text-sm text-gray-800 mt-1">{connectorProfile ? connectorProfile.label || `${connectorProfile.host}:${connectorProfile.port}` : "Profil bulunamadı. Ayarlar > Kurum DB bölümünden profil oluşturun."}</div>
+            </div>
+            <div className="mb-3">
+              <label className="block text-xs font-medium text-gray-700 mb-1">Parola (geçici, tarayıcıda kaydedilmez)</label>
+              <input
+                type="password"
+                ref={connectorPasswordRef}
+                value={connectorPassword}
+                onChange={(e) => setConnectorPassword(e.target.value)}
+                placeholder="Kurum DB parolası"
+                className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-red-400"
+              />
+            </div>
+            <div className="flex gap-2 mb-3">
+              <button
+                onClick={async () => {
+                  if (!connectorProfile) { setInstError("Önce Ayarlar'da profil kaydedin"); return; }
+                  const connectionPayload = { ...connectorProfile, password: connectorProfile.password || connectorPassword };
+                  if (!connectionPayload.password) { setInstError("Parola eksik. Parolayı girin veya Ayarlar'da kaydedin."); return; }
+                  setInstLoading(true); setInstError(""); setInstStatus("");
+                  try {
+                    const resp = await apiClient.post('/api/v1/connector/tables', connectionPayload);
+                    setConnectorTables(resp.data.tables || []);
+                    if (resp.data.tables?.length) setSelectedConnectorTable(`${resp.data.tables[0].table_schema}.${resp.data.tables[0].table_name}`);
+                    setInstStatus(`Tablolar yüklendi: ${resp.data.tables.length}`);
+                  } catch (e) {
+                    setInstError(e instanceof Error ? e.message : String(e));
+                  } finally { setInstLoading(false); }
+                }}
+                className="px-4 py-2 rounded-lg bg-gray-900 text-white text-sm font-medium"
+              >
+                Tabloları Listele
+              </button>
+              <button
+                onClick={async () => {
+                  if (!connectorProfile) { setInstError("Önce Ayarlar'da profil kaydedin"); return; }
+                  const connectionPayload = { ...connectorProfile, password: connectorProfile.password || connectorPassword };
+                  if (!connectionPayload.password) { setInstError("Parola eksik. Parolayı girin veya Ayarlar'da kaydedin."); return; }
+                  if (!selectedConnectorTable) { setInstError("Bir tablo seçin"); return; }
+                  setInstLoading(true); setInstError(""); setInstStatus("");
+                  try {
+                    const resp = await apiClient.post('/api/v1/uploads/from-institution-db', { connection: connectionPayload, table: selectedConnectorTable });
+                    // mimic upload response
+                    setResult({ upload_id: resp.data.upload_id, total_records: resp.data.total_records, source_columns: [], source_type: 'institution', file_name: resp.data.source } as any);
+                    setStatusMessage(`İçe aktarma tamamlandı — ${resp.data.total_records} kayıt (Upload ID: ${resp.data.upload_id})`);
+                  } catch (e) {
+                    setInstError(e instanceof Error ? e.message : String(e));
+                  } finally { setInstLoading(false); }
+                }}
+                className="px-4 py-2 rounded-lg bg-red-600 text-white text-sm font-medium"
+              >
+                Kurumdan İçe Aktar
+              </button>
+            </div>
+
+            {connectorTables.length > 0 && (
+              <div className="mb-3">
+                <label className="block text-xs text-gray-600 mb-1">Tablo Seçimi</label>
+                <select value={selectedConnectorTable || ""} onChange={(e) => setSelectedConnectorTable(e.target.value)} className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm bg-white">
+                  <option value="">Tablo seç</option>
+                  {connectorTables.map((t) => (
+                    <option key={`${t.table_schema}.${t.table_name}`} value={`${t.table_schema}.${t.table_name}`}>
+                      {`${t.table_schema}.${t.table_name}`}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            {(instStatus || instError) && (
+              <div className={`mt-2 rounded-lg px-4 py-3 text-sm ${instError ? "bg-red-50 text-red-700 border border-red-100" : "bg-green-50 text-green-700 border border-green-100"}`}>
+                {instError || instStatus}
+              </div>
+            )}
           </div>
         )}
 

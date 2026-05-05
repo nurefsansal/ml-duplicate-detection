@@ -1,6 +1,6 @@
 interface SourceSelectorProps {
   selected: string;
-  onChange: (source: "excel" | "csv" | "api" | "manuel") => void;
+  onChange: (source: "excel" | "csv" | "api" | "manuel" | "institution") => void;
 }
 
 const sources = [
@@ -24,6 +24,13 @@ const sources = [
     label: "API",
     desc: "REST endpoint",
     color: "purple",
+  },
+  {
+    id: "institution",
+    icon: "ri-database-2-line",
+    label: "Kurum DB",
+    desc: "Ayarlar > Kurum DB",
+    color: "teal",
   },
   {
     id: "manuel",
@@ -54,6 +61,11 @@ const colorClasses = {
     border: "border-orange-200 bg-orange-50",
     icon: "text-orange-600 bg-orange-100",
     text: "text-orange-700",
+  },
+  teal: {
+    border: "border-teal-200 bg-teal-50",
+    icon: "text-teal-600 bg-teal-100",
+    text: "text-teal-700",
   },
 };
 

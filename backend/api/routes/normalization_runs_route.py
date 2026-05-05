@@ -171,6 +171,37 @@ TARGET_TO_COLUMN = {
 }
 
 
+def _load_saved_mappings(
+    db: Session,
+    *,
+    upload_id: int,
+    mapping_id: Optional[int],
+) -> list[ColumnMapping]:
+    mappings = (
+        db.query(ColumnMapping)
+        .filter(ColumnMapping.upload_id == upload_id)
+        .order_by(ColumnMapping.id.asc())
+        .all()
+    )
+    if mapping_id is not None:
+        selected = next((mapping for mapping in mappings if mapping.id == mapping_id), None)
+        if selected is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Column mapping {mapping_id} upload {upload_id} için bulunamadı",
+            )
+    return mappings
+
+
+def _build_rename_map_from_column_mappings(mappings: list[ColumnMapping]) -> dict[str, str]:
+    rename_map: dict[str, str] = {}
+    for mapping in mappings:
+        canonical = TARGET_TO_COLUMN.get(mapping.target_field_name)
+        if canonical:
+            rename_map[mapping.source_column_name] = canonical
+    return rename_map
+
+
 @router.post("/normalization-runs")
 def create_normalization_run(
     payload: NormalizationRunRequest,
@@ -225,10 +256,31 @@ def create_normalization_run(
         )
         db.flush()
 
+    saved_mappings: list[ColumnMapping] = []
+    resolved_column_mappings: Optional[list[ColumnMappingItem]] = payload.column_mappings
+    if resolved_column_mappings is None:
+        saved_mappings = _load_saved_mappings(
+            db,
+            upload_id=payload.upload_id,
+            mapping_id=payload.mapping_id,
+        )
+        if saved_mappings:
+            resolved_column_mappings = [
+                ColumnMappingItem(
+                    source_column=mapping.source_column_name,
+                    target_field=mapping.target_field_name,
+                )
+                for mapping in saved_mappings
+            ]
+
     try:
         normalization_run = NormalizationRun(
             upload_id=payload.upload_id,
-            mapping_id=payload.mapping_id,
+            mapping_id=payload.mapping_id
+            if payload.mapping_id is not None
+            else (
+                saved_mappings[0].id if not payload.column_mappings and saved_mappings else None
+            ),
             normalization_profile=DEFAULT_PROFILE,
             total_processed=0,
             success_count=0,
@@ -272,7 +324,7 @@ def create_normalization_run(
             df_original = pd.DataFrame(rows)
             df_processing = _apply_column_mappings(
                 df_original,
-                payload.column_mappings,
+                resolved_column_mappings,
             )
 
             try:

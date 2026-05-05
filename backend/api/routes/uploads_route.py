@@ -14,11 +14,15 @@ from typing import Any
 
 import pandas as pd
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from pydantic import BaseModel, Field
+from sqlalchemy import create_engine
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from backend.models.database import ColumnMapping, NormalizationRun, NormalizedRecord, RawRecord, Upload
 from backend.services.normalization_service import infer_target_field_name
+from backend.api.routes.hanna_connector import ConnectorConnectionInput
+from backend.services.database_connector_service import DatabaseConnectorService
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
@@ -362,3 +366,77 @@ def list_uploads(
         raise HTTPException(
             status_code=500, detail=f"Error listing uploads: {exc}"
         ) from exc
+
+
+class FromInstitutionUploadRequest(BaseModel):
+    connection: ConnectorConnectionInput
+    table: str = Field(..., min_length=1)
+    limit: int | None = None
+
+
+@router.post("/uploads/from-institution-db")
+def upload_from_institution_db(payload: FromInstitutionUploadRequest, db: Session = Depends(get_db)):
+    """Kurum veritabanından seçili tabloyu alıp uploads + raw_records oluşturur."""
+    try:
+        conn = payload.connection
+        # Determine schema and table name
+        if "." in payload.table:
+            schema, table_name = payload.table.split(".", 1)
+        else:
+            schema = conn.db_schema or "public"
+            table_name = payload.table
+
+        # Build connector service with requested search_path
+        # ensure db_schema is set so preview/selects use correct search_path
+        conn.db_schema = schema
+        service = DatabaseConnectorService.from_details(conn.to_details())
+
+        # Build select SQL (apply limit if provided)
+        limit_clause = f" LIMIT {int(payload.limit)}" if payload.limit else ""
+        sql = f'SELECT * FROM "{table_name}"{limit_clause}'
+
+        rows = service.fetch_rows(sql)
+
+        if not rows:
+            raise HTTPException(status_code=400, detail="Seçili tablodan veri alınamadı veya tablo boş.")
+
+        # Create upload record
+        upload = Upload(
+            source_type="institution_db",
+            source_name=f"{conn.label}:{schema}.{table_name}",
+            file_name=f"{schema}.{table_name}",
+            file_size_bytes=0,
+            total_records=len(rows),
+            status="uploaded",
+            processing_stage="raw",
+        )
+        db.add(upload)
+        db.flush()
+
+        # Insert raw records in chunks
+        BATCH = 2000
+        batch = []
+        for r in rows:
+            batch.append(r)
+            if len(batch) >= BATCH:
+                _insert_raw_batch(db, upload_id=upload.id, rows=batch)
+                db.flush()
+                batch = []
+        if batch:
+            _insert_raw_batch(db, upload_id=upload.id, rows=batch)
+
+        db.commit()
+        db.refresh(upload)
+        return {
+            "success": True,
+            "upload_id": upload.id,
+            "source": upload.source_name,
+            "total_records": upload.total_records,
+        }
+
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Institution import failed: {exc}") from exc

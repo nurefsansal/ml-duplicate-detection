@@ -133,6 +133,54 @@ export type UploadColumnsResponse = {
   suggested_mappings: Record<string, string>;
 };
 
+// ─── Connector types ──────────────────────────────────────────────────────────
+
+export type ConnectorConnectionInput = {
+  host: string;
+  port: number;
+  database: string;
+  username: string;
+  password: string;
+  db_schema?: string | null;
+  sslmode?: string | null;
+  label?: string;
+};
+
+export type ConnectorHealthResponse = {
+  success: boolean;
+  connection: {
+    label: string;
+    driver: string;
+    host: string | null;
+    port: number | null;
+    database: string | null;
+    schema?: string | null;
+  };
+  health: {
+    ok: boolean;
+    label: string;
+    driver: string;
+    host: string | null;
+    port: number | null;
+    database: string | null;
+  };
+};
+
+export type ConnectorTablesResponse = {
+  success: boolean;
+  tables: Array<{
+    table_schema: string;
+    table_name: string;
+  }>;
+};
+
+export type ConnectorPreviewResponse = {
+  success: boolean;
+  table_name: string;
+  limit: number;
+  rows: Array<Record<string, unknown>>;
+};
+
 // ─── Column mapping types ──────────────────────────────────────────────────────
 
 export type ColumnMappingItem = {
@@ -457,7 +505,9 @@ export async function normalizeRecords(records: NormalizedRecord[]) {
 }
 
 /** @deprecated Use uploadFileOnly + startNormalizationRun instead. */
-export async function normalizeFromFile(file: File): Promise<NormalizeResponse> {
+export async function normalizeFromFile(
+  file: File,
+): Promise<NormalizeResponse> {
   const formData = new FormData();
   formData.append("file", file);
   const response = await apiClient.post("/api/v1/normalize-file", formData, {
@@ -494,14 +544,18 @@ export async function listUploads(
 
 // ─── Upload columns ────────────────────────────────────────────────────────────
 
-export async function getUploadColumns(uploadId: number): Promise<UploadColumnsResponse> {
+export async function getUploadColumns(
+  uploadId: number,
+): Promise<UploadColumnsResponse> {
   const response = await apiClient.get(`/api/v1/uploads/${uploadId}/columns`);
   return response.data;
 }
 
 // ─── Column mappings ───────────────────────────────────────────────────────────
 
-export async function getColumnMappings(uploadId: number): Promise<ColumnMappingsListResponse> {
+export async function getColumnMappings(
+  uploadId: number,
+): Promise<ColumnMappingsListResponse> {
   const response = await apiClient.get("/api/v1/column-mappings", {
     params: { upload_id: uploadId },
   });
@@ -617,7 +671,8 @@ export async function detectDuplicatesFromFileWithOptions(
   if (options?.sessionId) formData.append("sessionId", options.sessionId);
   if (options?.algorithms)
     formData.append("algorithms", JSON.stringify(options.algorithms));
-  if (options?.threshold) formData.append("threshold", String(options.threshold));
+  if (options?.threshold)
+    formData.append("threshold", String(options.threshold));
   const response = await apiClient.post("/api/v1/detect-file", formData, {
     headers: { "Content-Type": "multipart/form-data" },
   });
@@ -677,7 +732,9 @@ export async function getReportDataQuality(params?: {
   date_from?: string;
   date_to?: string;
 }): Promise<ReportDataQuality> {
-  const response = await apiClient.get("/api/v1/reports/data-quality", { params });
+  const response = await apiClient.get("/api/v1/reports/data-quality", {
+    params,
+  });
   return response.data;
 }
 
@@ -695,7 +752,9 @@ export async function getReportReviewSummary(params?: {
   date_from?: string;
   date_to?: string;
 }): Promise<ReportReviewSummary> {
-  const response = await apiClient.get("/api/v1/reports/review-summary", { params });
+  const response = await apiClient.get("/api/v1/reports/review-summary", {
+    params,
+  });
   return response.data;
 }
 
@@ -704,7 +763,9 @@ export async function getReportUploadHistory(params?: {
   date_to?: string;
   limit?: number;
 }): Promise<ReportUploadHistory> {
-  const response = await apiClient.get("/api/v1/reports/upload-history", { params });
+  const response = await apiClient.get("/api/v1/reports/upload-history", {
+    params,
+  });
   return response.data;
 }
 
