@@ -19,6 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from backend.api.routes.detect import router as detect_router
 from backend.api.routes.admin import router as admin_router
 from backend.api.routes.health import router as health_router
+from backend.api.routes.hanna_connector import router as hanna_connector_router
 from backend.api.routes.normalize import router as normalize_router
 from backend.api.routes.reports import router as reports_router
 from backend.api.routes.normalized_records_route import router as normalized_records_router
@@ -59,6 +60,7 @@ app.include_router(normalized_records_router, prefix="/api/v1")
 app.include_router(uploads_router, prefix="/api/v1")
 app.include_router(normalization_runs_router, prefix="/api/v1")
 app.include_router(column_mappings_router, prefix="/api/v1")
+app.include_router(hanna_connector_router, prefix="/api/v1")
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(ml_router, prefix="/api/v1")
 app.include_router(jobs_router, prefix="/api/v1")
