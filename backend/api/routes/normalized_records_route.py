@@ -38,6 +38,7 @@ router = APIRouter()
 
 _EXPORT_FIELDS = [
     "source",
+    "source_label",
     "id",
     "entity_id",
     "record_id",
@@ -51,6 +52,7 @@ _EXPORT_FIELDS = [
     "clean_tc",
     "clean_city",
     "clean_address",
+    "clean_muhatap_no",
     "is_valid",
     "blocking_key",
     "created_at",
@@ -60,6 +62,7 @@ _EXPORT_FIELDS = [
 def _serialize(record: NormalizedRecord) -> dict:
     return {
         "source": "normalized_record",
+        "source_label": "Tekil Temiz Kayıt",
         "id": record.id,
         "entity_id": None,
         "record_id": record.id,
@@ -105,9 +108,15 @@ def _entity_row(entity: Entity, confirmed_memberships: list[EntityMembership]) -
     clean_phone = canonical.get("clean_phone") or entity.canonical_phone or ""
     clean_tc = canonical.get("clean_tc") or entity.canonical_tc or ""
     clean_city = canonical.get("clean_city") or entity.canonical_city or ""
+    clean_muhatap = (
+        canonical.get("clean_muhatap_no")
+        or getattr(entity, "canonical_muhatap_no", None)
+        or ""
+    )
 
     return {
         "source": "entity",
+        "source_label": "Golden Record",
         "id": entity.id,
         "entity_id": entity.id,
         "record_id": record_id,
@@ -121,7 +130,7 @@ def _entity_row(entity: Entity, confirmed_memberships: list[EntityMembership]) -
         "clean_tc": clean_tc,
         "clean_city": clean_city,
         "clean_address": canonical.get("clean_address") or "",
-        "clean_muhatap_no": canonical.get("clean_muhatap_no") or "",
+        "clean_muhatap_no": clean_muhatap or "",
         "is_valid": bool(first_record.is_valid) if first_record is not None else True,
         "blocking_key": first_record.blocking_key if first_record is not None else "",
         "created_at": entity.updated_at.isoformat()

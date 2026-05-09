@@ -406,6 +406,15 @@ export default function Ayarlar() {
                   Sıfırla
                 </button>
               </div>
+              <div className="mb-4 rounded-lg border border-blue-100 bg-blue-50/80 p-3 text-xs text-blue-900">
+                <p className="font-medium text-blue-950">Yeni mükerrer tespit çalıştırmaları</p>
+                <p className="mt-1 text-blue-900/90">
+                  Buradaki olasılık eşikleri ve ağırlıklar, kaydettiğinizde veritabanına yazılır ve{" "}
+                  <strong>sonraki tespit (detect) işlerinde</strong> Splink + kural motoru tarafından
+                  kullanılır. Daha önce oluşturulmuş <code>match_candidates</code> satırlarını geriye
+                  dönük değiştirmez; gerekirse tespiti aynı yükleme için yeniden çalıştırın.
+                </p>
+              </div>
               <div className="space-y-5">
                 {[
                   {

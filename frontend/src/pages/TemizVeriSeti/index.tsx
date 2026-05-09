@@ -22,17 +22,20 @@ function Badge({ ok }: { ok: boolean }) {
   );
 }
 
-function SourceBadge({ source }: { source?: string }) {
+function SourceBadge({ source, label }: { source?: string; label?: string }) {
+  const display =
+    label ||
+    (source === "entity" ? "Golden Record" : "Tekil Temiz Kayıt");
   if (source === "entity") {
     return (
       <span className="inline-flex items-center gap-1 rounded-full bg-blue-50 px-2 py-0.5 text-[11px] font-medium text-blue-700">
-        <i className="ri-links-line text-[10px]" /> Entity
+        <i className="ri-links-line text-[10px]" /> {display}
       </span>
     );
   }
   return (
     <span className="inline-flex items-center gap-1 rounded-full bg-gray-50 px-2 py-0.5 text-[11px] font-medium text-gray-600">
-      <i className="ri-file-list-3-line text-[10px]" /> Tekil
+      <i className="ri-file-list-3-line text-[10px]" /> {display}
     </span>
   );
 }
@@ -117,12 +120,16 @@ export default function TemizVeriSeti() {
     upload_id: selectedUploadId !== "" ? selectedUploadId : undefined,
     format: "xlsx",
   });
+  const exportUrlJson = buildNormalizedRecordsExportUrl({
+    upload_id: selectedUploadId !== "" ? selectedUploadId : undefined,
+    format: "json",
+  });
 
   return (
     <DashboardLayout>
       <Header
         title="Temiz Veri Seti"
-        subtitle="Normalize edilmiş kayıtları inceleyin, filtreleyin ve dışa aktarın"
+        subtitle="Birleştirilmiş golden record + tekil temiz kayıtlar — operasyonel çıktı"
         actions={
           <div className="flex items-center gap-3">
             <a
@@ -141,6 +148,14 @@ export default function TemizVeriSeti() {
             >
               <i className="ri-file-excel-2-line"></i> XLSX
             </a>
+            <a
+              href={exportUrlJson}
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-center gap-2 border border-gray-200 text-gray-700 text-sm font-medium px-4 py-2 rounded-lg hover:bg-gray-50 transition-colors whitespace-nowrap"
+            >
+              <i className="ri-braces-line"></i> JSON
+            </a>
             <button
               onClick={() => navigate("/mukerrer-tespit")}
               className="flex items-center gap-2 bg-red-600 text-white text-sm font-medium px-5 py-2 rounded-lg hover:bg-red-700 cursor-pointer transition-colors whitespace-nowrap"
@@ -152,6 +167,15 @@ export default function TemizVeriSeti() {
       />
 
       <div className="flex-1 overflow-y-auto p-6 space-y-5">
+        <div className="rounded-xl border border-green-100 bg-green-50/80 p-4 text-sm text-green-900">
+          <p className="font-medium">Son kullanıma hazır veri</p>
+          <p className="mt-1 text-xs text-green-800">
+            Bu tablo yönetici onayı sonrası oluşan <strong>Golden Record</strong> satırlarını ve
+            mükerrer olmayan <strong>Tekil Temiz Kayıt</strong> satırlarını birlikte listeler. Dışa
+            aktarılan dosyalar aynı kolonları içerir (<strong>clean_muhatap_no</strong>,{" "}
+            <strong>source_label</strong> dahil).
+          </p>
+        </div>
         {/* Stat cards */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <div className="bg-white rounded-xl p-4 border border-gray-100">
@@ -285,7 +309,7 @@ export default function TemizVeriSeti() {
                   <th className="px-4 py-3 text-left font-medium text-gray-400">Şehir</th>
                   <th className="px-4 py-3 text-left font-medium text-gray-400">Muhatap No</th>
                   <th className="px-4 py-3 text-left font-medium text-gray-400">Upload</th>
-                  <th className="px-4 py-3 text-left font-medium text-gray-400">Kaynak</th>
+                  <th className="px-4 py-3 text-left font-medium text-gray-400">Kaynak türü</th>
                   <th className="px-4 py-3 text-left font-medium text-gray-400">Durum</th>
                 </tr>
               </thead>
@@ -317,7 +341,9 @@ export default function TemizVeriSeti() {
                       <td className="px-4 py-3 text-gray-600">{r.clean_city || "-"}</td>
                       <td className="px-4 py-3 text-gray-600 font-mono">{r.clean_muhatap_no || "-"}</td>
                       <td className="px-4 py-3 text-gray-400">#{r.upload_id}</td>
-                      <td className="px-4 py-3"><SourceBadge source={r.source} /></td>
+                      <td className="px-4 py-3">
+                        <SourceBadge source={r.source} label={r.source_label} />
+                      </td>
                       <td className="px-4 py-3"><Badge ok={r.is_valid} /></td>
                     </tr>
                   ))

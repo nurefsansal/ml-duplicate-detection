@@ -60,6 +60,11 @@ export type DetectDuplicatePair = {
   reason?: string;
   finalDecision: string;
   decisionSource: string;
+  final_score?: number;
+  score_source?: string;
+  score_breakdown?: Record<string, unknown>;
+  applied_thresholds?: Record<string, number>;
+  safety_overrides?: Array<Record<string, unknown>>;
 };
 
 export type DetectResponse = {
@@ -226,6 +231,7 @@ export type NormalizationRunResponse = {
 
 export type NormalizedRecordDb = {
   source?: "entity" | "normalized_record";
+  source_label?: string;
   id: number;
   entity_id?: number | null;
   record_id?: number | null;
@@ -348,11 +354,13 @@ export type AdminPendingMatch = {
   donor1_phone?: string | null;
   donor1_city?: string | null;
   donor1_tc?: string | null;
+  donor1_muhatap_no?: string | null;
   donor2_name: string;
   donor2_email?: string | null;
   donor2_phone?: string | null;
   donor2_city?: string | null;
   donor2_tc?: string | null;
+  donor2_muhatap_no?: string | null;
   ml_score: number;
   confidence?: number | null;
   decision_reason?: string | null;
@@ -365,6 +373,11 @@ export type AdminPendingMatch = {
   splinkMatchProbability?: number | null;
   splinkMatchWeight?: number | null;
   created_at?: string | null;
+  final_score?: number;
+  score_source?: string;
+  score_breakdown?: Record<string, unknown>;
+  applied_thresholds?: Record<string, number>;
+  safety_overrides?: Array<Record<string, unknown>>;
 };
 
 export type AdminPendingMatchesResponse = {
@@ -396,6 +409,7 @@ export type DuplicateGroup = {
   group_id: string;
   entity_id?: number | null;
   record_ids: number[];
+  match_candidate_ids?: number[];
   pair_count?: number;
   avg_score?: number;
   max_score?: number;
@@ -939,6 +953,19 @@ export async function approvePendingMatch(payload: {
   if (payload.approvedBy) body.approved_by = payload.approvedBy;
   if (payload.canonicalName) body.canonical_name = payload.canonicalName;
   const response = await apiClient.post("/api/v1/admin/approve-match", body);
+  return response.data;
+}
+
+export async function resetMatchDecision(payload: {
+  matchId: number;
+  reason?: string;
+}): Promise<{ success: boolean; match_id: number; status: string; reset_by?: string }> {
+  const body: Record<string, unknown> = {};
+  if (payload.reason) body.reason = payload.reason;
+  const response = await apiClient.post(
+    `/api/v1/admin/matches/${payload.matchId}/reset`,
+    body,
+  );
   return response.data;
 }
 

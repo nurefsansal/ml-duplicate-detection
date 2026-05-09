@@ -27,7 +27,12 @@ from backend.services.normalization_service import (
     phonetic_name_key,
     to_dataframe,
 )
-from backend.services.resolution_service import resolve_match_decision
+from backend.services.resolution_service import resolve_match_decision_with_trace
+from backend.services.decision_thresholds import DecisionThresholdsProb
+from backend.services.scoring_app_settings import (
+    compute_weighted_score_breakdown,
+    load_scoring_app_settings,
+)
 from backend.services.database_service import (
     MatchService,
     NormalizedDonorService,
@@ -589,13 +594,32 @@ def _build_rule_reasons(
     return reasons
 
 
-def _build_legacy_payload(df_clean: pd.DataFrame, left_idx: int, right_idx: int) -> dict:
+def _build_legacy_payload(
+    df_clean: pd.DataFrame,
+    left_idx: int,
+    right_idx: int,
+    *,
+    scoring_weights: dict[str, float] | None = None,
+    decision_thresholds: DecisionThresholdsProb | None = None,
+) -> dict:
     left_record = df_clean.loc[left_idx].to_dict()
     right_record = df_clean.loc[right_idx].to_dict()
 
+    sw = scoring_weights
+    dt = decision_thresholds
+    if sw is None or dt is None:
+        default_w, default_t = load_scoring_app_settings(None)
+        sw = sw or default_w
+        dt = dt or default_t
+
     features = build_pair_features(left_record, right_record)
     ml_probability = predict_match_probability(features)
-    final_decision = resolve_match_decision(ml_probability, features)
+    final_decision, safety_overrides = resolve_match_decision_with_trace(
+        ml_probability,
+        features,
+        thresholds=dt,
+    )
+    score_breakdown = compute_weighted_score_breakdown(features, sw)
     if final_decision == "rejected" and features.get("tc_conflict", 0) and ml_probability >= 0.80:
         decision_reason = (
             "Benzerlik skoru yuksek ancak TC Kimlik No cakismasi nedeniyle otomatik birlestirme engellendi."
@@ -641,6 +665,11 @@ def _build_legacy_payload(df_clean: pd.DataFrame, left_idx: int, right_idx: int)
         "reason": decision_reason,
         "finalDecision": final_decision,
         "decisionSource": "fallback_legacy",
+        "final_score": score_breakdown["general_weighted_percent"],
+        "score_source": "fallback_legacy",
+        "score_breakdown": score_breakdown,
+        "applied_thresholds": dt.as_percent_dict(),
+        "safety_overrides": safety_overrides,
     }
 
 
@@ -655,7 +684,13 @@ def _legacy_rules_matched(features: dict) -> int:
     )
 
 
-def _legacy_detection(df_clean: pd.DataFrame, min_rules_to_match: int) -> DetectionResults:
+def _legacy_detection(
+    df_clean: pd.DataFrame,
+    min_rules_to_match: int,
+    *,
+    scoring_weights: dict[str, float] | None = None,
+    decision_thresholds: DecisionThresholdsProb | None = None,
+) -> DetectionResults:
     candidate_pairs, candidate_meta = generate_candidate_pairs(
         df_clean,
         return_metadata=True,
@@ -663,7 +698,13 @@ def _legacy_detection(df_clean: pd.DataFrame, min_rules_to_match: int) -> Detect
     duplicates: list[dict] = []
 
     for left_idx, right_idx in candidate_pairs:
-        payload = _build_legacy_payload(df_clean, int(left_idx), int(right_idx))
+        payload = _build_legacy_payload(
+            df_clean,
+            int(left_idx),
+            int(right_idx),
+            scoring_weights=scoring_weights,
+            decision_thresholds=decision_thresholds,
+        )
         rules_matched = _legacy_rules_matched(payload["features"])
 
         if rules_matched >= min_rules_to_match or float(payload["ml_probability"]) >= 0.30:
