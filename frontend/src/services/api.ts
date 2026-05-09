@@ -18,6 +18,23 @@ apiClient.interceptors.request.use((config) => {
   return config;
 });
 
+/** Onay/red etiketli eşleşmeler + canonical ML özellikleri (RF şeması ile uyumlu). */
+export async function downloadMlGroundTruthCsv(): Promise<void> {
+  const response = await apiClient.get("/api/v1/ml/ground-truth.csv", {
+    responseType: "blob",
+  });
+  const blob =
+    response.data instanceof Blob
+      ? response.data
+      : new Blob([response.data as BlobPart], { type: "text/csv;charset=utf-8" });
+  const url = window.URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "match_ground_truth.csv";
+  a.click();
+  window.URL.revokeObjectURL(url);
+}
+
 // ─── Shared types ─────────────────────────────────────────────────────────────
 
 export type NormalizedRecord = {
@@ -69,6 +86,7 @@ export type DetectDuplicatePair = {
 
 export type DetectResponse = {
   sessionId: string;
+  jobId?: number | null;
   uploadId?: number | null;
   normalizationRunId?: number | null;
   detectionRunId?: number | null;
@@ -124,6 +142,7 @@ export type UploadListResponse = {
 export type UploadFileResponse = {
   success: boolean;
   upload_id: number | null;
+  job_id?: number | null;
   file_name: string;
   source_type: string;
   total_records: number;
@@ -131,11 +150,59 @@ export type UploadFileResponse = {
   suggested_mappings: Record<string, string>;
 };
 
+export type JobStatusResponse = {
+  success: boolean;
+  job: {
+    id: number;
+    type: string;
+    status: string;
+    progress: number;
+    total_rows: number;
+    processed_rows: number;
+    error_message: string | null;
+    created_at: string | null;
+    updated_at: string | null;
+    pipeline?: {
+      run_id: number;
+      pipeline_type: string;
+      status: string;
+      request_id?: string | null;
+      upload_id?: number | null;
+      normalization_run_id?: number | null;
+      detection_run_id?: number | null;
+      warning_count: number;
+      error_count: number;
+      last_stage?: string | null;
+      last_event_type?: string | null;
+      last_message?: string | null;
+      last_event_at?: string | null;
+    } | null;
+  };
+};
+
 export type UploadColumnsResponse = {
   success: boolean;
   upload_id: number;
   source_columns: string[];
   suggested_mappings: Record<string, string>;
+};
+
+export type RawRecordItem = {
+  id: number;
+  upload_id: number;
+  row_index: number | null;
+  raw_payload: Record<string, unknown>;
+  created_at?: string | null;
+};
+
+export type RawRecordsListResponse = {
+  success: boolean;
+  upload_id: number;
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+  records: RawRecordItem[];
 };
 
 // ─── Connector types ──────────────────────────────────────────────────────────
@@ -220,6 +287,7 @@ export type ColumnMappingsListResponse = {
 
 export type NormalizationRunResponse = {
   success: boolean;
+  job_id?: number | null;
   upload_id: number;
   normalization_run_id: number;
   total_processed: number;
@@ -384,6 +452,10 @@ export type AdminPendingMatchesResponse = {
   success: boolean;
   decision?: "pending" | "approved" | "rejected";
   count: number;
+  total?: number;
+  page?: number;
+  page_size?: number;
+  total_pages?: number;
   matches: AdminPendingMatch[];
 };
 
@@ -434,6 +506,10 @@ export type DuplicateGroupsResponse = {
   success: boolean;
   decision?: "pending" | "approved" | "rejected";
   count: number;
+  total?: number;
+  page?: number;
+  page_size?: number;
+  total_pages?: number;
   groups: DuplicateGroup[];
 };
 
@@ -541,6 +617,11 @@ export async function uploadFileOnly(file: File): Promise<UploadFileResponse> {
   return response.data;
 }
 
+export async function getJobStatus(jobId: number): Promise<JobStatusResponse> {
+  const response = await apiClient.get(`/api/v1/jobs/${jobId}`);
+  return response.data;
+}
+
 // ─── Upload list ───────────────────────────────────────────────────────────────
 
 export async function listUploads(
@@ -562,6 +643,22 @@ export async function getUploadColumns(
   uploadId: number,
 ): Promise<UploadColumnsResponse> {
   const response = await apiClient.get(`/api/v1/uploads/${uploadId}/columns`);
+  return response.data;
+}
+
+// ─── Raw records ────────────────────────────────────────────────────────────────
+
+export async function getRawRecords(params: {
+  upload_id: number;
+  page?: number;
+  page_size?: number;
+}): Promise<RawRecordsListResponse> {
+  const response = await apiClient.get(
+    `/api/v1/uploads/${params.upload_id}/raw-records`,
+    {
+      params: { page: params.page, page_size: params.page_size },
+    },
+  );
   return response.data;
 }
 
@@ -859,12 +956,16 @@ export async function downloadGoldenRecordsCsv(options?: {
 export async function getPendingMatches(options?: {
   uploadId?: number;
   limit?: number;
+  page?: number;
+  pageSize?: number;
 }): Promise<AdminPendingMatchesResponse> {
   const response = await apiClient.get("/api/v1/matches", {
     params: {
       decision: "pending",
       upload_id: options?.uploadId,
       limit: options?.limit ?? 50,
+      page: options?.page,
+      page_size: options?.pageSize,
     },
   });
   return response.data;
@@ -874,12 +975,16 @@ export async function getMatches(options?: {
   decision?: "pending" | "approved" | "rejected";
   uploadId?: number;
   limit?: number;
+  page?: number;
+  pageSize?: number;
 }): Promise<AdminPendingMatchesResponse> {
   const response = await apiClient.get("/api/v1/matches", {
     params: {
       decision: options?.decision ?? "pending",
       upload_id: options?.uploadId,
       limit: options?.limit ?? 100,
+      page: options?.page,
+      page_size: options?.pageSize,
     },
   });
   return response.data;
@@ -889,6 +994,8 @@ export async function getDuplicateGroups(options?: {
   decision?: "pending" | "approved" | "rejected";
   uploadId?: number;
   limit?: number;
+  page?: number;
+  pageSize?: number;
   differentMuhatapCode?: boolean;
 }): Promise<DuplicateGroupsResponse> {
   const response = await apiClient.get("/api/v1/duplicate-groups", {
@@ -896,6 +1003,8 @@ export async function getDuplicateGroups(options?: {
       decision: options?.decision ?? "approved",
       upload_id: options?.uploadId,
       limit: options?.limit ?? 5000,
+      page: options?.page,
+      page_size: options?.pageSize,
       different_muhatap_code: options?.differentMuhatapCode || undefined,
     },
   });

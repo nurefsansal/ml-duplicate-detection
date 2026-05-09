@@ -10,10 +10,17 @@ import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 from sklearn.model_selection import train_test_split
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
-from backend.models.database import MatchCandidate, ReviewAction
+from backend.models.database import MatchCandidate, NormalizedRecord, ReviewAction
 from backend.services.decision_thresholds import DecisionThresholdsProb
+from backend.services.ml_feature_schema import (
+    CANONICAL_ML_MODEL_FEATURE_COLUMNS,
+    ML_FEATURE_SCHEMA_VERSION,
+    extract_canonical_ml_features,
+    flatten_features_dict,
+    model_expects_canonical_features,
+)
 from backend.services.scoring_app_settings import (
     compute_weighted_score_breakdown,
     load_scoring_app_settings,
@@ -22,14 +29,7 @@ from backend.services.scoring_app_settings import (
 
 MODEL_PATH = Path("backend/models/model.pkl")
 MODEL_STATUS_PATH = Path("backend/models/model_status.json")
-TRAINING_FEATURE_COLUMNS = [
-    "name_similarity",
-    "email_similarity",
-    "phone_exact_match",
-    "tc_exact_match",
-    "city_exact_match",
-    "address_similarity",
-]
+TRAINING_FEATURE_COLUMNS = list(CANONICAL_ML_MODEL_FEATURE_COLUMNS)
 
 
 def _sigmoid(x: float) -> float:
@@ -88,40 +88,9 @@ def _load_model():
         return pickle.load(f)
 
 
-def _safe_float(value: Any, default: float = 0.0) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _safe_int(value: Any, default: int = 0) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _extract_raw_features(match: MatchCandidate) -> dict[str, Any]:
-    raw = {}
-    decision_features = getattr(match, "features", None)
-    if isinstance(decision_features, dict):
-        nested = decision_features.get("features")
-        if isinstance(nested, dict):
-            raw.update(nested)
-        raw.update({k: v for k, v in decision_features.items() if k != "features"})
-    return raw
-
-
-def _extract_training_features(raw_features: dict[str, Any]) -> dict[str, float]:
-    return {
-        "name_similarity": _safe_float(raw_features.get("name_similarity"), 0.0),
-        "email_similarity": _safe_float(raw_features.get("email_similarity"), 0.0),
-        "phone_exact_match": float(_safe_int(raw_features.get("phone_exact_match"), 0)),
-        "tc_exact_match": float(_safe_int(raw_features.get("tc_exact_match"), 0)),
-        "city_exact_match": float(_safe_int(raw_features.get("city_exact_match"), 0)),
-        "address_similarity": _safe_float(raw_features.get("address_similarity"), 0.0),
-    }
+def get_latest_review_labels_by_match_id(session: Session) -> dict[int, str]:
+    """Latest human decision per match_candidate.id (for training labels and exports)."""
+    return _latest_review_decisions(session)
 
 
 def _latest_review_decisions(session: Session) -> dict[int, str]:
@@ -139,15 +108,23 @@ def _latest_review_decisions(session: Session) -> dict[int, str]:
 
 
 def train_match_probability_model(session: Session) -> dict[str, Any]:
+    # Lazy import: review_service imports ml_service at module load; avoid circular import at import time.
+    from backend.services.review_service import derive_canonical_ml_features_for_match_candidate
+
     review_labels = _latest_review_decisions(session)
     candidates = (
         session.query(MatchCandidate)
+        .options(
+            joinedload(MatchCandidate.left_record).joinedload(NormalizedRecord.raw_record),
+            joinedload(MatchCandidate.right_record).joinedload(NormalizedRecord.raw_record),
+        )
         .filter(MatchCandidate.decision.in_(["approved", "rejected", "pending"]))
         .all()
     )
 
     rows: list[dict[str, float]] = []
     labels: list[int] = []
+    skipped_missing_records = 0
     for candidate in candidates:
         decision = review_labels.get(int(candidate.id)) or str(candidate.decision or "").strip().lower()
         if decision == "approved":
@@ -157,8 +134,11 @@ def train_match_probability_model(session: Session) -> dict[str, Any]:
         else:
             continue
 
-        features = _extract_training_features(_extract_raw_features(candidate))
-        rows.append(features)
+        canon = derive_canonical_ml_features_for_match_candidate(candidate)
+        if canon is None:
+            skipped_missing_records += 1
+            continue
+        rows.append(canon)
         labels.append(label)
 
     if len(rows) < 10:
@@ -194,6 +174,9 @@ def train_match_probability_model(session: Session) -> dict[str, Any]:
         "test_size": int(len(X_test)),
         "total_labeled_samples": int(len(X)),
         "feature_columns": TRAINING_FEATURE_COLUMNS,
+        "ml_feature_schema": ML_FEATURE_SCHEMA_VERSION,
+        "feature_source": "derived_live",
+        "skipped_missing_records": int(skipped_missing_records),
     }
 
     MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -226,10 +209,12 @@ def get_model_status() -> dict[str, Any]:
 
 
 def predict_match_probability(features: dict) -> float:
+    flat = flatten_features_dict(features)
+
     model = _load_model()
 
     if model is None:
-        return _fallback_probability(features)
+        return _fallback_probability(flat)
 
     feature_order_v2 = [
         "tc_exact_match",
@@ -289,9 +274,16 @@ def predict_match_probability(features: dict) -> float:
         if isinstance(n_features, int) and n_features == len(feature_order_v1):
             feature_order = feature_order_v1
 
-    # Build a DataFrame with exactly the columns the model expects.
-    # Unknown extras are dropped; missing columns are zero-filled.
-    df_row = pd.DataFrame([{col: features.get(col, 0) for col in feature_order}], columns=feature_order)
+    # Train=inference: canonical RF models use the same extraction as training rows.
+    if model_expects_canonical_features(feature_order):
+        canon = extract_canonical_ml_features(flat)
+        df_row = pd.DataFrame(
+            [[canon[c] for c in feature_order]],
+            columns=feature_order,
+        )
+    else:
+        # Legacy pickles trained with expanded integer feature spaces.
+        df_row = pd.DataFrame([{col: flat.get(col, 0) for col in feature_order}], columns=feature_order)
 
     if hasattr(model, "predict_proba"):
         prob = float(model.predict_proba(df_row)[0][1])
@@ -301,15 +293,15 @@ def predict_match_probability(features: dict) -> float:
         pred = float(model.predict(df_row)[0])
         return round(pred, 4)
 
-    return _fallback_probability(features)
+    return _fallback_probability(flat)
 
 
 def predict_same_person_probability(features: dict[str, Any]) -> float:
     """
     Public service function for downstream consumers.
+    Uses the same preprocessing as inference (canonical extraction inside predict_match_probability).
     """
-    prepared = _extract_training_features(features)
-    return predict_match_probability(prepared)
+    return predict_match_probability(features)
 
 
 def load_ml_scoring_settings(session: Session | None) -> tuple[dict[str, float], DecisionThresholdsProb]:

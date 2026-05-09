@@ -949,21 +949,26 @@ def _derive_features_from_field_comparisons(
     right_phonetic = _safe_str(right_record.get("name_phonetic_key"))
     left_metaphone = _safe_str(left_record.get("name_metaphone_key"))
     right_metaphone = _safe_str(right_record.get("name_metaphone_key"))
+    left_email_raw = _safe_str(left_record.get("clean_email"))
+    right_email_raw = _safe_str(right_record.get("clean_email"))
 
     phone_exact = int(field_comparisons["phone"]["exactMatch"])
     email_exact = int(field_comparisons["email"]["exactMatch"])
-    first_name_similarity = round(
-        field_comparisons["firstName"]["score0To100"] / 100,
-        4,
-    )
-    surname_similarity = round(
-        field_comparisons["surname"]["score0To100"] / 100,
-        4,
-    )
-    full_name_similarity = round(
-        field_comparisons["fullName"]["score0To100"] / 100,
-        4,
-    )
+    first_name_similarity = _similarity_score(left_first, right_first)
+    surname_similarity = _similarity_score(left_surname, right_surname)
+    full_name_similarity = _similarity_score(left_name, right_name)
+    phone_similarity = round(phone_similarity_score(left_phone, right_phone), 4)
+    email_similarity = 0.0
+    if left_email_key and right_email_key:
+        email_similarity = max(
+            email_similarity,
+            round(email_similarity_score(left_email_key, right_email_key), 4),
+        )
+    if left_email_raw and right_email_raw:
+        email_similarity = max(
+            email_similarity,
+            round(email_similarity_score(left_email_raw, right_email_raw), 4),
+        )
     shared_contact_flag = int(bool(phone_exact or email_exact))
 
     shared_contact_name_conflict = int(
@@ -988,22 +993,28 @@ def _derive_features_from_field_comparisons(
     return {
         "tc_exact_match": int(field_comparisons["tc"]["exactMatch"]),
         "tc_conflict": int(bool(left_tc and right_tc and left_tc != right_tc)),
+        "tc_present_both": int(bool(left_tc and right_tc)),
         "muhatap_no_exact_match": int(
             bool(left_muhatap and right_muhatap and left_muhatap == right_muhatap)
         ),
         "muhatap_no_conflict": int(
             bool(left_muhatap and right_muhatap and left_muhatap != right_muhatap)
         ),
+        "muhatap_present_both": int(bool(left_muhatap and right_muhatap)),
         "phone_exact_match": phone_exact,
         "phone_match": phone_exact,
-        "phone_similarity": round(
-            field_comparisons["phone"]["score0To100"] / 100,
-            4,
-        ),
+        "phone_similarity": phone_similarity,
+        "phone_present_both": int(bool(left_phone and right_phone)),
         "phone_last7_match": int(
             bool(left_phone and right_phone and left_phone[-7:] == right_phone[-7:])
         ),
         "email_exact_match": email_exact,
+        "email_present_both": int(
+            bool(
+                (left_email_raw and right_email_raw)
+                or (left_email_key and right_email_key)
+            )
+        ),
         "city_exact_match": int(field_comparisons["city"]["exactMatch"]),
         "city_match": int(field_comparisons["city"]["exactMatch"]),
         "address_similarity": round(
@@ -1023,6 +1034,7 @@ def _derive_features_from_field_comparisons(
             )
         ),
         "name_similarity": full_name_similarity,
+        "name_present_both": int(bool(left_name and right_name)),
         "name_jaro_winkler": _similarity_score(left_name, right_name),
         "name_token_similarity": round(
             token_name_similarity(left_ordered_name, right_ordered_name),
@@ -1032,7 +1044,7 @@ def _derive_features_from_field_comparisons(
             levenshtein_similarity(left_name, right_name),
             4,
         ),
-        "email_similarity": round(field_comparisons["email"]["score0To100"] / 100, 4),
+        "email_similarity": email_similarity,
         "first_name_similarity": first_name_similarity,
         "surname_similarity": surname_similarity,
         "first_name_jaro_winkler": _similarity_score(left_first, right_first),

@@ -498,6 +498,68 @@ class MatchCandidate(Base):
         )
 
 
+class MaterializedDuplicateGroup(Base):
+    __tablename__ = "materialized_duplicate_groups"
+
+    id = Column(Integer, primary_key=True)
+    detection_run_id = Column(
+        Integer,
+        ForeignKey("detection_runs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    upload_id = Column(Integer, ForeignKey("uploads.id", ondelete="CASCADE"), nullable=False)
+    normalization_run_id = Column(
+        Integer,
+        ForeignKey("normalization_runs.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    decision = Column(String(32), default="pending", nullable=False)
+    group_key = Column(String, nullable=False)
+    record_count = Column(Integer, default=0, nullable=False)
+    match_count = Column(Integer, default=0, nullable=False)
+    avg_score = Column(Float, default=0.0)
+    max_score = Column(Float, default=0.0)
+    different_muhatap_code = Column(Boolean, default=False, nullable=False)
+    muhatap_codes = Column(JSONB, default=list, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    members = relationship(
+        "MaterializedDuplicateGroupMember",
+        back_populates="group",
+        cascade="all, delete-orphan",
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "detection_run_id",
+            "decision",
+            "group_key",
+            name="uq_mat_dup_group_run_decision_key",
+        ),
+        Index("idx_mat_dup_groups_upload_decision", "upload_id", "decision"),
+        Index("idx_mat_dup_groups_scores", "avg_score", "match_count"),
+    )
+
+
+class MaterializedDuplicateGroupMember(Base):
+    __tablename__ = "materialized_duplicate_group_members"
+
+    group_id = Column(
+        Integer,
+        ForeignKey("materialized_duplicate_groups.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    normalized_record_id = Column(
+        Integer,
+        ForeignKey("normalized_records.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    group = relationship("MaterializedDuplicateGroup", back_populates="members")
+    record = relationship("NormalizedRecord")
+
+
 class ReviewAction(Base):
     __tablename__ = "review_actions"
 
@@ -701,6 +763,88 @@ class Job(Base):
         return f"<Job(id={self.id}, type='{self.type}', status='{self.status}', progress={self.progress})>"
 
 
+class PipelineRun(Base):
+    __tablename__ = "pipeline_runs"
+
+    id = Column(Integer, primary_key=True)
+
+    pipeline_type = Column(String(64), nullable=False)
+    status = Column(String(32), nullable=False, default="running")
+
+    request_id = Column(String(64))
+    upload_id = Column(Integer, ForeignKey("uploads.id", ondelete="SET NULL"))
+    job_id = Column(Integer, ForeignKey("jobs.id", ondelete="SET NULL"))
+    normalization_run_id = Column(
+        Integer,
+        ForeignKey("normalization_runs.id", ondelete="SET NULL"),
+    )
+    detection_run_id = Column(Integer, ForeignKey("detection_runs.id", ondelete="SET NULL"))
+
+    total_rows = Column(Integer, default=0)
+    processed_rows = Column(Integer, default=0)
+    warning_count = Column(Integer, default=0)
+    error_count = Column(Integer, default=0)
+    error_message = Column(Text)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    started_at = Column(DateTime)
+    completed_at = Column(DateTime)
+    duration_ms = Column(Integer)
+
+    # SQLAlchemy Declarative reserves the attribute name "metadata".
+    # Keep the DB column name as "metadata" but expose it as "meta" in Python.
+    meta = Column("metadata", JSONB, nullable=False, default=dict)
+
+    events = relationship(
+        "PipelineEvent",
+        back_populates="run",
+        cascade="all, delete-orphan",
+    )
+
+    __table_args__ = (
+        Index("idx_pipeline_runs_type_created_at", "pipeline_type", "created_at"),
+        Index("idx_pipeline_runs_status", "status"),
+        Index("idx_pipeline_runs_request_id", "request_id"),
+        Index("idx_pipeline_runs_upload_id", "upload_id"),
+        Index("idx_pipeline_runs_job_id", "job_id"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<PipelineRun(id={self.id}, type='{self.pipeline_type}', status='{self.status}')>"
+
+
+class PipelineEvent(Base):
+    __tablename__ = "pipeline_events"
+
+    id = Column(Integer, primary_key=True)
+    run_id = Column(Integer, ForeignKey("pipeline_runs.id", ondelete="CASCADE"), nullable=False)
+
+    stage = Column(String(64), nullable=False)
+    event_type = Column(String(32), nullable=False)
+    message = Column(Text)
+
+    payload = Column(JSONB, nullable=False, default=dict)
+
+    total_rows = Column(Integer, default=0)
+    processed_rows = Column(Integer, default=0)
+    warning_count = Column(Integer, default=0)
+    error_count = Column(Integer, default=0)
+    duration_ms = Column(Integer)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    run = relationship("PipelineRun", back_populates="events")
+
+    __table_args__ = (
+        Index("idx_pipeline_events_run_id_created_at", "run_id", "created_at"),
+        Index("idx_pipeline_events_stage", "stage"),
+        Index("idx_pipeline_events_event_type", "event_type"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<PipelineEvent(id={self.id}, run_id={self.run_id}, stage='{self.stage}', type='{self.event_type}')>"
+
+
 __all__ = [
     "Base",
     "Upload",
@@ -720,4 +864,6 @@ __all__ = [
     "AuditLog",
     "AppSettings",
     "Job",
+    "PipelineRun",
+    "PipelineEvent",
 ]

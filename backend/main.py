@@ -15,6 +15,11 @@
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import Response
+
+import uuid
 
 from backend.api.routes.detect import router as detect_router
 from backend.api.routes.admin import router as admin_router
@@ -34,6 +39,15 @@ from backend.api.routes.settings import router as settings_router
 app = FastAPI(title="Dedupli-AI API", version="0.2.0")
 
 
+class RequestIdMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next) -> Response:  # type: ignore[override]
+        request_id = request.headers.get("x-request-id") or uuid.uuid4().hex
+        request.state.request_id = request_id
+        response: Response = await call_next(request)
+        response.headers["X-Request-Id"] = request_id
+        return response
+
+
 @app.get("/")
 def root():
     return {
@@ -50,6 +64,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.add_middleware(RequestIdMiddleware)
 
 app.include_router(health_router)
 app.include_router(detect_router, prefix="/api/v1")

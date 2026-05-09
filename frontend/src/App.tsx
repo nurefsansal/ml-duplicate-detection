@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import Dashboard from "./pages/Dashboard/index";
 import VeriYukleme from "./pages/VeriYukleme/index";
 import VeriNormalizasyon from "./pages/VeriNormalizasyon/index";
+import HamVeri from "./pages/HamVeri/index";
 import TemizVeriSeti from "./pages/TemizVeriSeti/index";
 import MukerrerTespit from "./pages/MukerrerTespit/index";
 import MukerrerKayitlar from "./pages/MukerrerKayitlar/index";
@@ -14,6 +15,7 @@ export default function App() {
     <Routes>
       <Route path="/" element={<Dashboard />} />
       <Route path="/veri-yukleme" element={<VeriYukleme />} />
+      <Route path="/ham-veri" element={<HamVeri />} />
       <Route path="/veri-normalizasyon" element={<VeriNormalizasyon />} />
       <Route path="/temiz-veri-seti" element={<TemizVeriSeti />} />
       <Route path="/mukerrer-tespit" element={<MukerrerTespit />} />

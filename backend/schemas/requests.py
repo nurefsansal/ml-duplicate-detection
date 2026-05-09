@@ -8,6 +8,7 @@ class RecordIn(BaseModel):
     telefon: str = ""
     email: str = ""
     sehir: str = ""
+    adres: str = ""
 
 class NormalizeRequest(BaseModel):
     records: list[RecordIn] = Field(default_factory=list, min_length=1)

@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from backend.services.auth_service import get_current_user
 from backend.services.job_service import get_job
+from backend.models.database import PipelineEvent, PipelineRun
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
@@ -33,6 +34,21 @@ def get_job_status(job_id: int, db: Session = Depends(get_db)):
     job = get_job(db, job_id=job_id)
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job {job_id} bulunamadı")
+
+    run = (
+        db.query(PipelineRun)
+        .filter(PipelineRun.job_id == int(job_id))
+        .order_by(PipelineRun.created_at.desc(), PipelineRun.id.desc())
+        .first()
+    )
+    last_event = None
+    if run is not None:
+        last_event = (
+            db.query(PipelineEvent)
+            .filter(PipelineEvent.run_id == int(run.id))
+            .order_by(PipelineEvent.created_at.desc(), PipelineEvent.id.desc())
+            .first()
+        )
     return {
         "success": True,
         "job": {
@@ -45,5 +61,26 @@ def get_job_status(job_id: int, db: Session = Depends(get_db)):
             "error_message": job.error_message,
             "created_at": job.created_at.isoformat() if job.created_at else None,
             "updated_at": job.updated_at.isoformat() if job.updated_at else None,
+            "pipeline": (
+                {
+                    "run_id": int(run.id),
+                    "pipeline_type": run.pipeline_type,
+                    "status": run.status,
+                    "request_id": run.request_id,
+                    "upload_id": run.upload_id,
+                    "normalization_run_id": run.normalization_run_id,
+                    "detection_run_id": run.detection_run_id,
+                    "warning_count": int(run.warning_count or 0),
+                    "error_count": int(run.error_count or 0),
+                    "last_stage": getattr(last_event, "stage", None),
+                    "last_event_type": getattr(last_event, "event_type", None),
+                    "last_message": getattr(last_event, "message", None),
+                    "last_event_at": last_event.created_at.isoformat()
+                    if getattr(last_event, "created_at", None)
+                    else None,
+                }
+                if run is not None
+                else None
+            ),
         },
     }

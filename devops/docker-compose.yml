@@ -31,6 +31,8 @@ services:
       - .env
     environment:
       DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      # Bos birakilirsa konteyner her baslangicta migration calistirir. Kapatmak icin .env icinde SKIP_DB_MIGRATIONS=1
+      SKIP_DB_MIGRATIONS: ${SKIP_DB_MIGRATIONS:-}
     ports:
       - "8501:8501"
     restart: unless-stopped

@@ -16,22 +16,22 @@ type Props = {
 
 function scoreClass(score: number): string {
   if (score >= 90) {
-    return "bg-green-500";
+    return "bg-gradient-to-r from-emerald-400 to-teal-500";
   }
   if (score >= 70) {
-    return "bg-yellow-400";
+    return "bg-gradient-to-r from-amber-400 to-primary-400";
   }
-  return "bg-red-400";
+  return "bg-gradient-to-r from-rose-400 to-orange-400";
 }
 
 function scoreTextClass(score: number): string {
   if (score >= 90) {
-    return "text-green-600";
+    return "text-emerald-700";
   }
   if (score >= 70) {
-    return "text-yellow-600";
+    return "text-amber-800";
   }
-  return "text-red-500";
+  return "text-danger-700";
 }
 
 function resultLabel(value: string): string {
@@ -141,7 +141,9 @@ export default function FieldComparisonsPanel({
 
         <div className="mt-4 flex items-center justify-between border-t border-gray-200 pt-3">
           <span className="text-xs font-semibold text-gray-700">Genel Skor</span>
-          <span className="text-lg font-bold text-red-600">%{overallScore.toFixed(1)}</span>
+          <span className="bg-gradient-to-r from-primary-700 to-indigo-700 bg-clip-text text-lg font-bold tabular-nums text-transparent">
+            %{overallScore.toFixed(1)}
+          </span>
         </div>
       </div>
 
@@ -154,7 +156,7 @@ export default function FieldComparisonsPanel({
                 {riskFlags.map((flag) => (
                   <span
                     key={flag}
-                    className="rounded-full bg-red-50 px-2.5 py-1 text-[11px] font-medium text-red-600"
+                    className="rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-[11px] font-semibold text-amber-900"
                   >
                     {flag}
                   </span>
