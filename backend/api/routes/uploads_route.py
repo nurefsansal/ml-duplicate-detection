@@ -32,6 +32,7 @@ engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine)
 
 
+
 def get_db():
     db = SessionLocal()
     try:
