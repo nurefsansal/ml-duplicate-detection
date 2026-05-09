@@ -13,7 +13,7 @@ from typing import Optional
 import openpyxl
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
-from sqlalchemy import create_engine, or_
+from sqlalchemy import and_, create_engine, exists, func, literal, or_
 from sqlalchemy.orm import Session, joinedload, sessionmaker
 
 from backend.models.database import Entity, EntityMembership, NormalizedRecord
@@ -257,6 +257,236 @@ def _apply_missing_filter(query, field, flag: Optional[bool]):
         return query.filter(field.isnot(None), field != "")
 
 
+def _apply_normalized_record_filters(
+    query,
+    *,
+    is_valid: Optional[bool] = None,
+    search: Optional[str] = None,
+    has_missing_tc: Optional[bool] = None,
+    has_missing_phone: Optional[bool] = None,
+    has_missing_email: Optional[bool] = None,
+    has_missing_city: Optional[bool] = None,
+):
+    if is_valid is not None:
+        query = query.filter(NormalizedRecord.is_valid.is_(is_valid))
+    if search:
+        term = f"%{search.strip()}%"
+        query = query.filter(
+            or_(
+                NormalizedRecord.clean_name.ilike(term),
+                NormalizedRecord.clean_email.ilike(term),
+                NormalizedRecord.clean_phone.ilike(term),
+                NormalizedRecord.clean_tc.ilike(term),
+                NormalizedRecord.clean_city.ilike(term),
+                NormalizedRecord.clean_muhatap_no.ilike(term),
+            )
+        )
+    query = _apply_missing_filter(query, NormalizedRecord.clean_tc, has_missing_tc)
+    query = _apply_missing_filter(query, NormalizedRecord.clean_phone, has_missing_phone)
+    query = _apply_missing_filter(query, NormalizedRecord.clean_email, has_missing_email)
+    query = _apply_missing_filter(query, NormalizedRecord.clean_city, has_missing_city)
+    return query
+
+
+def _apply_entity_filters(
+    query,
+    *,
+    is_valid: Optional[bool] = None,
+    search: Optional[str] = None,
+    has_missing_tc: Optional[bool] = None,
+    has_missing_phone: Optional[bool] = None,
+    has_missing_email: Optional[bool] = None,
+    has_missing_city: Optional[bool] = None,
+):
+    # Entity rows represent a "Golden Record". We filter using canonical_* columns.
+    if search:
+        term = f"%{search.strip()}%"
+        query = query.filter(
+            or_(
+                Entity.canonical_name.ilike(term),
+                Entity.canonical_email.ilike(term),
+                Entity.canonical_phone.ilike(term),
+                Entity.canonical_tc.ilike(term),
+                Entity.canonical_city.ilike(term),
+                Entity.canonical_muhatap_no.ilike(term),
+            )
+        )
+    query = _apply_missing_filter(query, Entity.canonical_tc, has_missing_tc)
+    query = _apply_missing_filter(query, Entity.canonical_phone, has_missing_phone)
+    query = _apply_missing_filter(query, Entity.canonical_email, has_missing_email)
+    query = _apply_missing_filter(query, Entity.canonical_city, has_missing_city)
+
+    # is_valid for entity rows is derived from golden_record when present; otherwise default True.
+    if is_valid is not None:
+        query = query.join(Entity.golden_record, isouter=True).filter(
+            func.coalesce(NormalizedRecord.is_valid, literal(True)).is_(is_valid)
+        )
+    return query
+
+
+def build_clean_dataset_page(
+    db: Session,
+    *,
+    upload_id: Optional[int] = None,
+    normalization_run_id: Optional[int] = None,
+    is_valid: Optional[bool] = None,
+    search: Optional[str] = None,
+    has_missing_tc: Optional[bool] = None,
+    has_missing_phone: Optional[bool] = None,
+    has_missing_email: Optional[bool] = None,
+    has_missing_city: Optional[bool] = None,
+    page: int = 1,
+    page_size: int = 50,
+) -> tuple[int, list[dict]]:
+    """
+    DB-backed pagination for clean dataset rows.
+
+    Order: entity rows first (source="entity", ordered by Entity.id),
+    then remaining normalized records (source="normalized_record", ordered by NormalizedRecord.id).
+    """
+    page = max(1, int(page))
+    page_size = max(1, min(500, int(page_size)))
+    offset = (page - 1) * page_size
+
+    # Entities included: those with at least one confirmed membership (optionally scoped by upload/run).
+    base_membership_q = (
+        db.query(EntityMembership.entity_id)
+        .join(NormalizedRecord, NormalizedRecord.id == EntityMembership.normalized_record_id)
+        .filter(EntityMembership.status == "confirmed")
+    )
+    if upload_id is not None:
+        base_membership_q = base_membership_q.filter(NormalizedRecord.upload_id == upload_id)
+    if normalization_run_id is not None:
+        base_membership_q = base_membership_q.filter(
+            NormalizedRecord.normalization_run_id == normalization_run_id
+        )
+    eligible_entity_ids_sq = base_membership_q.distinct().subquery()
+
+    entity_q = db.query(Entity).join(
+        eligible_entity_ids_sq, eligible_entity_ids_sq.c.entity_id == Entity.id
+    )
+    entity_q = _apply_entity_filters(
+        entity_q,
+        is_valid=is_valid,
+        search=search,
+        has_missing_tc=has_missing_tc,
+        has_missing_phone=has_missing_phone,
+        has_missing_email=has_missing_email,
+        has_missing_city=has_missing_city,
+    )
+
+    entity_total = int(entity_q.with_entities(func.count(Entity.id)).scalar() or 0)
+
+    # Decide how much of this page comes from entities vs normalized records.
+    entity_offset = min(offset, entity_total)
+    entity_limit = max(0, min(page_size, entity_total - entity_offset))
+
+    entity_rows: list[dict] = []
+    if entity_limit > 0:
+        # Pick one normalized_record per entity for upload_id/run_id + is_valid + blocking_key display.
+        # Prefer Entity.golden_record when present, else use the smallest confirmed membership record id.
+        min_membership_record_sq = (
+            base_membership_q.with_entities(
+                EntityMembership.entity_id.label("entity_id"),
+                func.min(EntityMembership.normalized_record_id).label("min_record_id"),
+            )
+            .group_by(EntityMembership.entity_id)
+            .subquery()
+        )
+
+        entities = (
+            entity_q.options(joinedload(Entity.golden_record))
+            .outerjoin(min_membership_record_sq, min_membership_record_sq.c.entity_id == Entity.id)
+            .order_by(Entity.id.asc())
+            .offset(entity_offset)
+            .limit(entity_limit)
+            .all()
+        )
+
+        # Bulk-load the fallback "first confirmed record" per entity (for display).
+        entity_ids = [int(e.id) for e in entities]
+        entity_min_rows = (
+            db.query(
+                min_membership_record_sq.c.entity_id,
+                min_membership_record_sq.c.min_record_id,
+            )
+            .filter(min_membership_record_sq.c.entity_id.in_(entity_ids))
+            .all()
+        )
+        entity_to_min_id = {
+            int(entity_id): (int(min_id) if min_id is not None else None)
+            for entity_id, min_id in entity_min_rows
+        }
+        fallback_ids = sorted({min_id for min_id in entity_to_min_id.values() if min_id is not None})
+        fallback_by_id: dict[int, NormalizedRecord] = {}
+        if fallback_ids:
+            fallback_records = (
+                db.query(NormalizedRecord)
+                .filter(NormalizedRecord.id.in_(fallback_ids))
+                .all()
+            )
+            fallback_by_id = {int(r.id): r for r in fallback_records}
+
+        for e in entities:
+            # reuse the existing serializer helper for consistency
+            memberships: list[EntityMembership] = []
+            # We only need a record for display; _entity_row also accepts empty list.
+            # Provide a fake membership-like list with the chosen record to keep behavior stable.
+            chosen = e.golden_record
+            if chosen is None:
+                min_id = entity_to_min_id.get(int(e.id))
+                if min_id is not None:
+                    chosen = fallback_by_id.get(int(min_id))
+            if chosen is not None:
+                temp = EntityMembership(entity_id=e.id, normalized_record_id=chosen.id, status="confirmed")
+                temp.entity = e
+                temp.normalized_record = chosen
+                memberships = [temp]
+            entity_rows.append(_entity_row(e, memberships))
+
+    # Normalized records included: records NOT already confirmed into any entity (status=confirmed).
+    normalized_offset = max(0, offset - entity_total)
+    normalized_limit = max(0, page_size - len(entity_rows))
+
+    normalized_rows: list[dict] = []
+    if normalized_limit > 0:
+        confirmed_exists = exists().where(
+            and_(
+                EntityMembership.normalized_record_id == NormalizedRecord.id,
+                EntityMembership.status == "confirmed",
+            )
+        )
+        norm_q = db.query(NormalizedRecord).filter(~confirmed_exists)
+        if upload_id is not None:
+            norm_q = norm_q.filter(NormalizedRecord.upload_id == upload_id)
+        if normalization_run_id is not None:
+            norm_q = norm_q.filter(NormalizedRecord.normalization_run_id == normalization_run_id)
+
+        norm_q = _apply_normalized_record_filters(
+            norm_q,
+            is_valid=is_valid,
+            search=search,
+            has_missing_tc=has_missing_tc,
+            has_missing_phone=has_missing_phone,
+            has_missing_email=has_missing_email,
+            has_missing_city=has_missing_city,
+        )
+
+        normalized_total = int(norm_q.with_entities(func.count(NormalizedRecord.id)).scalar() or 0)
+        records = (
+            norm_q.order_by(NormalizedRecord.id.asc())
+            .offset(normalized_offset)
+            .limit(normalized_limit)
+            .all()
+        )
+        normalized_rows = [_serialize(r) for r in records]
+    else:
+        normalized_total = 0
+
+    total = entity_total + normalized_total
+    return total, [*entity_rows, *normalized_rows]
+
+
 @router.get("/normalized-records/export")
 def export_normalized_records(
     upload_id: Optional[int] = None,
@@ -340,7 +570,7 @@ def list_normalized_records(
     db: Session = Depends(get_db),
 ):
     """Temiz veri setini listele: approved entity golden record + tekil normalized kayıtlar."""
-    rows = build_clean_dataset_rows(
+    total, records = build_clean_dataset_page(
         db,
         upload_id=upload_id,
         normalization_run_id=normalization_run_id,
@@ -350,11 +580,9 @@ def list_normalized_records(
         has_missing_phone=has_missing_phone,
         has_missing_email=has_missing_email,
         has_missing_city=has_missing_city,
+        page=page,
+        page_size=page_size,
     )
-
-    total = len(rows)
-    offset = (page - 1) * page_size
-    records = rows[offset : offset + page_size]
 
     return {
         "success": True,

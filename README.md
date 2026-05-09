@@ -37,13 +37,21 @@ React tarafinin cagiracagi backend API baslangici eklendi.
 pip install -r requirements.txt
 ```
 
-2. API servisini calistir:
+2. PostgreSQL semasini guncelle (ilk kurulum ve yeni SQL migration dosyalari icin). Uygulanan dosyalar `schema_migrations` tablosunda tutulur; tekrar calistirmak guvenlidir:
+
+```bash
+python backend/migrations/run_migration.py
+```
+
+Baglanti dizesi icin `DATABASE_URL` ortam degiskenini kullanabilirsiniz (ornek: `postgresql+psycopg2://kullanici:sifre@localhost:5434/ml_duplicate_db`). Sadece bekleyen migration listesini gormek icin: `python backend/migrations/run_migration.py --dry-run`.
+
+3. API servisini calistir:
 
 ```bash
 uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-3. Endpointler:
+4. Endpointler:
 
 - `GET /health`
 - `POST /api/v1/normalize`
@@ -77,6 +85,8 @@ docker compose up -d postgres
 cd devops
 docker compose up -d --build
 ```
+
+`app` konteyneri her baslangicta (postgres saglikli olduktan sonra) veritabani migration'larini otomatik calistirir; ayri komut yazmaniz gerekmez. Kapatmak icin `devops/.env` icinde `SKIP_DB_MIGRATIONS=1` kullanin.
 
 3. Varsayilan ayarlar `devops/.env` dosyasinda:
 

@@ -12,10 +12,11 @@ from datetime import UTC, datetime
 from typing import Any, Optional
 
 import pandas as pd
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
+from starlette.requests import Request
 
 from backend.models.database import (
     ColumnMapping,
@@ -30,6 +31,11 @@ from backend.services.normalization_service import (
     prepare_normalized_dataframe,
 )
 from backend.services.job_service import create_job, update_job_progress
+from backend.services.pipeline_log_service import (
+    add_pipeline_event,
+    create_pipeline_run,
+    finalize_pipeline_run,
+)
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
@@ -204,11 +210,12 @@ def _build_rename_map_from_column_mappings(mappings: list[ColumnMapping]) -> dic
 
 @router.post("/normalization-runs")
 def create_normalization_run(
+    background_tasks: BackgroundTasks,
+    request: Request,
     payload: NormalizationRunRequest,
     db: Session = Depends(get_db),
 ):
-    """upload_id üzerinden raw_records normalize et, normalization_runs + normalized_records yaz."""
-    t_total = time.monotonic()
+    """upload_id üzerinden raw_records normalize et (arka planda), normalization_runs + normalized_records yaz."""
     job = create_job(db, job_type="normalization")
     if job is not None:
         db.flush()
@@ -250,7 +257,7 @@ def create_normalization_run(
             db,
             job_id=job.id,
             status="running",
-            progress=10,
+            progress=1,
             total_rows=total_raw_records,
             processed_rows=0,
         )
@@ -273,91 +280,106 @@ def create_normalization_run(
                 for mapping in saved_mappings
             ]
 
-    try:
-        normalization_run = NormalizationRun(
-            upload_id=payload.upload_id,
-            mapping_id=payload.mapping_id
-            if payload.mapping_id is not None
-            else (
-                saved_mappings[0].id if not payload.column_mappings and saved_mappings else None
-            ),
-            normalization_profile=DEFAULT_PROFILE,
-            total_processed=0,
-            success_count=0,
-            failed_count=0,
-        )
-        db.add(normalization_run)
-        db.flush()
-        run_id = int(normalization_run.id)
+    normalization_run = NormalizationRun(
+        upload_id=payload.upload_id,
+        mapping_id=payload.mapping_id
+        if payload.mapping_id is not None
+        else (saved_mappings[0].id if not payload.column_mappings and saved_mappings else None),
+        normalization_profile=DEFAULT_PROFILE,
+        total_processed=0,
+        success_count=0,
+        failed_count=0,
+    )
+    db.add(normalization_run)
+    db.flush()
+    run_id = int(normalization_run.id)
+    db.commit()
 
-        if job is not None:
-            update_job_progress(
-                db,
-                job_id=job.id,
-                status="running",
-                progress=40,
-                processed_rows=0,
-            )
+    req_id = getattr(getattr(request, "state", None), "request_id", None)
+    background_tasks.add_task(
+        _run_normalization_job,
+        upload_id=payload.upload_id,
+        normalization_run_id=run_id,
+        total_raw_records=total_raw_records,
+        column_mappings=resolved_column_mappings,
+        job_id=job.id if job is not None else None,
+        request_id=req_id,
+    )
+
+    return {
+        "success": True,
+        "job_id": job.id if job is not None else None,
+        "upload_id": payload.upload_id,
+        "normalization_run_id": run_id,
+        "total_processed": 0,
+        "success_count": 0,
+        "failed_count": 0,
+    }
+
+
+def _run_normalization_job(
+    *,
+    upload_id: int,
+    normalization_run_id: int,
+    total_raw_records: int,
+    column_mappings: Optional[list[ColumnMappingItem]],
+    job_id: int | None,
+    request_id: str | None,
+):
+    db = SessionLocal()
+    t_total = time.monotonic()
+    run_log_id: int | None = None
+    try:
+        run_log = create_pipeline_run(
+            db,
+            pipeline_type="normalization",
+            request_id=request_id,
+            upload_id=upload_id,
+            job_id=job_id,
+            normalization_run_id=normalization_run_id,
+            metadata={"chunk_size": NORMALIZATION_CHUNK_SIZE},
+        )
+        run_log_id = run_log.id
+        add_pipeline_event(
+            db,
+            run_id=run_log.id,
+            stage="standardize",
+            event_type="started",
+            message="Standardizasyon başladı",
+            total_rows=total_raw_records,
+        )
+        db.commit()
+
+        normalization_run = db.query(NormalizationRun).filter(NormalizationRun.id == normalization_run_id).first()
+        upload = db.query(Upload).filter(Upload.id == upload_id).first()
+        if normalization_run is None or upload is None:
+            raise RuntimeError("NormalizationRun veya Upload bulunamadı")
 
         total_processed = 0
         success_count = 0
         failed_count = 0
-        logger.info(
-            "Normalization started upload_id=%s run_id=%s total_raw_records=%s chunk_size=%s",
-            payload.upload_id,
-            run_id,
-            total_raw_records,
-            NORMALIZATION_CHUNK_SIZE,
-        )
 
         for chunk_index, raw_chunk in enumerate(
-            _iter_raw_record_chunks(
-                db,
-                upload_id=payload.upload_id,
-                chunk_size=NORMALIZATION_CHUNK_SIZE,
-            ),
+            _iter_raw_record_chunks(db, upload_id=upload_id, chunk_size=NORMALIZATION_CHUNK_SIZE),
             start=1,
         ):
             t_chunk = time.monotonic()
             raw_ids = [int(row.id) for row in raw_chunk]
             rows = [row.raw_payload for row in raw_chunk]
             df_original = pd.DataFrame(rows)
-            df_processing = _apply_column_mappings(
-                df_original,
-                resolved_column_mappings,
-            )
+            df_processing = _apply_column_mappings(df_original, column_mappings)
 
-            try:
-                normalized_df = prepare_normalized_dataframe(df_processing)
-            except Exception as exc:
-                if job is not None:
-                    update_job_progress(
-                        db,
-                        job_id=job.id,
-                        status="failed",
-                        error_message=f"Normalizasyon hatası: {exc}",
-                    )
-                    db.commit()
-                raise HTTPException(
-                    status_code=500, detail=f"Normalizasyon hatası: {exc}"
-                ) from exc
+            normalized_df = prepare_normalized_dataframe(df_processing)
 
-            normalized_payloads = [
-                _row_to_payload(row)
-                for row in normalized_df.to_dict(orient="records")
-            ]
+            normalized_payloads = [_row_to_payload(row) for row in normalized_df.to_dict(orient="records")]
             normalized_objects = [
                 _build_normalized_record(
                     raw_id=raw_id,
-                    upload_id=payload.upload_id,
-                    normalization_run_id=run_id,
+                    upload_id=upload_id,
+                    normalization_run_id=normalization_run_id,
                     normalized_payload=normalized_payload,
                 )
-                for raw_id, normalized_payload in zip(
-                    raw_ids,
-                    normalized_payloads,
-                    strict=False,
-                )
+                for raw_id, normalized_payload in zip(raw_ids, normalized_payloads, strict=False)
             ]
 
             if normalized_objects:
@@ -378,24 +400,32 @@ def create_normalization_run(
             normalization_run.success_count = success_count
             normalization_run.failed_count = failed_count
 
-            if job is not None:
-                progress = 40 + (total_processed / max(total_raw_records, 1)) * 50
+            if job_id is not None:
+                progress = (total_processed / max(total_raw_records, 1)) * 100.0
                 update_job_progress(
                     db,
-                    job_id=job.id,
+                    job_id=job_id,
                     status="running",
                     progress=progress,
                     processed_rows=total_processed,
                 )
 
-            db.flush()
+            if run_log_id is not None:
+                finalize_pipeline_run(
+                    db,
+                    run_id=run_log_id,
+                    status="running",
+                    total_rows=total_raw_records,
+                    processed_rows=total_processed,
+                )
+
+            db.commit()
             logger.info(
-                "Normalization chunk completed upload_id=%s run_id=%s chunk=%s processed=%s total_processed=%s success=%s failed=%s elapsed=%.2fs",
-                payload.upload_id,
-                run_id,
+                "Normalization chunk completed upload_id=%s run_id=%s chunk=%s processed=%s success=%s failed=%s elapsed=%.2fs",
+                upload_id,
+                normalization_run_id,
                 chunk_index,
                 chunk_processed,
-                total_processed,
                 chunk_success,
                 chunk_failed,
                 time.monotonic() - t_chunk,
@@ -414,53 +444,49 @@ def create_normalization_run(
         upload.completed_at = now
         upload.updated_at = now
 
-        db.commit()
-        if job is not None:
+        if job_id is not None:
             update_job_progress(
                 db,
-                job_id=job.id,
+                job_id=job_id,
                 status="completed",
                 progress=100,
                 processed_rows=total_processed,
             )
-            db.commit()
 
-        logger.info(
-            "Normalization completed upload_id=%s run_id=%s processed=%s success=%s failed=%s elapsed=%.2fs",
-            payload.upload_id,
-            run_id,
-            total_processed,
-            success_count,
-            failed_count,
-            time.monotonic() - t_total,
-        )
-
-        return {
-            "success": True,
-            "job_id": job.id if job is not None else None,
-            "upload_id": payload.upload_id,
-            "normalization_run_id": run_id,
-            "total_processed": total_processed,
-            "success_count": success_count,
-            "failed_count": failed_count,
-        }
-    except HTTPException:
-        db.rollback()
-        raise
-
-    except Exception as exc:
-        db.rollback()
-        if job is not None:
-            update_job_progress(
+        if run_log_id is not None:
+            duration_ms = int((time.monotonic() - t_total) * 1000)
+            add_pipeline_event(
                 db,
-                job_id=job.id,
-                status="failed",
-                error_message=f"Normalizasyon hatası: {exc}",
+                run_id=run_log_id,
+                stage="standardize",
+                event_type="completed",
+                message="Standardizasyon tamamlandı",
+                total_rows=total_raw_records,
+                processed_rows=total_processed,
+                error_count=failed_count,
+                duration_ms=duration_ms,
             )
-            db.commit()
-        raise HTTPException(
-            status_code=500, detail=f"Normalizasyon hatası: {exc}"
-        ) from exc
+            finalize_pipeline_run(
+                db,
+                run_id=run_log_id,
+                status="completed",
+                total_rows=total_raw_records,
+                processed_rows=total_processed,
+                error_count=failed_count,
+                metadata_patch={"duration_ms": duration_ms},
+            )
+
+        db.commit()
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        if job_id is not None:
+            update_job_progress(db, job_id=job_id, status="failed", error_message=str(exc))
+        if run_log_id is not None:
+            add_pipeline_event(db, run_id=run_log_id, stage="standardize", event_type="failed", message=str(exc))
+            finalize_pipeline_run(db, run_id=run_log_id, status="failed", error_message=str(exc))
+        db.commit()
+    finally:
+        db.close()
 
 @router.get("/normalization-runs")
 def list_normalization_runs(

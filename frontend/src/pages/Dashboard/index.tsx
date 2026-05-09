@@ -3,6 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 
 import DashboardLayout from "../../components/feature/DashboardLayout";
 import Header from "../../components/feature/Header";
+import { withUploadContext } from "../../utils/uploadContextNav";
 import {
   getMatches,
   getReportDataQuality,
@@ -45,14 +46,16 @@ function formatDate(value: string | null | undefined): string {
 function SectionMessage({ loading, error }: { loading: boolean; error: boolean }) {
   if (loading) {
     return (
-      <div className="py-8 text-center text-sm text-gray-400">
-        <i className="ri-loader-4-line mb-2 block animate-spin text-xl" />
+      <div className="py-10 text-center text-sm font-medium text-slate-500">
+        <i className="ri-loader-4-line mb-3 block animate-spin text-2xl text-primary-500" />
         Yükleniyor...
       </div>
     );
   }
   if (error) {
-    return <div className="py-8 text-center text-sm text-red-500">Veri yüklenemedi</div>;
+    return (
+      <div className="py-8 text-center text-sm font-medium text-danger-700">Veri yüklenemedi</div>
+    );
   }
   return null;
 }
@@ -71,32 +74,35 @@ function SummaryCard({
   to?: string;
 }) {
   const toneClass = {
-    blue: "bg-blue-50 text-blue-700 border-blue-100",
-    yellow: "bg-yellow-50 text-yellow-700 border-yellow-100",
-    green: "bg-green-50 text-green-700 border-green-100",
-    purple: "bg-purple-50 text-purple-700 border-purple-100",
+    blue: "border-primary-200/80 bg-gradient-to-br from-primary-50 to-cyan-50/80 text-primary-900 shadow-sm",
+    yellow: "border-amber-200/80 bg-gradient-to-br from-amber-50 to-orange-50/60 text-amber-950 shadow-sm",
+    green: "border-emerald-200/80 bg-gradient-to-br from-emerald-50 to-teal-50/70 text-emerald-950 shadow-sm",
+    purple: "border-violet-200/80 bg-gradient-to-br from-violet-50 to-indigo-50/70 text-violet-950 shadow-sm",
   }[tone];
   const content = (
-    <div className={`rounded-xl border p-4 transition-colors ${toneClass} ${to ? "hover:bg-white" : ""}`}>
-      <div className="flex items-center justify-between">
-        <span className="text-xs font-medium opacity-80">{label}</span>
-        <i className={`${icon} text-lg`} />
+    <div
+      className={`rounded-2xl border p-5 transition-all duration-200 ${toneClass} ${to ? "hover:-translate-y-0.5 hover:shadow-card-lg" : ""}`}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-xs font-semibold uppercase tracking-wide opacity-90">{label}</span>
+        <i className={`${icon} text-xl opacity-90`} />
       </div>
-      <div className="mt-3 text-2xl font-bold">{value}</div>
+      <div className="mt-3 text-3xl font-bold tabular-nums tracking-tight">{value}</div>
     </div>
   );
   return to ? <Link to={to}>{content}</Link> : content;
 }
 
 function QualityBar({ label, value }: { label: string; value: number }) {
-  const color = value < 60 ? "bg-red-500" : value <= 85 ? "bg-yellow-500" : "bg-green-600";
+  const color =
+    value < 60 ? "bg-gradient-to-r from-rose-400 to-amber-400" : value <= 85 ? "bg-gradient-to-r from-amber-400 to-primary-400" : "bg-gradient-to-r from-emerald-400 to-teal-500";
   return (
     <div>
-      <div className="mb-1 flex items-center justify-between text-xs">
-        <span className="font-medium text-gray-700">{label}</span>
-        <span className="font-semibold text-gray-900">%{value.toFixed(1)}</span>
+      <div className="mb-1.5 flex items-center justify-between text-xs">
+        <span className="font-semibold text-slate-700">{label}</span>
+        <span className="font-bold tabular-nums text-slate-900">%{value.toFixed(1)}</span>
       </div>
-      <div className="h-2 overflow-hidden rounded-full bg-gray-100">
+      <div className="h-2.5 overflow-hidden rounded-full bg-slate-200/80 shadow-inner">
         <div className={`h-full rounded-full ${color}`} style={{ width: `${Math.min(value, 100)}%` }} />
       </div>
     </div>
@@ -104,9 +110,9 @@ function QualityBar({ label, value }: { label: string; value: number }) {
 }
 
 function scoreTone(score: number): string {
-  if (score > 0.8) return "bg-green-50 text-green-700";
-  if (score >= 0.55) return "bg-yellow-50 text-yellow-700";
-  return "bg-gray-50 text-gray-600";
+  if (score > 0.8) return "border border-emerald-200 bg-emerald-50 text-emerald-900";
+  if (score >= 0.55) return "border border-amber-200 bg-amber-50 text-amber-950";
+  return "border border-slate-200 bg-slate-100 text-slate-700";
 }
 
 export default function Dashboard() {
@@ -188,26 +194,34 @@ export default function Dashboard() {
   const pipeline = [
     { label: "Yükleme", to: "/veri-yukleme", count: latestUpload?.total_records || 0, date: latestUpload?.created_at },
     {
-      label: "Normalizasyon",
-      to: latestUpload ? `/veri-normalizasyon?upload_id=${latestUpload.id}` : "/veri-normalizasyon",
+      label: "Standardizasyon",
+      to: latestUpload
+        ? `/veri-normalizasyon?upload_id=${latestUpload.id}`
+        : withUploadContext("/veri-normalizasyon"),
       count: latestUpload?.latest_normalization_run_id ? latestUpload.total_records : 0,
       date: latestUpload?.completed_at || latestUpload?.created_at,
     },
     {
       label: "Mükerrer Tespit",
-      to: latestUpload ? `/mukerrer-tespit?upload_id=${latestUpload.id}` : "/mukerrer-tespit",
+      to: latestUpload
+        ? `/mukerrer-tespit?upload_id=${latestUpload.id}`
+        : withUploadContext("/mukerrer-tespit"),
       count: totalCandidates,
       date: latestUpload?.created_at,
     },
     {
       label: "İnceleme",
-      to: "/mukerrer-kayitlar?decision=pending",
+      to: latestUpload
+        ? `/mukerrer-kayitlar?upload_id=${latestUpload.id}&decision=pending`
+        : withUploadContext("/mukerrer-kayitlar?decision=pending"),
       count: overview.data?.pending || 0,
       date: latestUpload?.created_at,
     },
     {
       label: "Temiz Export",
-      to: "/temiz-veri-seti",
+      to: latestUpload
+        ? `/temiz-veri-seti?upload_id=${latestUpload.id}`
+        : withUploadContext("/temiz-veri-seti"),
       count: totalNormalized,
       date: latestUpload?.completed_at || latestUpload?.created_at,
     },
@@ -227,7 +241,7 @@ export default function Dashboard() {
               loadQuality();
               loadReviews();
             }}
-            className="inline-flex cursor-pointer items-center gap-2 rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-600 hover:bg-gray-50"
+            className="ui-btn-secondary"
           >
             <i className="ri-refresh-line" />
             Yenile
@@ -235,24 +249,34 @@ export default function Dashboard() {
         }
       />
 
-      <div className="flex-1 space-y-5 overflow-y-auto p-6">
+      <div className="flex-1 space-y-6 overflow-y-auto p-6 lg:p-8">
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
           {overview.error ? (
-            <div className="col-span-full rounded-xl border border-red-100 bg-red-50 p-4 text-sm text-red-600">
+            <div className="col-span-full rounded-2xl border border-danger-200 bg-danger-50 p-4 text-sm font-medium text-danger-700 shadow-sm">
               Veri yüklenemedi
             </div>
           ) : (
             <>
               <SummaryCard label="Toplam Kayıt" value={overview.loading ? "..." : formatNumber(totalNormalized)} tone="blue" icon="ri-database-2-line" />
-              <SummaryCard label="Bekleyen İnceleme" value={overview.loading ? "..." : formatNumber(overview.data?.pending)} tone="yellow" icon="ri-time-line" to="/mukerrer-kayitlar?decision=pending" />
+              <SummaryCard
+                label="Bekleyen İnceleme"
+                value={overview.loading ? "..." : formatNumber(overview.data?.pending)}
+                tone="yellow"
+                icon="ri-time-line"
+                to={
+                  latestUpload
+                    ? `/mukerrer-kayitlar?upload_id=${latestUpload.id}&decision=pending`
+                    : withUploadContext("/mukerrer-kayitlar?decision=pending")
+                }
+              />
               <SummaryCard label="Onaylanan" value={overview.loading ? "..." : formatNumber(overview.data?.approved)} tone="green" icon="ri-checkbox-circle-line" />
               <SummaryCard label="Mükerrer Oran" value={overview.loading ? "..." : `%${duplicateRate.toFixed(1)}`} tone="purple" icon="ri-percent-line" />
             </>
           )}
         </div>
 
-        <div className="rounded-xl border border-gray-100 bg-white p-4">
-          <div className="mb-3 text-sm font-semibold text-gray-900">Pipeline Durumu</div>
+        <div className="ui-card p-6 shadow-card-lg">
+          <div className="mb-4 text-sm font-semibold tracking-tight text-slate-900">Pipeline Durumu</div>
           <SectionMessage loading={uploads.loading || overview.loading} error={uploads.error || overview.error} />
           {!uploads.loading && !overview.loading && !uploads.error && !overview.error && (
             <div className="grid grid-cols-1 gap-3 md:grid-cols-5">
@@ -260,14 +284,14 @@ export default function Dashboard() {
                 <button
                   key={step.label}
                   onClick={() => navigate(step.to)}
-                  className="cursor-pointer rounded-lg border border-gray-100 bg-gray-50 p-3 text-left transition-colors hover:border-red-100 hover:bg-red-50/40"
+                  className="cursor-pointer rounded-2xl border border-slate-200/90 bg-slate-50/80 p-4 text-left shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:border-primary-200 hover:bg-white hover:shadow-card"
                 >
-                  <div className="flex items-center justify-between text-sm font-semibold text-gray-900">
+                  <div className="flex items-center justify-between text-sm font-semibold text-slate-900">
                     <span>{step.label}</span>
-                    {index < pipeline.length - 1 && <i className="ri-arrow-right-line text-gray-300" />}
+                    {index < pipeline.length - 1 && <i className="ri-arrow-right-line text-slate-300" />}
                   </div>
-                  <div className="mt-2 text-xs text-gray-500">{formatDate(step.date)}</div>
-                  <div className="mt-1 text-xs font-medium text-gray-700">{formatNumber(step.count)} kayıt</div>
+                  <div className="mt-2 text-xs font-medium text-slate-500">{formatDate(step.date)}</div>
+                  <div className="mt-1 text-xs font-semibold text-slate-700">{formatNumber(step.count)} kayıt</div>
                 </button>
               ))}
             </div>
@@ -275,28 +299,40 @@ export default function Dashboard() {
         </div>
 
         <div className="grid grid-cols-1 gap-5 xl:grid-cols-5">
-          <div className="overflow-hidden rounded-xl border border-gray-100 bg-white xl:col-span-3">
-            <div className="border-b border-gray-50 px-5 py-4 text-sm font-semibold text-gray-900">Son Yüklemeler</div>
+          <div className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-card xl:col-span-3">
+            <div className="border-b border-slate-100 bg-slate-50/50 px-5 py-4 text-sm font-semibold tracking-tight text-slate-900">
+              Son Yüklemeler
+            </div>
             <SectionMessage loading={uploads.loading} error={uploads.error} />
             {!uploads.loading && !uploads.error && (
               <div className="overflow-x-auto">
                 <table className="w-full text-xs">
                   <thead>
-                    <tr className="border-b border-gray-100 bg-gray-50/70">
-                      <th className="px-4 py-3 text-left font-medium text-gray-400">Dosya adı</th>
-                      <th className="px-4 py-3 text-left font-medium text-gray-400">Kayıt</th>
-                      <th className="px-4 py-3 text-left font-medium text-gray-400">Durum</th>
-                      <th className="px-4 py-3 text-left font-medium text-gray-400">Tarih</th>
-                      <th className="px-4 py-3 text-right font-medium text-gray-400">İşlem</th>
+                    <tr className="border-b border-slate-100 bg-slate-50/90">
+                      <th className="px-4 py-3.5 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
+                        Dosya adı
+                      </th>
+                      <th className="px-4 py-3.5 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
+                        Kayıt
+                      </th>
+                      <th className="px-4 py-3.5 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
+                        Durum
+                      </th>
+                      <th className="px-4 py-3.5 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
+                        Tarih
+                      </th>
+                      <th className="px-4 py-3.5 text-right text-xs font-semibold uppercase tracking-wide text-slate-500">
+                        İşlem
+                      </th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-50">
                     {(uploads.data || []).map((upload) => (
-                      <tr key={upload.id} className="hover:bg-gray-50/50">
-                        <td className="px-4 py-3 font-medium text-gray-800">{upload.file_name}</td>
-                        <td className="px-4 py-3 text-gray-600">{formatNumber(upload.total_records)}</td>
-                        <td className="px-4 py-3 text-gray-600">{upload.processing_stage || upload.status}</td>
-                        <td className="px-4 py-3 text-gray-500">{formatDate(upload.created_at)}</td>
+                      <tr key={upload.id} className="transition-colors hover:bg-primary-50/40">
+                        <td className="px-4 py-3.5 font-medium text-slate-900">{upload.file_name}</td>
+                        <td className="px-4 py-3.5 tabular-nums text-slate-600">{formatNumber(upload.total_records)}</td>
+                        <td className="px-4 py-3.5 text-slate-600">{upload.processing_stage || upload.status}</td>
+                        <td className="px-4 py-3.5 text-slate-500">{formatDate(upload.created_at)}</td>
                         <td className="px-4 py-3 text-right">
                           <Link
                             to={
@@ -304,7 +340,7 @@ export default function Dashboard() {
                                 ? `/mukerrer-tespit?upload_id=${upload.id}`
                                 : `/veri-normalizasyon?upload_id=${upload.id}`
                             }
-                            className="inline-flex items-center gap-1 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-700"
+                            className="inline-flex items-center gap-1 rounded-lg bg-gradient-to-r from-primary-600 to-primary-700 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:from-primary-500 hover:to-primary-600"
                           >
                             {upload.latest_normalization_run_id ? "Mükerrer Tespit" : "Normalize Et"}
                           </Link>
@@ -312,7 +348,11 @@ export default function Dashboard() {
                       </tr>
                     ))}
                     {(uploads.data || []).length === 0 && (
-                      <tr><td colSpan={5} className="px-5 py-8 text-center text-gray-400">Yükleme bulunamadı.</td></tr>
+                      <tr>
+                        <td colSpan={5} className="px-5 py-12 text-center text-sm font-medium text-slate-400">
+                          Yükleme bulunamadı.
+                        </td>
+                      </tr>
                     )}
                   </tbody>
                 </table>
@@ -320,8 +360,10 @@ export default function Dashboard() {
             )}
           </div>
 
-          <div className="rounded-xl border border-gray-100 bg-white xl:col-span-2">
-            <div className="border-b border-gray-50 px-5 py-4 text-sm font-semibold text-gray-900">Bekleyen İncelemeler</div>
+          <div className="rounded-2xl border border-slate-200/80 bg-white shadow-card xl:col-span-2">
+            <div className="border-b border-slate-100 bg-slate-50/50 px-5 py-4 text-sm font-semibold tracking-tight text-slate-900">
+              Bekleyen İncelemeler
+            </div>
             <SectionMessage loading={pending.loading} error={pending.error} />
             {!pending.loading && !pending.error && (
               <div className="divide-y divide-gray-50">
@@ -338,23 +380,25 @@ export default function Dashboard() {
                         <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${scoreTone(score)}`}>%{(score * 100).toFixed(1)}</span>
                       </div>
                       <Link
-                        to={`/mukerrer-kayitlar?group_id=match_${match.id}`}
-                        className="inline-flex items-center gap-1 text-xs font-medium text-red-600 hover:underline"
+                        to={withUploadContext(`/mukerrer-kayitlar?group_id=match_${match.id}`)}
+                        className="inline-flex items-center gap-1 text-xs font-semibold text-primary-700 hover:text-primary-600 hover:underline"
                       >
                         İncele <i className="ri-arrow-right-line" />
                       </Link>
                     </div>
                   );
                 })}
-                {(pending.data || []).length === 0 && <div className="py-8 text-center text-sm text-gray-400">Bekleyen inceleme yok.</div>}
+                {(pending.data || []).length === 0 && (
+                  <div className="py-10 text-center text-sm font-medium text-slate-400">Bekleyen inceleme yok.</div>
+                )}
               </div>
             )}
           </div>
         </div>
 
         <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
-          <div className="rounded-xl border border-gray-100 bg-white p-5">
-            <h3 className="mb-4 text-sm font-semibold text-gray-900">Veri Kalitesi Özeti</h3>
+          <div className="ui-card p-6 shadow-card-lg">
+            <h3 className="mb-5 text-sm font-semibold tracking-tight text-slate-900">Veri Kalitesi Özeti</h3>
             <SectionMessage loading={quality.loading} error={quality.error} />
             {!quality.loading && !quality.error && quality.data && (
               <div className="space-y-4">
@@ -365,8 +409,10 @@ export default function Dashboard() {
             )}
           </div>
 
-          <div className="rounded-xl border border-gray-100 bg-white">
-            <div className="border-b border-gray-50 px-5 py-4 text-sm font-semibold text-gray-900">Son Kararlar</div>
+          <div className="rounded-2xl border border-slate-200/80 bg-white shadow-card">
+            <div className="border-b border-slate-100 bg-slate-50/50 px-5 py-4 text-sm font-semibold tracking-tight text-slate-900">
+              Son Kararlar
+            </div>
             <SectionMessage loading={reviews.loading} error={reviews.error} />
             {!reviews.loading && !reviews.error && (
               <div className="divide-y divide-gray-50">
@@ -378,7 +424,7 @@ export default function Dashboard() {
                         <div className="font-medium text-gray-800">{review.user || "system"}</div>
                         <div className="text-gray-400">{review.group_id}</div>
                       </div>
-                      <span className={approved ? "font-semibold text-green-700" : "font-semibold text-red-600"}>
+                      <span className={approved ? "font-semibold text-emerald-700" : "font-semibold text-danger-700"}>
                         {approved ? "✓ Onay" : "✗ Red"}
                       </span>
                       <span className="text-gray-400">{formatDate(review.date)}</span>

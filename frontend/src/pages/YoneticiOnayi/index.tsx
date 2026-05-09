@@ -5,15 +5,22 @@ import { useSearchParams } from "react-router-dom";
 import DashboardLayout from "../../components/feature/DashboardLayout";
 import Header from "../../components/feature/Header";
 import {
+  downloadMlGroundTruthCsv,
   getDuplicateGroups,
+  getMatches,
   listUploads,
   partialApproveGroup,
   resetMatchDecision,
   updateGoldenRecord,
   type DuplicateGroup,
   type DuplicateGroupRecord,
+  type AdminPendingMatch,
   type UploadItem,
 } from "../../services/api";
+import { MatchReviewModal } from "../../components/feature/MatchReviewModal";
+import { DuplicateGroupReviewModal } from "../../components/feature/DuplicateGroupReviewModal";
+import { FlowNav } from "../../components/feature/FlowNav";
+import { useRequireUploadId } from "../../hooks/useRequireUploadId";
 
 type RecordDecision = "confirmed" | "pending" | "excluded";
 type GoldenField =
@@ -41,14 +48,14 @@ function pct(value: number): string {
 
 function filterClass(active: boolean): string {
   return active
-    ? "bg-red-600 text-white"
-    : "border border-gray-200 text-gray-600 hover:bg-gray-50";
+    ? "bg-gradient-to-r from-primary-600 to-primary-700 text-white shadow-sm"
+    : "border border-slate-200 text-slate-600 hover:border-slate-300 hover:bg-slate-50";
 }
 
 function muhatapConflictFilterClass(active: boolean): string {
   return active
-    ? "bg-purple-600 text-white shadow-sm"
-    : "border border-gray-200 text-gray-600 hover:bg-gray-50";
+    ? "bg-gradient-to-r from-violet-600 to-indigo-700 text-white shadow-sm"
+    : "border border-slate-200 text-slate-600 hover:border-slate-300 hover:bg-slate-50";
 }
 
 function pickMuhatapScalar(v: unknown): string {
@@ -116,8 +123,16 @@ function groupHasDistinctMuhatapConflict(group: DuplicateGroup): boolean {
 
 export default function YoneticiOnayi() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const uploadIdParam = searchParams.get("upload_id");
+  const uploadId = useRequireUploadId();
   const decisionParam = searchParams.get("decision");
+  const viewParam = searchParams.get("view");
+  const pageParam = searchParams.get("page");
+  const pageSizeParam = searchParams.get("page_size");
+  const page = Number(pageParam ?? "1");
+  const parsedPageSize = pageSizeParam ? Number(pageSizeParam) : 50;
+  const pageSize = [25, 50, 100].includes(parsedPageSize) ? parsedPageSize : 50;
+  const viewMode: "groups" | "candidates" =
+    viewParam === "candidates" ? "candidates" : "groups";
 
   const [decisionFilter, setDecisionFilter] = useState<
     "pending" | "approved" | "rejected"
@@ -127,10 +142,20 @@ export default function YoneticiOnayi() {
       : "pending",
   );
   const [search, setSearch] = useState("");
+  const [groundTruthBusy, setGroundTruthBusy] = useState(false);
   const [filterMuhatapConflict, setFilterMuhatapConflict] = useState(false);
   const [detailGroup, setDetailGroup] = useState<DuplicateGroup | null>(null);
   const [loading, setLoading] = useState(false);
   const [groups, setGroups] = useState<DuplicateGroup[]>([]);
+  const [total, setTotal] = useState(0);
+  const [totalPages, setTotalPages] = useState(1);
+  const [matches, setMatches] = useState<AdminPendingMatch[]>([]);
+  const [matchesTotal, setMatchesTotal] = useState(0);
+  const [matchesTotalPages, setMatchesTotalPages] = useState(1);
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const [reviewIndex, setReviewIndex] = useState(0);
+  const [reviewBusy, setReviewBusy] = useState(false);
+  const [reviewError, setReviewError] = useState<string | null>(null);
   const [uploads, setUploads] = useState<UploadItem[]>([]);
   const [apiError, setApiError] = useState("");
   const [recordDecisions, setRecordDecisions] = useState<Record<number, RecordDecision>>({});
@@ -148,23 +173,6 @@ export default function YoneticiOnayi() {
   const [savingGolden, setSavingGolden] = useState(false);
   const [resettingMatchId, setResettingMatchId] = useState<number | null>(null);
   const isMountedRef = useRef(true);
-
-  const [selectedUploadId, setSelectedUploadId] = useState<number | undefined>(
-    () => {
-      if (uploadIdParam && !Number.isNaN(Number(uploadIdParam))) {
-        return Number(uploadIdParam);
-      }
-      const ls = localStorage.getItem("lastDetectUploadId");
-      if (ls && !Number.isNaN(Number(ls))) return Number(ls);
-      return undefined;
-    },
-  );
-
-  useEffect(() => {
-    if (uploadIdParam && !Number.isNaN(Number(uploadIdParam))) {
-      setSelectedUploadId(Number(uploadIdParam));
-    }
-  }, [uploadIdParam]);
 
   useEffect(() => {
     if (decisionParam === "pending" || decisionParam === "approved" || decisionParam === "rejected") {
@@ -204,12 +212,16 @@ export default function YoneticiOnayi() {
     try {
       const response = await getDuplicateGroups({
         decision: decisionFilter,
-        uploadId: selectedUploadId,
+        uploadId: uploadId ?? undefined,
         limit: 5000,
+        page,
+        pageSize,
         differentMuhatapCode: filterMuhatapConflict,
       });
       if (!isMountedRef.current) return;
       setGroups(response.groups || []);
+      setTotal(Number(response.total ?? 0));
+      setTotalPages(Number(response.total_pages ?? 1));
     } catch (error) {
       if (!isMountedRef.current) return;
       setApiError(
@@ -218,15 +230,77 @@ export default function YoneticiOnayi() {
     } finally {
       if (isMountedRef.current) setLoading(false);
     }
-  }, [decisionFilter, filterMuhatapConflict, selectedUploadId]);
+  }, [decisionFilter, filterMuhatapConflict, uploadId, page, pageSize]);
+
+  const fetchMatches = useCallback(async () => {
+    setLoading(true);
+    setApiError("");
+    try {
+      const response = await getMatches({
+        decision: decisionFilter,
+        uploadId: uploadId ?? undefined,
+        limit: pageSize,
+        page,
+        pageSize,
+      });
+      if (!isMountedRef.current) return;
+      setMatches(response.matches || []);
+      setMatchesTotal(Number(response.total ?? 0));
+      setMatchesTotalPages(Number(response.total_pages ?? 1));
+    } catch (error) {
+      if (!isMountedRef.current) return;
+      setApiError(
+        error instanceof Error ? error.message : "Aday eşleşmeler alınamadı.",
+      );
+    } finally {
+      if (isMountedRef.current) setLoading(false);
+    }
+  }, [decisionFilter, uploadId, page, pageSize]);
 
   useEffect(() => {
     isMountedRef.current = true;
-    fetchGroups();
+    if (uploadId === null) {
+      return () => {
+        isMountedRef.current = false;
+      };
+    }
+    if (viewMode === "candidates") fetchMatches();
+    else fetchGroups();
     return () => {
       isMountedRef.current = false;
     };
-  }, [fetchGroups]);
+  }, [fetchGroups, fetchMatches, viewMode, uploadId]);
+
+  const goPage = (p: number) => {
+    setSearchParams((prev) => {
+      prev.set("page", String(p));
+      return prev;
+    });
+  };
+
+  const setViewMode = (mode: "groups" | "candidates") => {
+    setSearchParams((prev) => {
+      prev.set("page", "1");
+      prev.set("view", mode);
+      return prev;
+    });
+  };
+
+  const openReviewAt = (idx: number) => {
+    setReviewError(null);
+    setReviewIndex(Math.max(0, Math.min(matches.length - 1, idx)));
+    setReviewOpen(true);
+  };
+
+  const closeReview = () => setReviewOpen(false);
+
+  const reviewPrev = () => {
+    setReviewIndex((i) => Math.max(0, i - 1));
+  };
+
+  const reviewNext = () => {
+    setReviewIndex((i) => Math.min(matches.length - 1, i + 1));
+  };
 
   const filtered = useMemo(() => {
     let list = groups;
@@ -247,20 +321,12 @@ export default function YoneticiOnayi() {
   }, [groups, search]);
 
   const selectUpload = (raw: string) => {
-    if (raw === "") {
-      setSelectedUploadId(undefined);
-      localStorage.removeItem("lastDetectUploadId");
-      setSearchParams((p) => {
-        p.delete("upload_id");
-        return p;
-      });
-      return;
-    }
     const id = Number(raw);
-    if (Number.isNaN(id)) return;
-    setSelectedUploadId(id);
+    if (!Number.isFinite(id) || id <= 0) return;
     localStorage.setItem("lastDetectUploadId", String(id));
+    localStorage.setItem("lastUploadId", String(id));
     setSearchParams((p) => {
+      p.set("page", "1");
       p.set("upload_id", String(id));
       return p;
     });
@@ -313,7 +379,7 @@ export default function YoneticiOnayi() {
         recordIds: detailGroup.record_ids,
         approvedRecordIds,
         rejectedRecordIds,
-        uploadId: selectedUploadId ?? detailGroup.records[0]?.upload_id,
+        uploadId: uploadId ?? detailGroup.records[0]?.upload_id,
         decision: decisionFilter,
       });
       setDetailGroup(null);
@@ -376,35 +442,114 @@ export default function YoneticiOnayi() {
     }
   };
 
+  if (uploadId === null) {
+    return (
+      <DashboardLayout>
+        <Header
+          title="Yönetici Onayı"
+          subtitle="Grup bazlı inceleme: kayıtları onaylayın veya hariç tutun; golden record düzenleyin"
+        />
+        <div className="flex-1 p-6 text-sm text-gray-600">
+          Yükleme seçilmedi; Veri Yükleme sayfasına yönlendiriliyorsunuz…
+        </div>
+      </DashboardLayout>
+    );
+  }
+
   return (
     <DashboardLayout>
       <Header
         title="Yönetici Onayı"
         subtitle="Grup bazlı inceleme: kayıtları onaylayın veya hariç tutun; golden record düzenleyin"
         actions={
-          <button
-            onClick={() => fetchGroups()}
-            disabled={loading}
-            className="flex cursor-pointer items-center gap-2 rounded-lg border border-gray-200 px-4 py-2 text-sm text-gray-600 transition-colors hover:bg-gray-50 disabled:opacity-60"
-          >
-            <i className={loading ? "ri-loader-4-line animate-spin" : "ri-refresh-line"} />
-            Yenile
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={async () => {
+                setGroundTruthBusy(true);
+                setApiError("");
+                try {
+                  await downloadMlGroundTruthCsv();
+                } catch (error) {
+                  setApiError(getErrorMessage(error, "Ground truth CSV indirilemedi."));
+                } finally {
+                  setGroundTruthBusy(false);
+                }
+              }}
+              disabled={groundTruthBusy}
+              title="Onaylanan ve reddedilen eşleşmeler + ML eğitimiyle aynı 6 özellik"
+              className="flex cursor-pointer items-center gap-2 rounded-lg border border-gray-200 px-4 py-2 text-sm text-gray-700 transition-colors hover:bg-gray-50 disabled:opacity-60"
+            >
+              <i
+                className={
+                  groundTruthBusy ? "ri-loader-4-line animate-spin" : "ri-download-2-line"
+                }
+              />
+              Ground truth CSV
+            </button>
+            <button
+              onClick={() => fetchGroups()}
+              disabled={loading}
+              className="flex cursor-pointer items-center gap-2 rounded-lg border border-gray-200 px-4 py-2 text-sm text-gray-600 transition-colors hover:bg-gray-50 disabled:opacity-60"
+            >
+              <i className={loading ? "ri-loader-4-line animate-spin" : "ri-refresh-line"} />
+              Yenile
+            </button>
+          </div>
         }
       />
 
       <div className="flex-1 space-y-4 overflow-y-auto p-6">
+        <FlowNav step="detect" uploadId={uploadId} />
+
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+          <div className="rounded-xl border border-gray-100 bg-white p-4">
+            <p className="text-xs text-gray-400">
+              {viewMode === "candidates" ? "Toplam Aday" : "Toplam Grup"}
+            </p>
+            <p className="mt-1 text-lg font-bold text-gray-900">
+              {(viewMode === "candidates" ? matchesTotal : total).toLocaleString(
+                "tr-TR",
+              )}
+            </p>
+          </div>
+          <div className="rounded-xl border border-gray-100 bg-white p-4">
+            <p className="text-xs text-gray-400">Sayfa</p>
+            <p className="mt-1 text-lg font-bold text-gray-900">
+              {page} / {viewMode === "candidates" ? matchesTotalPages : totalPages}
+            </p>
+          </div>
+          <div className="rounded-xl border border-gray-100 bg-white p-4">
+            <p className="text-xs text-gray-400">Önizleme</p>
+            <select
+              value={pageSize}
+              onChange={(e) => {
+                const v = e.target.value;
+                setSearchParams((p) => {
+                  p.set("page", "1");
+                  p.set("page_size", v);
+                  return p;
+                });
+              }}
+              className="ui-focus-ring mt-2 cursor-pointer rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
+            >
+              <option value="25">25</option>
+              <option value="50">50</option>
+              <option value="100">100</option>
+            </select>
+          </div>
+        </div>
+
         <div className="flex flex-wrap items-end gap-3">
           <div>
             <label className="mb-1 block text-xs font-medium text-gray-600">
               Yükleme Seçin
             </label>
             <select
-              value={selectedUploadId ?? ""}
+              value={uploadId}
               onChange={(e) => selectUpload(e.target.value)}
-              className="min-w-[280px] cursor-pointer rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm focus:border-red-400 focus:outline-none focus:ring-1 focus:ring-red-100"
+              className="ui-focus-ring min-w-[280px] cursor-pointer rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
             >
-              <option value="">Tüm yüklemeler</option>
               {uploads.map((u) => (
                 <option key={u.id} value={u.id}>
                   #{u.id} — {u.file_name} ({u.total_records} kayıt,{" "}
@@ -413,11 +558,48 @@ export default function YoneticiOnayi() {
               ))}
             </select>
           </div>
+
+          <div>
+            <label className="mb-1 block text-xs font-medium text-gray-600">
+              Görünüm
+            </label>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setViewMode("groups")}
+                className={`cursor-pointer rounded-lg px-3 py-2 text-xs font-medium transition-colors ${
+                  viewMode === "groups"
+                    ? "bg-gradient-to-r from-primary-600 to-primary-700 text-white shadow-sm"
+                    : "border border-gray-200 text-gray-600 hover:bg-gray-50"
+                }`}
+              >
+                Gruplar
+              </button>
+              <button
+                type="button"
+                onClick={() => setViewMode("candidates")}
+                className={`cursor-pointer rounded-lg px-3 py-2 text-xs font-medium transition-colors ${
+                  viewMode === "candidates"
+                    ? "bg-gradient-to-r from-primary-600 to-primary-700 text-white shadow-sm"
+                    : "border border-gray-200 text-gray-600 hover:bg-gray-50"
+                }`}
+              >
+                Aday Eşleşmeler
+              </button>
+            </div>
+          </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
           <button
-            onClick={() => setDecisionFilter("pending")}
+            onClick={() => {
+              setDecisionFilter("pending");
+              setSearchParams((p) => {
+                p.set("page", "1");
+                p.set("decision", "pending");
+                return p;
+              });
+            }}
             className={`cursor-pointer rounded-lg px-3 py-2 text-xs font-medium transition-colors ${filterClass(
               decisionFilter === "pending",
             )}`}
@@ -425,7 +607,14 @@ export default function YoneticiOnayi() {
             Bekliyor
           </button>
           <button
-            onClick={() => setDecisionFilter("approved")}
+            onClick={() => {
+              setDecisionFilter("approved");
+              setSearchParams((p) => {
+                p.set("page", "1");
+                p.set("decision", "approved");
+                return p;
+              });
+            }}
             className={`cursor-pointer rounded-lg px-3 py-2 text-xs font-medium transition-colors ${filterClass(
               decisionFilter === "approved",
             )}`}
@@ -433,7 +622,14 @@ export default function YoneticiOnayi() {
             Onaylandı
           </button>
           <button
-            onClick={() => setDecisionFilter("rejected")}
+            onClick={() => {
+              setDecisionFilter("rejected");
+              setSearchParams((p) => {
+                p.set("page", "1");
+                p.set("decision", "rejected");
+                return p;
+              });
+            }}
             className={`cursor-pointer rounded-lg px-3 py-2 text-xs font-medium transition-colors ${filterClass(
               decisionFilter === "rejected",
             )}`}
@@ -459,12 +655,38 @@ export default function YoneticiOnayi() {
             value={search}
             onChange={(event) => setSearch(event.target.value)}
             placeholder="Group ID, ad, tc, telefon, email ara..."
-            className="w-full rounded-lg border border-gray-200 py-2.5 pl-9 pr-4 text-sm focus:border-red-400 focus:outline-none focus:ring-1 focus:ring-red-100"
+            className="ui-focus-ring w-full rounded-lg border border-slate-200 py-2.5 pl-9 pr-4 text-sm"
           />
         </div>
 
+        <div className="flex items-center justify-between">
+          <button
+            disabled={page <= 1}
+            onClick={() => goPage(Math.max(1, page - 1))}
+            className="rounded-lg border border-gray-200 px-4 py-2 text-sm text-gray-700 disabled:opacity-50"
+          >
+            Önceki
+          </button>
+          <button
+            disabled={
+              page >= (viewMode === "candidates" ? matchesTotalPages : totalPages)
+            }
+            onClick={() =>
+              goPage(
+                Math.min(
+                  viewMode === "candidates" ? matchesTotalPages : totalPages,
+                  page + 1,
+                ),
+              )
+            }
+            className="rounded-lg border border-gray-200 px-4 py-2 text-sm text-gray-700 disabled:opacity-50"
+          >
+            Sonraki
+          </button>
+        </div>
+
         {apiError && (
-          <div className="rounded-xl border border-red-100 bg-red-50 p-4 text-sm text-red-700">
+          <div className="rounded-2xl border border-danger-200 bg-danger-50 p-4 text-sm font-medium text-danger-700 shadow-sm">
             {apiError}
           </div>
         )}
@@ -472,14 +694,105 @@ export default function YoneticiOnayi() {
         <div className="overflow-hidden rounded-xl border border-gray-100 bg-white">
           <div className="border-b border-gray-50 px-5 py-4">
             <h3 className="text-sm font-semibold text-gray-900">
-              Duplicate gruplar — {decisionFilter === "pending" ? "bekleyen" : decisionFilter === "approved" ? "onaylanan" : "reddedilen"}
+              {viewMode === "candidates"
+                ? `Aday eşleşmeler — ${
+                    decisionFilter === "pending"
+                      ? "bekleyen"
+                      : decisionFilter === "approved"
+                        ? "onaylanan"
+                        : "reddedilen"
+                  }`
+                : `Duplicate gruplar — ${
+                    decisionFilter === "pending"
+                      ? "bekleyen"
+                      : decisionFilter === "approved"
+                        ? "onaylanan"
+                        : "reddedilen"
+                  }`}
             </h3>
             <p className="mt-1 text-xs text-gray-400">
-              Çift bazlı eski akış kaldırıldı; tüm kararlar grup üzerinden verilir.
+              {viewMode === "candidates"
+                ? "Bu görünüm büyük veride daha ölçekli: aday eşleşmeler sayfa sayfa yüklenir."
+                : "Çift bazlı eski akış kaldırıldı; tüm kararlar grup üzerinden verilir."}
             </p>
           </div>
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[1040px] text-xs">
+            {viewMode === "candidates" ? (
+              <table className="w-full min-w-[1040px] text-xs">
+                <thead>
+                  <tr className="border-b border-gray-100 bg-gray-50/70">
+                    <th className="px-4 py-3 text-left font-medium text-gray-400">
+                      ID
+                    </th>
+                    <th className="px-4 py-3 text-left font-medium text-gray-400">
+                      Skor
+                    </th>
+                    <th className="px-4 py-3 text-left font-medium text-gray-400">
+                      Sol
+                    </th>
+                    <th className="px-4 py-3 text-left font-medium text-gray-400">
+                      Sağ
+                    </th>
+                    <th className="px-4 py-3 text-left font-medium text-gray-400">
+                      Kaynak
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-50">
+                  {matches.map((m, idx) => (
+                    <tr
+                      key={m.id}
+                      className="transition-colors hover:bg-gray-50/50"
+                    >
+                      <td className="px-4 py-3.5 font-medium text-gray-800">
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => openReviewAt(idx)}
+                            className="cursor-pointer text-xs font-semibold text-primary-700 hover:text-primary-600 hover:underline"
+                            title="Bu adayı incele"
+                          >
+                            İncele
+                          </button>
+                          <span>#{m.id}</span>
+                        </div>
+                      </td>
+                      <td className="px-4 py-3.5 text-gray-600">
+                        {typeof m.final_score === "number"
+                          ? `${m.final_score.toFixed(1)}%`
+                          : pct(m.ml_score)}
+                      </td>
+                      <td className="px-4 py-3.5 text-gray-700">
+                        <div className="font-medium text-gray-800">
+                          {m.donor1_name}
+                        </div>
+                        <div className="text-gray-500">
+                          {m.donor1_tc ||
+                            m.donor1_phone ||
+                            m.donor1_email ||
+                            "—"}
+                        </div>
+                      </td>
+                      <td className="px-4 py-3.5 text-gray-700">
+                        <div className="font-medium text-gray-800">
+                          {m.donor2_name}
+                        </div>
+                        <div className="text-gray-500">
+                          {m.donor2_tc ||
+                            m.donor2_phone ||
+                            m.donor2_email ||
+                            "—"}
+                        </div>
+                      </td>
+                      <td className="px-4 py-3.5 text-gray-500">
+                        {m.decisionSource || m.match_type || "—"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <table className="w-full min-w-[1040px] text-xs">
               <thead>
                 <tr className="border-b border-gray-100 bg-gray-50/70">
                   <th className="px-4 py-3 text-left font-medium text-gray-400">Group ID</th>
@@ -534,7 +847,7 @@ export default function YoneticiOnayi() {
                       <td className="px-4 py-3.5 text-center">
                         <button
                           onClick={() => setDetailGroup(group)}
-                          className="cursor-pointer text-xs font-medium text-red-600 hover:underline"
+                          className="cursor-pointer text-xs font-medium text-primary-700 hover:text-primary-600 hover:underline"
                         >
                           Detay
                         </button>
@@ -544,256 +857,133 @@ export default function YoneticiOnayi() {
                 })}
               </tbody>
             </table>
-            {filtered.length === 0 && !loading && (
-              <div className="py-10 text-center text-sm text-gray-400">
-                Bu filtre için duplicate group bulunmuyor.
-              </div>
+            )}
+            {viewMode === "candidates" ? (
+              matches.length === 0 &&
+              !loading && (
+                <div className="py-10 text-center text-sm text-gray-400">
+                  Bu filtre için aday eşleşme bulunmuyor.
+                </div>
+              )
+            ) : (
+              filtered.length === 0 &&
+              !loading && (
+                <div className="py-10 text-center text-sm text-gray-400">
+                  Bu filtre için duplicate group bulunmuyor.
+                </div>
+              )
             )}
           </div>
         </div>
       </div>
 
-      {detailGroup && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4"
-          onClick={() => setDetailGroup(null)}
-        >
-          <div
-            className="flex max-h-[85vh] w-full max-w-5xl flex-col rounded-2xl bg-white"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <div className="flex items-center justify-between border-b border-gray-100 px-6 py-4">
-              <div>
-                <h2 className="text-base font-bold text-gray-900">
-                  Duplicate Group: {detailGroup.group_id}
-                </h2>
-                <p className="mt-0.5 text-xs text-gray-400">
-                  Grup kayıtları, golden record ve çift bazlı karar geri alma
-                </p>
-              </div>
-              <button
-                onClick={() => setDetailGroup(null)}
-                className="flex h-8 w-8 cursor-pointer items-center justify-center rounded-lg hover:bg-gray-100"
-              >
-                <i className="ri-close-line text-lg text-gray-500" />
-              </button>
-            </div>
-
-            <div className="flex-1 space-y-5 overflow-y-auto p-6">
-              <div className="rounded-xl border border-green-100 bg-green-50 p-4">
-                <div className="mb-3 flex items-center justify-between gap-3">
-                  <h3 className="text-sm font-semibold text-green-800">Golden Record</h3>
-                  <button
-                    type="button"
-                    onClick={saveGoldenRecord}
-                    disabled={
-                      savingGolden ||
-                      changedGoldenFields.length === 0 ||
-                      !entityIdForDetail
-                    }
-                    className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg bg-green-700 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-green-800 disabled:cursor-not-allowed disabled:bg-gray-300"
-                  >
-                    <i className={savingGolden ? "ri-loader-4-line animate-spin" : "ri-save-line"} />
-                    Golden Record'u Güncelle
-                  </button>
-                </div>
-                <div className="grid grid-cols-1 gap-3 text-xs md:grid-cols-2">
-                  {goldenFields.map(({ key, label }) => {
-                    const changed =
-                      goldenDraft[key] !== (detailGroup.golden_record[key] ?? "");
-                    const isEditing = editingGoldenField === key;
-                    return (
-                      <div
-                        key={key}
-                        className={`rounded-lg border bg-white px-3 py-2 ${
-                          changed ? "border-yellow-300" : "border-green-100"
-                        }`}
-                      >
-                        <div className="mb-1 flex items-center justify-between gap-2">
-                          <span className="font-medium text-gray-500">{label}</span>
-                          <button
-                            type="button"
-                            onClick={() => setEditingGoldenField(isEditing ? null : key)}
-                            className="flex h-6 w-6 cursor-pointer items-center justify-center rounded-md text-green-700 hover:bg-green-50"
-                            title={`${label} düzenle`}
-                          >
-                            <i className="ri-pencil-line" />
-                          </button>
-                        </div>
-                        {isEditing ? (
-                          <input
-                            value={goldenDraft[key]}
-                            onChange={(event) =>
-                              setGoldenDraft((prev) => ({
-                                ...prev,
-                                [key]: event.target.value,
-                              }))
-                            }
-                            className={`w-full rounded-md border bg-white px-2 py-1 text-xs text-gray-800 focus:border-green-500 focus:outline-none ${
-                              changed ? "border-yellow-300" : "border-gray-200"
-                            }`}
-                            autoFocus
-                          />
-                        ) : (
-                          <div className="min-h-6 break-words text-gray-800">
-                            {goldenDraft[key] || "-"}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-                <div className="hidden">
-                  <div>
-                    <span className="text-gray-500">Ad Soyad:</span>{" "}
-                    {detailGroup.golden_record.clean_name || "-"}
-                  </div>
-                  <div>
-                    <span className="text-gray-500">TC:</span>{" "}
-                    {detailGroup.golden_record.clean_tc || "-"}
-                  </div>
-                  <div>
-                    <span className="text-gray-500">Telefon:</span>{" "}
-                    {detailGroup.golden_record.clean_phone || "-"}
-                  </div>
-                  <div>
-                    <span className="text-gray-500">E-posta:</span>{" "}
-                    {detailGroup.golden_record.clean_email || "-"}
-                  </div>
-                  <div>
-                    <span className="text-gray-500">Şehir:</span>{" "}
-                    {detailGroup.golden_record.clean_city || "-"}
-                  </div>
-                  <div>
-                    <span className="text-gray-500">Adres:</span>{" "}
-                    {detailGroup.golden_record.clean_address || "-"}
-                  </div>
-                </div>
-              </div>
-
-              {decisionFilter !== "pending" &&
-                (detailGroup.match_candidate_ids?.length ?? 0) > 0 && (
-                  <div className="rounded-xl border border-amber-100 bg-amber-50/80 p-4">
-                    <h3 className="mb-2 text-sm font-semibold text-amber-900">
-                      Çift kararlarını geri al
-                    </h3>
-                    <p className="mb-3 text-xs text-amber-800">
-                      Onaylanmış veya reddedilmiş eşleşmeleri tekrar inceleme kuyruğuna alır. İlgili
-                      üyelikler güvenli şekilde beklemede bırakılır.
-                    </p>
-                    <div className="flex flex-wrap gap-2">
-                      {(detailGroup.match_candidate_ids ?? []).map((mid) => (
-                        <button
-                          key={mid}
-                          type="button"
-                          disabled={resettingMatchId === mid}
-                          onClick={() => handleResetMatch(mid)}
-                          className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-amber-300 bg-white px-3 py-1.5 text-xs font-medium text-amber-900 transition-colors hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                          <i
-                            className={
-                              resettingMatchId === mid
-                                ? "ri-loader-4-line animate-spin"
-                                : "ri-arrow-go-back-line"
-                            }
-                          />
-                          Match #{mid} — Kararı geri al
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                {detailGroup.records.map((record) => (
-                  <div key={record.record_id} className="rounded-xl border border-gray-200 p-4">
-                    <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
-                      <div>
-                        <span className="mb-1 inline-flex rounded-md bg-gray-100 px-2 py-0.5 text-[11px] font-medium text-gray-600">
-                          Yükleme #{record.upload_id}
-                        </span>
-                        <div className="text-xs font-semibold text-gray-700">
-                          Record #{record.record_id}
-                        </div>
-                      </div>
-                      <div className="inline-flex overflow-hidden rounded-lg border border-gray-200 bg-white text-[11px]">
-                        {[
-                          { value: "confirmed", label: "✓ Onayla" },
-                          { value: "pending", label: "— Beklet" },
-                          { value: "excluded", label: "✗ Reddet" },
-                        ].map((option) => {
-                          const active = recordDecisions[record.record_id] === option.value;
-                          return (
-                            <button
-                              key={option.value}
-                              type="button"
-                              onClick={() =>
-                                setRecordDecision(record.record_id, option.value as RecordDecision)
-                              }
-                              className={`cursor-pointer px-2.5 py-1 font-medium transition-colors ${
-                                active
-                                  ? option.value === "confirmed"
-                                    ? "bg-green-600 text-white"
-                                    : option.value === "excluded"
-                                      ? "bg-red-600 text-white"
-                                      : "bg-gray-700 text-white"
-                                  : "text-gray-500 hover:bg-gray-50"
-                              }`}
-                            >
-                              {option.label}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-                    <div className="space-y-1 text-xs text-gray-700">
-                      <div>
-                        <span className="text-gray-500">Yükleme:</span> #{record.upload_id}
-                      </div>
-                      <div>
-                        <span className="text-gray-500">Muhatap kodu:</span>{" "}
-                        {getRecordMuhatapNoDisplay(record) || "—"}
-                      </div>
-                      <div>
-                        <span className="text-gray-500">Ad Soyad:</span> {record.clean_name || "-"}
-                      </div>
-                      <div>
-                        <span className="text-gray-500">TC:</span> {record.clean_tc || "-"}
-                      </div>
-                      <div>
-                        <span className="text-gray-500">Telefon:</span> {record.clean_phone || "-"}
-                      </div>
-                      <div>
-                        <span className="text-gray-500">E-posta:</span> {record.clean_email || "-"}
-                      </div>
-                      <div>
-                        <span className="text-gray-500">Şehir:</span> {record.clean_city || "-"}
-                      </div>
-                      <div>
-                        <span className="text-gray-500">Adres:</span> {record.clean_address || "-"}
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-            <div className="flex flex-wrap items-center justify-between gap-3 border-t border-gray-100 bg-white px-6 py-4">
-              <div className="text-sm font-medium text-gray-700">
-                {confirmedCount} kayıt onaylandı, {excludedCount} kayıt reddedildi
+      <DuplicateGroupReviewModal
+        open={viewMode !== "candidates" && Boolean(detailGroup)}
+        group={detailGroup}
+        decisionFilter={decisionFilter}
+        recordDecisions={recordDecisions}
+        onSetRecordDecision={setRecordDecision}
+        onClose={() => setDetailGroup(null)}
+        onSave={savePartialDecisions}
+        saving={savingPartial}
+        confirmedCount={confirmedCount}
+        excludedCount={excludedCount}
+        getRecordMuhatapNoDisplay={getRecordMuhatapNoDisplay}
+        leftExtra={
+          <div>
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <div className="text-xs font-semibold text-gray-700">
+                Golden Record düzenle
               </div>
               <button
                 type="button"
-                onClick={savePartialDecisions}
-                disabled={savingPartial}
-                className="inline-flex cursor-pointer items-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-60"
+                onClick={saveGoldenRecord}
+                disabled={
+                  savingGolden ||
+                  changedGoldenFields.length === 0 ||
+                  !entityIdForDetail
+                }
+                className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg bg-green-700 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-green-800 disabled:cursor-not-allowed disabled:bg-gray-300"
               >
-                <i className={savingPartial ? "ri-loader-4-line animate-spin" : "ri-save-line"} />
-                Kaydet
+                <i
+                  className={
+                    savingGolden
+                      ? "ri-loader-4-line animate-spin"
+                      : "ri-save-line"
+                  }
+                />
+                Güncelle
               </button>
             </div>
+            <div className="grid grid-cols-1 gap-2 text-[11px] md:grid-cols-2">
+              {goldenFields.map(({ key, label }) => {
+                const changed =
+                  goldenDraft[key] !== (detailGroup?.golden_record[key] ?? "");
+                const isEditing = editingGoldenField === key;
+                return (
+                  <div
+                    key={key}
+                    className={`rounded-lg border bg-white px-2 py-1.5 ${
+                      changed ? "border-yellow-300" : "border-green-100"
+                    }`}
+                  >
+                    <div className="mb-1 flex items-center justify-between gap-2">
+                      <span className="font-medium text-gray-500">{label}</span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setEditingGoldenField(isEditing ? null : key)
+                        }
+                        className="flex h-6 w-6 cursor-pointer items-center justify-center rounded-md text-green-700 hover:bg-green-50"
+                        title={`${label} düzenle`}
+                      >
+                        <i className="ri-pencil-line" />
+                      </button>
+                    </div>
+                    {isEditing ? (
+                      <input
+                        value={goldenDraft[key]}
+                        onChange={(event) =>
+                          setGoldenDraft((prev) => ({
+                            ...prev,
+                            [key]: event.target.value,
+                          }))
+                        }
+                        className={`w-full rounded-md border bg-white px-2 py-1 text-[11px] text-gray-800 focus:border-green-500 focus:outline-none ${
+                          changed ? "border-yellow-300" : "border-gray-200"
+                        }`}
+                        autoFocus
+                      />
+                    ) : (
+                      <div className="min-h-5 break-words text-gray-800">
+                        {goldenDraft[key] || "-"}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
           </div>
-        </div>
-      )}
+        }
+      />
+
+      <MatchReviewModal
+        open={viewMode === "candidates" && reviewOpen}
+        match={viewMode === "candidates" ? matches[reviewIndex] ?? null : null}
+        index={reviewIndex}
+        total={matches.length}
+        canReset={decisionFilter !== "pending"}
+        busy={reviewBusy}
+        error={reviewError}
+        onClose={closeReview}
+        onPrev={reviewPrev}
+        onNext={reviewNext}
+        onBusyChange={setReviewBusy}
+        onError={setReviewError}
+        onAfterAction={() => {
+          void fetchMatches();
+        }}
+      />
     </DashboardLayout>
   );
 }

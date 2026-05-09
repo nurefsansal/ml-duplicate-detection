@@ -9,20 +9,28 @@ import io
 import json
 import os
 import tempfile
+import time
 from datetime import datetime
 from typing import Any
 
 import pandas as pd
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
+from starlette.requests import Request
 from pydantic import BaseModel, Field
 from sqlalchemy import create_engine
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, func, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from backend.models.database import ColumnMapping, NormalizationRun, NormalizedRecord, RawRecord, Upload
 from backend.services.normalization_service import infer_target_field_name
 from backend.api.routes.hanna_connector import ConnectorConnectionInput
 from backend.services.database_connector_service import DatabaseConnectorService
+from backend.services.job_service import create_job, update_job_progress
+from backend.services.pipeline_log_service import (
+    add_pipeline_event,
+    create_pipeline_run,
+    finalize_pipeline_run,
+)
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
@@ -131,15 +139,199 @@ def _iter_csv_chunks(file_path: str):
         return pd.read_csv(file_path, chunksize=2000, encoding="latin-1")
 
 
+def _read_excel_header(file_path: str) -> list[str]:
+    # Read only header row without loading the full file to memory.
+    try:
+        import openpyxl  # type: ignore
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=500,
+            detail=f"Excel okumak için openpyxl gerekli: {exc}",
+        ) from exc
+
+    wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
+    ws = wb.active
+    try:
+        first_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), None)
+        if not first_row:
+            return []
+        header = [str(v).strip() if v is not None else "" for v in first_row]
+        return [h if h else f"column_{i+1}" for i, h in enumerate(header)]
+    finally:
+        wb.close()
+
+
+def _iter_excel_rows(file_path: str, *, chunk_size: int = 2000):
+    # Stream Excel rows in chunks using openpyxl read-only mode.
+    import openpyxl  # type: ignore
+
+    wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
+    ws = wb.active
+    try:
+        rows_iter = ws.iter_rows(values_only=True)
+        header_row = next(rows_iter, None)
+        if not header_row:
+            return
+        header = [str(v).strip() if v is not None else "" for v in header_row]
+        header = [h if h else f"column_{i+1}" for i, h in enumerate(header)]
+
+        batch: list[dict] = []
+        for values in rows_iter:
+            row_dict = {header[i]: values[i] if i < len(values) else None for i in range(len(header))}
+            batch.append(row_dict)
+            if len(batch) >= chunk_size:
+                yield batch
+                batch = []
+        if batch:
+            yield batch
+    finally:
+        wb.close()
+
+
+def _run_upload_ingestion_job(
+    *,
+    temp_file_path: str,
+    upload_id: int,
+    source_type: str,
+    job_id: int | None,
+    request_id: str | None,
+):
+    """Background job: stage file -> raw_records."""
+    db = SessionLocal()
+    run_id: int | None = None
+    t0 = time.monotonic()
+    processed = 0
+    try:
+        run = create_pipeline_run(
+            db,
+            pipeline_type="upload",
+            request_id=request_id,
+            upload_id=upload_id,
+            job_id=job_id,
+            metadata={"source_type": source_type},
+        )
+        run_id = run.id
+        add_pipeline_event(
+            db,
+            run_id=run.id,
+            stage="ingest",
+            event_type="started",
+            message="Ham kayıt ingest başladı",
+        )
+        db.commit()
+
+        if source_type == "csv":
+            for chunk_df in _iter_csv_chunks(temp_file_path):
+                records = chunk_df.to_dict(orient="records")
+                processed += len(records)
+                _insert_raw_batch(
+                    db,
+                    upload_id=upload_id,
+                    rows=records,
+                    start_index=processed - len(records) + 1,
+                )
+                db.flush()
+                if job_id is not None:
+                    update_job_progress(
+                        db,
+                        job_id=job_id,
+                        status="running",
+                        processed_rows=processed,
+                        progress=min(99.0, float(processed % 100000) / 1000.0),
+                    )
+                if run_id is not None:
+                    finalize_pipeline_run(db, run_id=run_id, status="running", processed_rows=processed)
+                db.commit()
+        else:
+            for batch in _iter_excel_rows(temp_file_path, chunk_size=2000):
+                processed += len(batch)
+                _insert_raw_batch(
+                    db,
+                    upload_id=upload_id,
+                    rows=batch,
+                    start_index=processed - len(batch) + 1,
+                )
+                db.flush()
+                if job_id is not None:
+                    update_job_progress(
+                        db,
+                        job_id=job_id,
+                        status="running",
+                        processed_rows=processed,
+                        progress=min(99.0, float(processed % 100000) / 1000.0),
+                    )
+                if run_id is not None:
+                    finalize_pipeline_run(db, run_id=run_id, status="running", processed_rows=processed)
+                db.commit()
+
+        upload = db.query(Upload).filter(Upload.id == upload_id).first()
+        if upload is not None:
+            upload.total_records = int(processed)
+            upload.status = "uploaded"
+            upload.processing_stage = "raw"
+            upload.completed_at = datetime.utcnow()
+            db.flush()
+
+        if job_id is not None:
+            update_job_progress(
+                db,
+                job_id=job_id,
+                status="completed",
+                progress=100.0,
+                total_rows=int(processed),
+                processed_rows=int(processed),
+            )
+
+        if run_id is not None:
+            duration_ms = int((time.monotonic() - t0) * 1000)
+            add_pipeline_event(
+                db,
+                run_id=run_id,
+                stage="ingest",
+                event_type="completed",
+                message="Ham kayıt ingest tamamlandı",
+                total_rows=int(processed),
+                processed_rows=int(processed),
+                duration_ms=duration_ms,
+            )
+            finalize_pipeline_run(
+                db,
+                run_id=run_id,
+                status="completed",
+                total_rows=int(processed),
+                processed_rows=int(processed),
+                metadata_patch={"duration_ms": duration_ms},
+            )
+
+        db.commit()
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        if job_id is not None:
+            update_job_progress(db, job_id=job_id, status="failed", error_message=str(exc))
+        if run_id is not None:
+            add_pipeline_event(db, run_id=run_id, stage="ingest", event_type="failed", message=str(exc))
+            finalize_pipeline_run(db, run_id=run_id, status="failed", error_message=str(exc))
+        db.commit()
+    finally:
+        db.close()
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                os.remove(temp_file_path)
+            except OSError:
+                pass
+
+
 router = APIRouter()
 
 
 @router.post("/uploads/file")
 async def upload_file_only(
+    background_tasks: BackgroundTasks,
+    request: Request,
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
 ):
-    """Dosyayı yükle: uploads + raw_records oluştur. Normalizasyon YAPMA."""
+    """Dosyayı yükle: uploads oluştur, ingest arka planda raw_records'a yazar."""
     filename = (file.filename or "").lower()
     if not (
         filename.endswith(".xlsx") or filename.endswith(".xls") or filename.endswith(".csv")
@@ -158,102 +350,82 @@ async def upload_file_only(
                 if not chunk:
                     break
                 file_size_bytes += len(chunk)
+                if file_size_bytes > 100 * 1024 * 1024:
+                    raise HTTPException(
+                        status_code=413,
+                        detail="Dosya boyutu 100 MB sınırını aşıyor. Büyük veri için CSV önerilir.",
+                    )
                 temp_file.write(chunk)
             temp_file_path = temp_file.name
+    except HTTPException:
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                os.remove(temp_file_path)
+            except OSError:
+                pass
+        raise
     except Exception as exc:
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                os.remove(temp_file_path)
+            except OSError:
+                pass
         raise HTTPException(status_code=400, detail=f"Dosya okunamadı: {exc}") from exc
 
     try:
-        if filename.endswith(".xlsx") or filename.endswith(".xls"):
-            df = pd.read_excel(temp_file_path)
-            source_type = "excel"
-            source_columns = [str(col) for col in df.columns]
-            total_records = len(df)
-            suggested_mappings = {col: _suggested_target_field(col) for col in source_columns}
+        is_excel = filename.endswith(".xlsx") or filename.endswith(".xls")
+        source_type = "excel" if is_excel else "csv"
 
-            upload = Upload(
-                source_type=source_type,
-                source_name=file.filename or "uploaded_file",
-                file_name=file.filename or "uploaded_file",
-                file_size_bytes=file_size_bytes,
-                total_records=total_records,
-                status="uploaded",
-                processing_stage="raw",
-            )
-            db.add(upload)
-            db.flush()
-            _insert_raw_batch(
-                db,
-                upload_id=upload.id,
-                rows=[row.to_dict() for _, row in df.iterrows()],
-                start_index=1,
-            )
-            db.commit()
-            db.refresh(upload)
-            return {
-                "success": True,
-                "upload_id": upload.id,
-                "file_name": upload.file_name,
-                "source_type": upload.source_type,
-                "total_records": total_records,
-                "source_columns": source_columns,
-                "suggested_mappings": suggested_mappings,
-            }
+        if is_excel:
+            source_columns = _read_excel_header(temp_file_path)
+        else:
+            try:
+                source_columns = list(pd.read_csv(temp_file_path, nrows=0, encoding="utf-8").columns)
+            except UnicodeDecodeError:
+                source_columns = list(pd.read_csv(temp_file_path, nrows=0, encoding="latin-1").columns)
+            source_columns = [str(col) for col in source_columns]
 
-        source_type = "csv"
+        if not source_columns:
+            raise HTTPException(status_code=400, detail="Dosya boş veya okunamadı")
+
+        suggested_mappings = {col: _suggested_target_field(col) for col in source_columns}
+
         upload = Upload(
             source_type=source_type,
             source_name=file.filename or "uploaded_file",
             file_name=file.filename or "uploaded_file",
             file_size_bytes=file_size_bytes,
             total_records=0,
-            status="uploaded",
-            processing_stage="raw",
+            status="processing",
+            processing_stage="ingesting",
         )
         db.add(upload)
         db.flush()
 
-        total_records = 0
-        source_columns: list[str] = []
-        batch_rows: list[dict] = []
-        for chunk_df in _iter_csv_chunks(temp_file_path):
-            if not source_columns:
-                source_columns = [str(col) for col in chunk_df.columns]
-            records = chunk_df.to_dict(orient="records")
-            total_records += len(records)
-            batch_rows.extend(records)
-            if len(batch_rows) >= 2000:
-                _insert_raw_batch(
-                    db,
-                    upload_id=upload.id,
-                    rows=batch_rows,
-                    start_index=total_records - len(batch_rows) + 1,
-                )
-                db.flush()
-                batch_rows = []
-
-        if batch_rows:
-            _insert_raw_batch(
-                db,
-                upload_id=upload.id,
-                rows=batch_rows,
-                start_index=total_records - len(batch_rows) + 1,
-            )
-
-        if not source_columns:
-            raise HTTPException(status_code=400, detail="CSV dosyası boş veya okunamadı")
-
-        upload.total_records = total_records
-        suggested_mappings = {col: _suggested_target_field(col) for col in source_columns}
-
+        job = create_job(db, job_type="upload")
+        if job is not None:
+            db.flush()
         db.commit()
         db.refresh(upload)
+
+        req_id = getattr(getattr(request, "state", None), "request_id", None)
+        background_tasks.add_task(
+            _run_upload_ingestion_job,
+            temp_file_path=temp_file_path,
+            upload_id=upload.id,
+            source_type=source_type,
+            job_id=job.id if job is not None else None,
+            request_id=req_id,
+        )
+        temp_file_path = None  # background task will clean it
+
         return {
             "success": True,
             "upload_id": upload.id,
+            "job_id": job.id if job is not None else None,
             "file_name": upload.file_name,
             "source_type": upload.source_type,
-            "total_records": total_records,
+            "total_records": 0,
             "source_columns": source_columns,
             "suggested_mappings": suggested_mappings,
         }
@@ -300,6 +472,53 @@ def get_upload_columns(upload_id: int, db: Session = Depends(get_db)):
         "upload_id": upload_id,
         "source_columns": source_columns,
         "suggested_mappings": suggested_mappings,
+    }
+
+
+@router.get("/uploads/{upload_id}/raw-records")
+def list_raw_records(
+    upload_id: int,
+    page: int = 1,
+    page_size: int = 50,
+    db: Session = Depends(get_db),
+):
+    """Ham kayıtları sayfalı listele (raw_records)."""
+    upload = db.query(Upload).filter(Upload.id == upload_id).first()
+    if not upload:
+        raise HTTPException(status_code=404, detail=f"Upload {upload_id} bulunamadı")
+
+    page = max(1, int(page))
+    page_size = max(1, min(500, int(page_size)))
+    offset = (page - 1) * page_size
+
+    q = db.query(RawRecord).filter(RawRecord.upload_id == upload_id)
+    total = int(q.with_entities(func.count(RawRecord.id)).scalar() or 0)
+    rows = (
+        q.order_by(RawRecord.id.asc())
+        .offset(offset)
+        .limit(page_size)
+        .all()
+    )
+
+    records = [
+        {
+            "id": r.id,
+            "upload_id": r.upload_id,
+            "row_index": r.row_index,
+            "raw_payload": r.raw_payload or {},
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        }
+        for r in rows
+    ]
+
+    return {
+        "success": True,
+        "upload_id": upload_id,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": max(1, (total + page_size - 1) // page_size),
+        "records": records,
     }
 
 

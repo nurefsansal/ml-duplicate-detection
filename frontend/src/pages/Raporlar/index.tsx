@@ -21,7 +21,7 @@ import {
 
 const reportTabs = [
   { id: "overview", icon: "ri-dashboard-3-line", label: "Genel Özet", desc: "Toplam kayıt, tespit ve onay istatistikleri" },
-  { id: "data-quality", icon: "ri-shield-check-line", label: "Veri Kalitesi", desc: "Normalizasyon başarısı, geçerli/geçersiz kayıt oranları", badge: "Yeni" },
+  { id: "data-quality", icon: "ri-shield-check-line", label: "Veri Kalitesi", desc: "Standardizasyon başarısı, geçerli/geçersiz kayıt oranları", badge: "Yeni" },
   { id: "detection", icon: "ri-search-eye-line", label: "Tespit Özeti", desc: "Tespit çalışmaları, mükerrer aday istatistikleri", badge: null },
   { id: "review", icon: "ri-checkbox-circle-line", label: "İnceleme Özeti", desc: "Onay/red kararları ve inceleme istatistikleri", badge: null },
   { id: "upload-history", icon: "ri-upload-cloud-2-line", label: "Yükleme Geçmişi", desc: "Kaynak bazlı yükleme istatistikleri", badge: null },
@@ -268,7 +268,7 @@ export default function Raporlar() {
                         <StatCard label="Geçerlilik Oranı" value={`%${quality.validity_rate}`} color="text-blue-600" bg="bg-blue-50" />
                       </div>
                       <div className="pt-4 border-t border-gray-100 grid grid-cols-2 sm:grid-cols-4 gap-4">
-                        <StatCard label="Normalizasyon Çalışması" value={quality.normalization_runs} />
+                        <StatCard label="Standardizasyon Çalışması" value={quality.normalization_runs} />
                         <StatCard label="İşlenen" value={quality.total_processed.toLocaleString("tr-TR")} />
                         <StatCard label="Başarılı" value={quality.total_success.toLocaleString("tr-TR")} color="text-green-600" bg="bg-green-50" />
                         <StatCard label="Hatalı" value={quality.total_failed} color="text-orange-600" bg="bg-orange-50" />

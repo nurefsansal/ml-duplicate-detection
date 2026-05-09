@@ -19,8 +19,10 @@ from backend.services.database_service import EntityMapService
 from backend.services.review_service import (
     approve_match_candidate,
     approve_group_partial,
+    get_duplicate_groups_page,
     get_duplicate_groups,
     get_match_candidates,
+    get_match_candidates_page,
     get_entity_memberships,
     get_match_candidate_statistics,
     get_pending_match_candidates,
@@ -135,6 +137,8 @@ class ResetMatchRequest(BaseModel):
 def get_pending_matches(
     upload_id: Optional[int] = None,
     limit: int = 50,
+    page: int = 1,
+    page_size: int = 50,
     db: Session = Depends(get_db),
 ):
     """
@@ -145,17 +149,23 @@ def get_pending_matches(
     - limit: Kac adet goster (default 50)
     """
     try:
-        pending_matches = get_pending_match_candidates(
+        total, pending_matches = get_match_candidates_page(
             db,
             upload_id=upload_id,
-            limit=limit,
+            decision="pending",
+            page=page,
+            page_size=page_size,
+            latest_only=True,
         )
-
         result = [serialize_match_candidate(match, db) for match in pending_matches]
 
         return {
             "success": True,
             "count": len(result),
+            "total": total,
+            "page": max(1, int(page)),
+            "page_size": max(1, min(200, int(page_size))),
+            "total_pages": max(1, (total + max(1, min(200, int(page_size))) - 1) // max(1, min(200, int(page_size)))),
             "matches": result,
         }
     except Exception as e:
@@ -167,6 +177,8 @@ def list_matches(
     decision: str = Query("pending", pattern="^(pending|approved|rejected)$"),
     upload_id: Optional[int] = None,
     limit: int = 100,
+    page: int = 1,
+    page_size: int = 50,
     db: Session = Depends(get_db),
 ):
     """
@@ -178,17 +190,24 @@ def list_matches(
     - limit: sonuc limiti
     """
     try:
-        matches = get_match_candidates(
+        # Keep legacy "limit" behavior as an upper bound; pagination still applies.
+        total, rows = get_match_candidates_page(
             db,
             upload_id=upload_id,
             decision=decision,
-            limit=limit,
+            page=page,
+            page_size=min(int(page_size), int(limit)) if limit else page_size,
+            latest_only=True,
         )
-        result = [serialize_match_candidate(match, db) for match in matches]
+        result = [serialize_match_candidate(match, db) for match in rows]
         return {
             "success": True,
             "decision": decision,
             "count": len(result),
+            "total": total,
+            "page": max(1, int(page)),
+            "page_size": max(1, min(200, int(page_size))),
+            "total_pages": max(1, (total + max(1, min(200, int(page_size))) - 1) // max(1, min(200, int(page_size)))),
             "matches": result,
         }
     except Exception as e:
@@ -200,6 +219,8 @@ def list_duplicate_groups(
     decision: str = Query("approved", pattern="^(pending|approved|rejected)$"),
     upload_id: Optional[int] = None,
     limit: int = 5000,
+    page: int = 1,
+    page_size: int = 50,
     different_muhatap_code: bool = False,
     db: Session = Depends(get_db),
 ):
@@ -207,17 +228,26 @@ def list_duplicate_groups(
     Pair esitlesmeleri graph olarak birlestirip duplicate group listesi doner.
     """
     try:
-        groups = get_duplicate_groups(
+        page = max(1, int(page))
+        page_size = max(1, min(200, int(page_size)))
+
+        groups, total = get_duplicate_groups_page(
             db,
             upload_id=upload_id,
             decision=decision,
             limit=limit,
+            page=page,
+            page_size=page_size,
             different_muhatap_code=different_muhatap_code,
         )
         return {
             "success": True,
             "decision": decision,
             "count": len(groups),
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": max(1, (total + page_size - 1) // page_size),
             "groups": groups,
         }
     except SQLAlchemyError as exc:
@@ -228,6 +258,10 @@ def list_duplicate_groups(
                 "success": False,
                 "decision": decision,
                 "count": 0,
+                "total": 0,
+                "page": page,
+                "page_size": page_size,
+                "total_pages": 1,
                 "groups": [],
                 "error": "Duplicate group verisi okunurken veritabanı kaynaklı bir sorun oluştu.",
                 "detail": str(getattr(exc, "orig", exc)),
@@ -241,6 +275,10 @@ def list_duplicate_groups(
                 "success": False,
                 "decision": decision,
                 "count": 0,
+                "total": 0,
+                "page": page,
+                "page_size": page_size,
+                "total_pages": 1,
                 "groups": [],
                 "error": "Duplicate group verisi şu anda alınamadı.",
                 "detail": str(e),

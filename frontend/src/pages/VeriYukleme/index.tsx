@@ -13,6 +13,9 @@ import {
   healthCheck,
   apiClient,
 } from "../../services/api";
+import { useJobPolling } from "../../hooks/useJobPolling";
+import { JobStatusBanner } from "../../components/feature/JobStatusBanner";
+import { FlowNav } from "../../components/feature/FlowNav";
 
 type SourceType = "excel" | "csv" | "api" | "manuel" | "institution";
 
@@ -26,6 +29,7 @@ export default function VeriYukleme() {
   const [statusMessage, setStatusMessage] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
   const [result, setResult] = useState<UploadFileResponse | null>(null);
+  const [jobId, setJobId] = useState<number | null>(null);
   const [connectorProfile, setConnectorProfile] = useState<any | null>(null);
   const [connectorTables, setConnectorTables] = useState<Array<{table_schema:string;table_name:string}>>([]);
   const [selectedConnectorTable, setSelectedConnectorTable] = useState<string | null>(null);
@@ -73,29 +77,27 @@ export default function VeriYukleme() {
     setErrorMessage("");
     setStatusMessage("");
     setResult(null);
-
-    const timer = setInterval(() => {
-      setProgress((p) => Math.min(p + 8, 92));
-    }, 180);
+    setJobId(null);
 
     try {
       const response = await uploadFileOnly(file);
       setResult(response);
+      setJobId(typeof response.job_id === "number" ? response.job_id : null);
 
       if (typeof response.upload_id === "number") {
         localStorage.setItem("lastUploadId", String(response.upload_id));
       }
 
-      setStatusMessage(
-        `Yükleme tamamlandı — ${response.total_records} ham kayıt kaydedildi (Upload ID: ${response.upload_id})`,
-      );
-      setProgress(100);
+      if (response.job_id) {
+        setStatusMessage(`Yükleme başlatıldı (Job ID: ${response.job_id}). Arka planda işleniyor…`);
+      } else {
+        setStatusMessage(`Yükleme başlatıldı. Arka planda işleniyor…`);
+      }
     } catch (error) {
       setErrorMessage(getError(error));
       setProgress(0);
     } finally {
-      clearInterval(timer);
-      setTimeout(() => setUploading(false), 600);
+      // uploading state will be finalized when job completes (polling).
     }
   };
 
@@ -103,7 +105,37 @@ export default function VeriYukleme() {
     setUploading(false);
     setProgress(0);
     setFileName("");
+    setJobId(null);
   };
+
+  const { job: uploadJob, error: jobError } = useJobPolling(jobId);
+
+  useEffect(() => {
+    if (jobError) {
+      setErrorMessage(jobError);
+    }
+  }, [jobError]);
+
+  useEffect(() => {
+    if (!uploadJob) return;
+    setProgress(Math.max(0, Math.min(100, Number(uploadJob.progress || 0))));
+
+    if (uploadJob.status === "completed") {
+      setUploading(false);
+      setProgress(100);
+      const uploadId = result?.upload_id;
+      setStatusMessage(
+        uploadId
+          ? `Yükleme tamamlandı — ham kayıtlar hazır (Upload ID: ${uploadId})`
+          : "Yükleme tamamlandı — ham kayıtlar hazır",
+      );
+    }
+    if (uploadJob.status === "failed") {
+      setUploading(false);
+      setErrorMessage(uploadJob.error_message || "Yükleme sırasında hata oluştu");
+      setProgress(0);
+    }
+  }, [uploadJob, result?.upload_id]);
 
   return (
     <DashboardLayout>
@@ -111,47 +143,63 @@ export default function VeriYukleme() {
         title="Veri Yükleme"
         subtitle="Excel veya CSV dosyası yükleyin — ham kayıtlar raw_records tablosuna kaydedilir"
         actions={
-          <div className="flex items-center gap-2 text-xs text-gray-500 bg-gray-50 border border-gray-100 rounded-lg px-3 py-2">
-            <i className="ri-information-line text-sm"></i>
-            <span>Maks. 50 MB &bull; .xlsx .csv destekleniyor</span>
+          <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white/90 px-3 py-2 text-xs font-medium text-slate-600 shadow-sm">
+            <i className="ri-information-line text-sm text-primary-600" />
+            <span>Maks. 100 MB &bull; .xlsx .csv destekleniyor</span>
           </div>
         }
       />
 
       <div className="flex-1 overflow-y-auto p-6 space-y-5">
+        <FlowNav
+          step="upload"
+          uploadId={result?.upload_id ?? null}
+          canGoNext={uploadJob?.status === "completed" || !jobId}
+        />
+
         {/* Stat cards */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-          <div className="bg-white rounded-xl p-4 border border-gray-100">
-            <p className="text-xs text-gray-400">Backend Durumu</p>
-            <p className={`text-sm font-semibold mt-1 ${backendHealthy ? "text-green-600" : backendHealthy === false ? "text-red-600" : "text-gray-400"}`}>
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+          <div className="ui-card p-5">
+            <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Backend Durumu</p>
+            <p
+              className={`mt-1 text-sm font-semibold ${
+                backendHealthy
+                  ? "text-emerald-600"
+                  : backendHealthy === false
+                    ? "text-danger-700"
+                    : "text-slate-400"
+              }`}
+            >
               {backendHealthy === null ? "Kontrol ediliyor…" : backendHealthy ? "Bağlantı aktif" : "Erişilemiyor"}
             </p>
           </div>
-          <div className="bg-white rounded-xl p-4 border border-gray-100">
-            <p className="text-xs text-gray-400">Yüklenen Ham Kayıt</p>
-            <p className="text-lg font-bold text-gray-900 mt-1">
+          <div className="ui-card p-5">
+            <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Yüklenen Ham Kayıt</p>
+            <p className="mt-1 text-2xl font-bold tabular-nums tracking-tight text-slate-900">
               {result ? result.total_records : 0}
             </p>
           </div>
-          <div className="bg-white rounded-xl p-4 border border-gray-100">
-            <p className="text-xs text-gray-400">Upload ID</p>
-            <p className="text-lg font-bold text-gray-900 mt-1">
+          <div className="ui-card p-5">
+            <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Upload ID</p>
+            <p className="mt-1 text-2xl font-bold tabular-nums tracking-tight text-slate-900">
               {result ? `#${result.upload_id}` : "—"}
             </p>
           </div>
         </div>
 
         {/* Info banner: this page does NOT run normalization */}
-        <div className="flex items-start gap-3 rounded-xl border border-blue-100 bg-blue-50 p-4">
-          <i className="ri-information-line text-lg text-blue-500 mt-0.5 flex-shrink-0" />
+        <div className="flex items-start gap-3 rounded-2xl border border-primary-200/80 bg-gradient-to-r from-primary-50/90 to-indigo-50/70 p-4 shadow-sm">
+          <i className="ri-information-line mt-0.5 flex-shrink-0 text-lg text-primary-600" />
           <div>
-            <p className="text-sm font-medium text-blue-800">Bu sayfa sadece ham veri yükler</p>
-            <p className="text-xs text-blue-600 mt-0.5">
+            <p className="text-sm font-semibold text-primary-950">Bu sayfa sadece ham veri yükler</p>
+            <p className="mt-0.5 text-xs font-medium text-primary-900/80">
               Dosyanız <strong>uploads</strong> ve <strong>raw_records</strong> tablolarına kaydedilir.
-              Normalizasyon ve duplicate detection bir sonraki adımlarda yapılır.
+              Standardizasyon ve duplicate detection bir sonraki adımlarda yapılır.
             </p>
           </div>
         </div>
+
+        <JobStatusBanner job={uploadJob} />
 
         {statusMessage && (
           <div className="rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-700">
@@ -159,7 +207,7 @@ export default function VeriYukleme() {
           </div>
         )}
         {errorMessage && (
-          <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          <div className="rounded-2xl border border-danger-200 bg-danger-50 px-4 py-3 text-sm font-medium text-danger-800 shadow-sm">
             {errorMessage}
           </div>
         )}
@@ -220,7 +268,7 @@ export default function VeriYukleme() {
                 value={connectorPassword}
                 onChange={(e) => setConnectorPassword(e.target.value)}
                 placeholder="Kurum DB parolası"
-                className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-red-400"
+                className="ui-focus-ring w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm"
               />
             </div>
             <div className="flex gap-2 mb-3">
@@ -259,7 +307,7 @@ export default function VeriYukleme() {
                     setInstError(e instanceof Error ? e.message : String(e));
                   } finally { setInstLoading(false); }
                 }}
-                className="px-4 py-2 rounded-lg bg-red-600 text-white text-sm font-medium"
+                className="rounded-lg bg-gradient-to-r from-primary-600 to-primary-700 px-4 py-2 text-sm font-semibold text-white shadow-sm"
               >
                 Kurumdan İçe Aktar
               </button>
@@ -280,7 +328,13 @@ export default function VeriYukleme() {
             )}
 
             {(instStatus || instError) && (
-              <div className={`mt-2 rounded-lg px-4 py-3 text-sm ${instError ? "bg-red-50 text-red-700 border border-red-100" : "bg-green-50 text-green-700 border border-green-100"}`}>
+              <div
+                className={`mt-2 rounded-xl border px-4 py-3 text-sm font-medium ${
+                  instError
+                    ? "border-danger-200 bg-danger-50 text-danger-800"
+                    : "border-emerald-200 bg-emerald-50 text-emerald-900"
+                }`}
+              >
                 {instError || instStatus}
               </div>
             )}
@@ -342,12 +396,12 @@ export default function VeriYukleme() {
             <div className="flex gap-3">
               <button
                 onClick={() => navigate(`/veri-normalizasyon?upload_id=${result.upload_id}`)}
-                className="flex items-center gap-2 bg-red-600 text-white text-sm font-medium px-5 py-2.5 rounded-lg hover:bg-red-700 cursor-pointer transition-colors whitespace-nowrap"
+                className="ui-btn-primary cursor-pointer whitespace-nowrap"
               >
-                <i className="ri-filter-3-line"></i> Normalizasyona Git
+                <i className="ri-filter-3-line"></i> Standardizasyona Git
               </button>
               <button
-                onClick={() => navigate(`/temiz-veri-seti?upload_id=${result.upload_id}`)}
+                onClick={() => navigate(`/ham-veri?upload_id=${result.upload_id}`)}
                 className="flex items-center gap-2 border border-gray-200 text-gray-700 text-sm font-medium px-5 py-2.5 rounded-lg hover:bg-gray-50 cursor-pointer transition-colors whitespace-nowrap"
               >
                 <i className="ri-table-line"></i> Ham Veriyi İncele

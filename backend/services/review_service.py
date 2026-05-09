@@ -22,7 +22,11 @@ from backend.services.advanced_matching_service import (
     token_name_similarity,
 )
 from backend.services.feature_service import email_similarity_score, phone_similarity_score
-from backend.services.ml_service import predict_match_probability
+from backend.services.ml_feature_schema import (
+    CANONICAL_ML_MODEL_FEATURE_COLUMNS,
+    extract_canonical_ml_features,
+)
+from backend.services.ml_service import get_latest_review_labels_by_match_id, predict_match_probability
 from backend.services.resolution_service import resolve_match_decision_with_trace
 from backend.services.scoring_app_settings import compute_weighted_score_breakdown, load_scoring_app_settings
 
@@ -472,6 +476,10 @@ def _derive_features(
     right_muhatap = _safe_str(right_record.clean_muhatap_no) if hasattr(right_record, "clean_muhatap_no") else ""
     left_ordered_name = _record_raw_name(left_record) or left_name
     right_ordered_name = _record_raw_name(right_record) or right_name
+    left_first = _safe_str(field_comparisons["firstName"].get("normalizedLeftValue"))
+    right_first = _safe_str(field_comparisons["firstName"].get("normalizedRightValue"))
+    left_surname = _safe_str(field_comparisons["surname"].get("normalizedLeftValue"))
+    right_surname = _safe_str(field_comparisons["surname"].get("normalizedRightValue"))
     shared_contact_flag = int(
         bool(
             (left_phone and right_phone and left_phone == right_phone)
@@ -481,32 +489,36 @@ def _derive_features(
     same_surname_name_conflict_flag = int(
         same_surname_name_conflict(left_ordered_name, right_ordered_name)
     )
+    name_similarity = round(hybrid_name_similarity(left_name, right_name), 4)
+    first_name_similarity = round(jaro_winkler_similarity(left_first, right_first), 4)
+    surname_similarity = round(jaro_winkler_similarity(left_surname, right_surname), 4)
+    phone_similarity = round(phone_similarity_score(left_phone, right_phone), 4)
+    email_similarity = round(email_similarity_score(left_email, right_email), 4)
 
     return {
         "tc_exact_match": int(field_comparisons["tc"]["exactMatch"]),
         "tc_conflict": int(bool(left_tc and right_tc and left_tc != right_tc)),
+        "tc_present_both": int(bool(left_tc and right_tc)),
         "muhatap_no_exact_match": int(field_comparisons["muhatapNo"]["exactMatch"]),
         "muhatap_no_conflict": int(bool(left_muhatap and right_muhatap and left_muhatap != right_muhatap)),
+        "muhatap_present_both": int(bool(left_muhatap and right_muhatap)),
         "phone_exact_match": int(field_comparisons["phone"]["exactMatch"]),
-        "phone_similarity": round(field_comparisons["phone"]["score0To100"] / 100, 4),
+        "phone_similarity": phone_similarity,
+        "phone_present_both": int(bool(left_phone and right_phone)),
         "email_exact_match": int(field_comparisons["email"]["exactMatch"]),
-        "email_similarity": round(field_comparisons["email"]["score0To100"] / 100, 4),
+        "email_similarity": email_similarity,
+        "email_present_both": int(bool(left_email and right_email)),
         "city_exact_match": int(field_comparisons["city"]["exactMatch"]),
         "first_name_exact_match": int(field_comparisons["firstName"]["exactMatch"]),
         "surname_exact_match": int(field_comparisons["surname"]["exactMatch"]),
-        "name_similarity": round(field_comparisons["fullName"]["score0To100"] / 100, 4),
+        "name_similarity": name_similarity,
+        "name_present_both": int(bool(left_name and right_name)),
         "name_token_similarity": round(
             token_name_similarity(left_ordered_name, right_ordered_name),
             4,
         ),
-        "first_name_similarity": round(
-            field_comparisons["firstName"]["score0To100"] / 100,
-            4,
-        ),
-        "surname_similarity": round(
-            field_comparisons["surname"]["score0To100"] / 100,
-            4,
-        ),
+        "first_name_similarity": first_name_similarity,
+        "surname_similarity": surname_similarity,
         "shared_contact_flag": shared_contact_flag,
         "same_surname_name_conflict": same_surname_name_conflict_flag,
         "common_non_empty_fields": sum(
@@ -698,6 +710,72 @@ def serialize_match_candidate(
     }
 
 
+def derive_canonical_ml_features_for_match_candidate(
+    match_candidate: MatchCandidate,
+) -> dict[str, float] | None:
+    """
+    RF train / export / canonical inference alignment: recompute features from live records.
+
+    Same path as review UI (`_build_field_comparisons` → `_derive_features`) → `extract_canonical_ml_features`.
+    Does not read persisted JSON on MatchCandidate (if any).
+    """
+    if match_candidate.left_record is None or match_candidate.right_record is None:
+        return None
+    field_comparisons = _build_field_comparisons(
+        match_candidate.left_record,
+        match_candidate.right_record,
+    )
+    raw_features = _derive_features(
+        match_candidate.left_record,
+        match_candidate.right_record,
+        field_comparisons,
+    )
+    return extract_canonical_ml_features(raw_features)
+
+
+def collect_ground_truth_labeled_rows(session: Session) -> list[dict[str, Any]]:
+    """
+    Export-ready rows: human-approved/rejected pairs with canonical ML features.
+    Uses the same `_derive_features` path as review UI and the same 6-column schema as RF train/predict.
+    """
+    review_labels = get_latest_review_labels_by_match_id(session)
+    query = (
+        session.query(MatchCandidate)
+        .options(
+            joinedload(MatchCandidate.detection_run),
+            joinedload(MatchCandidate.left_record).joinedload(NormalizedRecord.raw_record),
+            joinedload(MatchCandidate.right_record).joinedload(NormalizedRecord.raw_record),
+        )
+        .order_by(MatchCandidate.id.asc())
+    )
+    rows: list[dict[str, Any]] = []
+    for mc in query:
+        label = review_labels.get(int(mc.id))
+        if label is None:
+            label = _normalize_decision(str(mc.decision or ""))
+        if label not in ("approved", "rejected"):
+            continue
+        canon = derive_canonical_ml_features_for_match_candidate(mc)
+        if canon is None:
+            continue
+        upload_id = None
+        if mc.detection_run is not None:
+            upload_id = int(mc.detection_run.upload_id)
+        base: dict[str, Any] = {
+            "match_id": int(mc.id),
+            "left_id": int(mc.left_id),
+            "right_id": int(mc.right_id),
+            "upload_id": upload_id,
+            "detection_run_id": int(mc.detection_run_id),
+            "label": label,
+            "confidence": round(float(_candidate_confidence(mc)), 6),
+        }
+        for col in CANONICAL_ML_MODEL_FEATURE_COLUMNS:
+            base[col] = round(float(canon.get(col, 0.0)), 6)
+        rows.append(base)
+    return rows
+
+
 def get_match_candidates(
     session: Session,
     *,
@@ -747,6 +825,63 @@ def get_match_candidates(
         .limit(limit)
         .all()
     )
+
+
+def get_match_candidates_page(
+    session: Session,
+    *,
+    upload_id: int | None = None,
+    decision: str | None = None,
+    page: int = 1,
+    page_size: int = 50,
+    latest_only: bool = True,
+) -> tuple[int, list[MatchCandidate]]:
+    page = max(1, int(page))
+    page_size = max(1, min(200, int(page_size)))
+    offset = (page - 1) * page_size
+
+    query = (
+        session.query(MatchCandidate)
+        .options(
+            joinedload(MatchCandidate.detection_run),
+            joinedload(MatchCandidate.left_record).joinedload(NormalizedRecord.raw_record),
+            joinedload(MatchCandidate.right_record).joinedload(NormalizedRecord.raw_record),
+        )
+    )
+
+    normalized_decision = _safe_str(decision).lower()
+    if normalized_decision in {"pending", "approved", "rejected"}:
+        query = query.filter(MatchCandidate.decision == normalized_decision)
+
+    if upload_id is not None:
+        query = query.join(DetectionRun).filter(DetectionRun.upload_id == upload_id)
+        if latest_only:
+            latest_run_id = (
+                session.query(func.max(DetectionRun.id))
+                .filter(DetectionRun.upload_id == upload_id)
+                .scalar()
+            )
+            if latest_run_id is not None:
+                query = query.filter(MatchCandidate.detection_run_id == int(latest_run_id))
+    else:
+        latest_run_ids_subq = (
+            session.query(func.max(DetectionRun.id).label("id"))
+            .group_by(DetectionRun.upload_id)
+            .subquery()
+        )
+        query = query.join(DetectionRun).filter(DetectionRun.id.in_(latest_run_ids_subq))
+
+    total = int(query.with_entities(func.count(MatchCandidate.id)).scalar() or 0)
+    rows = (
+        query.order_by(
+            func.coalesce(MatchCandidate.confidence, MatchCandidate.score).desc(),
+            MatchCandidate.created_at.desc(),
+        )
+        .offset(offset)
+        .limit(page_size)
+        .all()
+    )
+    return total, rows
 
 
 def _record_completeness_score(record: NormalizedRecord) -> int:
@@ -1099,6 +1234,149 @@ def get_duplicate_groups(
         reverse=True,
     )
     return groups
+
+
+def get_duplicate_groups_page(
+    session: Session,
+    *,
+    upload_id: int | None = None,
+    decision: str = "approved",
+    limit: int = 5000,
+    page: int = 1,
+    page_size: int = 50,
+    different_muhatap_code: bool = False,
+) -> tuple[list[dict[str, Any]], int]:
+    """
+    DB-level pagination for duplicate groups when materialized tables exist.
+    Falls back to legacy runtime grouping otherwise.
+    Returns (groups, total).
+    """
+
+    # detect whether materialized tables exist
+    try:
+        bind = session.get_bind()
+        inspector = sa_inspect(bind) if bind is not None else None
+        has_tables = bool(
+            inspector
+            and inspector.has_table("materialized_duplicate_groups")
+            and inspector.has_table("materialized_duplicate_group_members")
+        )
+    except Exception:
+        has_tables = False
+
+    page = max(1, int(page))
+    page_size = max(1, min(200, int(page_size)))
+
+    if not has_tables:
+        groups_all = get_duplicate_groups(
+            session,
+            upload_id=upload_id,
+            decision=decision,
+            limit=limit,
+            different_muhatap_code=different_muhatap_code,
+        )
+        total = len(groups_all)
+        offset = (page - 1) * page_size
+        return groups_all[offset : offset + page_size], total
+
+    # materialized path
+    from backend.models.database import (
+        MaterializedDuplicateGroup,
+        MaterializedDuplicateGroupMember,
+    )
+
+    q = session.query(MaterializedDuplicateGroup).filter(
+        MaterializedDuplicateGroup.decision == decision
+    )
+    if upload_id is not None:
+        q = q.filter(MaterializedDuplicateGroup.upload_id == upload_id)
+    if different_muhatap_code:
+        q = q.filter(MaterializedDuplicateGroup.different_muhatap_code.is_(True))
+
+    total = int(q.count())
+    group_rows = (
+        q.order_by(
+            MaterializedDuplicateGroup.avg_score.desc(),
+            MaterializedDuplicateGroup.match_count.desc(),
+        )
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+    if not group_rows:
+        return [], total
+
+    group_ids = [int(g.id) for g in group_rows]
+    member_rows = (
+        session.query(
+            MaterializedDuplicateGroupMember.group_id,
+            MaterializedDuplicateGroupMember.normalized_record_id,
+        )
+        .filter(MaterializedDuplicateGroupMember.group_id.in_(group_ids))
+        .all()
+    )
+
+    record_ids = sorted({int(rid) for _gid, rid in member_rows})
+    record_by_id: dict[int, NormalizedRecord] = {}
+    if record_ids:
+        rows = (
+            session.query(NormalizedRecord)
+            .options(joinedload(NormalizedRecord.raw_record))
+            .filter(NormalizedRecord.id.in_(record_ids))
+            .all()
+        )
+        record_by_id = {int(r.id): r for r in rows}
+
+    record_ids_by_group: dict[int, list[int]] = {}
+    for gid, rid in member_rows:
+        record_ids_by_group.setdefault(int(gid), []).append(int(rid))
+    for gid in record_ids_by_group:
+        record_ids_by_group[gid] = sorted(record_ids_by_group[gid])
+
+    membership_by_record = _membership_snapshots_by_record(session, record_ids)
+
+    groups: list[dict[str, Any]] = []
+    for g in group_rows:
+        member_ids = record_ids_by_group.get(int(g.id), [])
+        group_records = [record_by_id[rid] for rid in member_ids if rid in record_by_id]
+
+        serialized_records = []
+        entity_ids: list[int] = []
+        for record in group_records:
+            serialized_record = _serialize_group_record(record)
+            membership = membership_by_record.get(int(record.id))
+            serialized_record["membership_status"] = (
+                membership.get("status", "pending") if membership is not None else "pending"
+            )
+            serialized_record["entity_id"] = (
+                int(membership["entity_id"])
+                if membership is not None and membership.get("entity_id") is not None
+                else None
+            )
+            if serialized_record["entity_id"] is not None:
+                entity_ids.append(int(serialized_record["entity_id"]))
+            serialized_records.append(serialized_record)
+
+        groups.append(
+            {
+                "group_id": f"dg_{int(g.id)}",
+                "entity_id": entity_ids[0] if entity_ids else None,
+                "record_ids": member_ids,
+                "pair_count": int(g.match_count or 0),
+                "avg_score": round(float(g.avg_score or 0.0), 4),
+                "max_score": round(float(g.max_score or 0.0), 4),
+                "group_score": round(float(g.avg_score or 0.0), 4),
+                "group_score_max": round(float(g.max_score or 0.0), 4),
+                "match_count": int(g.match_count or 0),
+                "match_candidate_ids": [],
+                "muhatap_codes": list(g.muhatap_codes or []),
+                "different_muhatap_code": bool(g.different_muhatap_code),
+                "records": serialized_records,
+                "golden_record": _build_golden_record(group_records),
+            }
+        )
+
+    return groups, total
 
 
 def _find_duplicate_group(

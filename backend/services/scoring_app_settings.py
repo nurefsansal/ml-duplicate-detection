@@ -66,7 +66,6 @@ def compute_weighted_score_breakdown(
     Maps feature signals to weight buckets.
     """
     w = weights or dict(DEFAULT_WEIGHTS)
-    total_w = sum(max(0.0, w.get(k, 0.0)) for k in DEFAULT_WEIGHTS) or 1.0
 
     def _f(name: str, default: float = 0.0) -> float:
         try:
@@ -80,36 +79,102 @@ def compute_weighted_score_breakdown(
         except (TypeError, ValueError):
             return 0
 
-    name_part = max(
-        _f("name_similarity"),
-        _f("first_name_similarity") * 0.5 + _f("surname_similarity") * 0.5,
+    def _clamp01(value: float) -> float:
+        return max(0.0, min(1.0, value))
+
+    def _present(name: str, fallback: bool = False) -> bool:
+        return bool(_i(name)) if name in features else fallback
+
+    name_available = _present(
+        "name_present_both",
+        fallback=any(
+            [
+                _i("first_name_exact_match"),
+                _i("surname_exact_match"),
+                _f("name_similarity") > 0.0,
+                _f("first_name_similarity") > 0.0,
+                _f("surname_similarity") > 0.0,
+            ]
+        ),
     )
-    name_part = max(name_part, 1.0 if _i("first_name_exact_match") or _i("surname_exact_match") else 0.0)
+    tc_available = _present(
+        "tc_present_both",
+        fallback=bool(_i("tc_exact_match") or _i("tc_conflict")),
+    )
+    phone_available = _present(
+        "phone_present_both",
+        fallback=bool(
+            _i("phone_exact_match") or _i("phone_last7_match") or _f("phone_similarity") > 0.0
+        ),
+    )
+    email_available = _present(
+        "email_present_both",
+        fallback=bool(_i("email_exact_match") or _f("email_similarity") > 0.0),
+    )
+    muhatap_available = _present(
+        "muhatap_present_both",
+        fallback=bool(_i("muhatap_no_exact_match") or _i("muhatap_no_conflict")),
+    )
 
-    tc_part = 1.0 if _i("tc_exact_match") else (0.0 if _i("tc_conflict") else 0.35 * _f("name_similarity"))
+    name_part = 0.0
+    if name_available:
+        name_part = _clamp01(
+            max(
+                _f("name_similarity"),
+                (_f("first_name_similarity") * 0.5) + (_f("surname_similarity") * 0.5),
+            )
+        )
 
-    phone_part = 1.0 if _i("phone_exact_match") else (1.0 if _i("phone_last7_match") else 0.0)
+    tc_part = 0.0
+    if tc_available:
+        tc_part = 1.0 if _i("tc_exact_match") else 0.0
 
-    email_part = max(_f("email_similarity"), 1.0 if _i("email_exact_match") else 0.0)
+    phone_part = 0.0
+    if phone_available:
+        phone_part = _clamp01(max(_f("phone_similarity"), 1.0 if _i("phone_exact_match") else 0.0))
 
-    mu_part = 1.0 if _i("muhatap_no_exact_match") else (0.0 if _i("muhatap_no_conflict") else 0.5)
+    email_part = 0.0
+    if email_available:
+        email_part = _clamp01(max(_f("email_similarity"), 1.0 if _i("email_exact_match") else 0.0))
 
+    mu_part = 0.0
+    if muhatap_available:
+        mu_part = 1.0 if _i("muhatap_no_exact_match") else 0.0
+
+    component_parts = {
+        "adSoyad": name_part,
+        "tcKimlikNo": tc_part,
+        "telefon": phone_part,
+        "email": email_part,
+        "muhatapNo": mu_part,
+    }
+    active_components = {
+        "adSoyad": name_available,
+        "tcKimlikNo": tc_available,
+        "telefon": phone_available,
+        "email": email_available,
+        "muhatapNo": muhatap_available,
+    }
     components = {
-        "adSoyad": round(100.0 * name_part, 2),
-        "tcKimlikNo": round(100.0 * max(0.0, min(1.0, tc_part)), 2),
-        "telefon": round(100.0 * max(0.0, min(1.0, phone_part)), 2),
-        "email": round(100.0 * max(0.0, min(1.0, email_part)), 2),
-        "muhatapNo": round(100.0 * max(0.0, min(1.0, mu_part)), 2),
+        key: round(100.0 * _clamp01(value), 2) for key, value in component_parts.items()
     }
 
     weighted_sum = 0.0
-    for key, pct in components.items():
+    total_active_weight = 0.0
+    active_weights_used: dict[str, float] = {}
+    for key, value in component_parts.items():
         weight = max(0.0, float(w.get(key, DEFAULT_WEIGHTS.get(key, 0.0)) or 0.0))
-        weighted_sum += (pct / 100.0) * weight
+        if not active_components.get(key, False) or weight <= 0.0:
+            continue
+        weighted_sum += value * weight
+        total_active_weight += weight
+        active_weights_used[key] = weight
 
-    general = round(100.0 * weighted_sum / total_w, 2)
+    general = round(100.0 * weighted_sum / total_active_weight, 2) if total_active_weight > 0 else 0.0
     return {
         "components_percent": components,
         "weights_used": {k: float(w.get(k, DEFAULT_WEIGHTS[k])) for k in DEFAULT_WEIGHTS},
+        "active_weights_used": active_weights_used,
+        "active_component_keys": [key for key, is_active in active_components.items() if is_active],
         "general_weighted_percent": general,
     }

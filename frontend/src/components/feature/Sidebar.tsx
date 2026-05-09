@@ -1,131 +1,262 @@
 import { useState } from "react";
+
 import { NavLink, useLocation } from "react-router-dom";
 
+import { withUploadContext } from "../../utils/uploadContextNav";
+
+
+
 const navItems = [
+
   { path: "/", icon: "ri-dashboard-3-line", label: "Dashboard" },
+
   { path: "/veri-yukleme", icon: "ri-upload-cloud-2-line", label: "Veri Yükleme" },
-  { path: "/veri-normalizasyon", icon: "ri-filter-3-line", label: "Veri Normalizasyon" },
+
+  { path: "/ham-veri", icon: "ri-table-2", label: "Ham Veri" },
+
+  { path: "/veri-normalizasyon", icon: "ri-filter-3-line", label: "Veri Standardizasyon" },
+
   { path: "/temiz-veri-seti", icon: "ri-table-line", label: "Temiz Veri Seti" },
+
   { path: "/mukerrer-tespit", icon: "ri-search-eye-line", label: "Mükerrer Tespit" },
+
   { path: "/mukerrer-kayitlar", icon: "ri-file-copy-2-line", label: "Mükerrer Kayıtlar" },
+
   { path: "/yonetici-onayi", icon: "ri-checkbox-circle-line", label: "Yönetici Onayı" },
+
   { path: "/ayarlar", icon: "ri-settings-4-line", label: "Ayarlar" },
+
   { path: "/raporlar", icon: "ri-bar-chart-box-line", label: "Raporlar" },
+
 ];
 
+
+
 export default function Sidebar() {
+
   const [collapsed, setCollapsed] = useState(false);
+
   const location = useLocation();
+
   const username = "Ayşe Kara";
 
+
+
   return (
+
     <aside
-      className={`${collapsed ? "w-16" : "w-64"} flex-shrink-0 bg-white border-r border-gray-100 flex flex-col transition-all duration-300 min-h-screen`}
+
+      className={`${collapsed ? "w-[4.25rem]" : "w-64"} relative flex min-h-screen flex-shrink-0 flex-col border-r border-slate-800/80 bg-slate-950 text-slate-300 shadow-nav transition-all duration-300 ease-out`}
+
     >
+
+      <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-primary-900/25 via-transparent to-indigo-950/30" aria-hidden />
+
+
+
       <div
-        className={`flex items-center ${collapsed ? "justify-center px-0" : "px-5"} py-5 border-b border-gray-100`}
+
+        className={`relative flex items-center border-b border-slate-800/80 py-5 ${collapsed ? "justify-center px-2" : "px-5"}`}
+
       >
+
         {!collapsed && (
-          <div className="flex items-center gap-3 flex-1">
-            <div className="w-8 h-8 flex items-center justify-center flex-shrink-0">
-              <img
-                src="https://static.readdy.ai/image/2efa4a2fc14b02768a2ef78ac82f3041/97530cc188494aabe80a972e6a98a906.png"
-                alt="Logo"
-                className="w-8 h-8 object-contain"
-              />
+
+          <div className="flex flex-1 items-center gap-3">
+
+            <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-primary-500 to-indigo-600 shadow-lg shadow-primary-900/40">
+
+              <i className="ri-stack-line text-lg text-white" aria-hidden />
+
             </div>
-            <div>
-              <p className="text-xs font-bold text-gray-900 leading-none">
-                MükerrerTespit
+
+            <div className="min-w-0">
+
+              <p className="text-sm font-semibold leading-tight tracking-tight text-white">
+
+                Kayıt Tespit Sistemi
+
               </p>
-              <p className="text-[10px] text-gray-400 mt-0.5">
-                Kayıt Yönetim Sistemi
+
+              <p className="mt-0.5 text-[11px] font-medium text-slate-500">
+
+                Veri kalite platformu
+
               </p>
+
             </div>
+
           </div>
+
         )}
+
         {collapsed && (
-          <div className="w-8 h-8 flex items-center justify-center">
-            <img
-              src="https://static.readdy.ai/image/2efa4a2fc14b02768a2ef78ac82f3041/97530cc188494aabe80a972e6a98a906.png"
-              alt="Logo"
-              className="w-7 h-7 object-contain"
-            />
+
+          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-primary-500 to-indigo-600 shadow-lg">
+
+            <i className="ri-stack-line text-lg text-white" />
+
           </div>
+
         )}
+
         {!collapsed && (
+
           <button
+
+            type="button"
+
             onClick={() => setCollapsed(true)}
-            className="w-6 h-6 flex items-center justify-center text-gray-400 hover:text-gray-600 cursor-pointer rounded"
+
+            className="ml-1 flex h-8 w-8 cursor-pointer items-center justify-center rounded-lg text-slate-500 transition-colors hover:bg-slate-800 hover:text-slate-200"
+
+            aria-label="Kenar çubuğunu daralt"
+
           >
-            <i className="ri-arrow-left-s-line text-base"></i>
+
+            <i className="ri-arrow-left-s-line text-lg" />
+
           </button>
+
         )}
+
       </div>
 
-      <nav className="flex-1 py-4 px-2 space-y-0.5 overflow-y-auto">
+
+
+      <nav className="relative flex-1 space-y-1 overflow-y-auto px-2 py-4">
+
         {navItems.map((item) => {
+
           const isActive = location.pathname === item.path;
+
           return (
+
             <NavLink
+
               key={item.path}
-              to={item.path}
-              className={`flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all duration-200 group ${
+
+              to={withUploadContext(item.path)}
+
+              className={`group flex items-center gap-3 rounded-xl px-3 py-2.5 transition-all duration-200 ${
+
                 isActive
-                  ? "bg-red-600 text-white"
-                  : "text-gray-500 hover:bg-gray-50 hover:text-gray-800"
+
+                  ? "bg-gradient-to-r from-primary-600/25 to-indigo-600/20 text-white shadow-sm ring-1 ring-primary-500/30"
+
+                  : "text-slate-400 hover:bg-slate-800/60 hover:text-slate-100"
+
               } ${collapsed ? "justify-center" : ""}`}
+
               title={collapsed ? item.label : undefined}
+
             >
-              <div className="w-5 h-5 flex items-center justify-center flex-shrink-0">
-                <i className={`${item.icon} text-base`}></i>
+
+              <div className="flex h-5 w-5 flex-shrink-0 items-center justify-center">
+
+                <i
+
+                  className={`${item.icon} text-[17px] transition-transform duration-200 group-hover:scale-105`}
+
+                />
+
               </div>
+
               {!collapsed && (
-                <span className="text-sm font-medium whitespace-nowrap">
-                  {item.label}
-                </span>
+
+                <span className="text-sm font-medium tracking-tight">{item.label}</span>
+
               )}
+
               {isActive && !collapsed && (
-                <div className="ml-auto w-1.5 h-1.5 rounded-full bg-red-200"></div>
+
+                <div className="ml-auto h-1.5 w-1.5 rounded-full bg-cyan-400 shadow-[0_0_8px_rgba(34,211,238,0.8)]" />
+
               )}
+
             </NavLink>
+
           );
+
         })}
+
       </nav>
 
+
+
       {collapsed && (
-        <div className="p-2 border-t border-gray-100">
+
+        <div className="relative border-t border-slate-800/80 p-2">
+
           <button
+
+            type="button"
+
             onClick={() => setCollapsed(false)}
-            className="w-full flex items-center justify-center p-2 text-gray-400 hover:text-gray-600 cursor-pointer rounded-lg hover:bg-gray-50"
+
+            className="flex w-full cursor-pointer items-center justify-center rounded-xl p-2 text-slate-500 transition-colors hover:bg-slate-800 hover:text-slate-200"
+
+            aria-label="Kenar çubuğunu genişlet"
+
           >
-            <i className="ri-arrow-right-s-line text-base"></i>
+
+            <i className="ri-arrow-right-s-line text-lg" />
+
           </button>
+
         </div>
+
       )}
 
+
+
       {!collapsed && (
-        <div className="p-3 border-t border-gray-100">
-          <div className="flex items-center gap-3 p-2 rounded-lg">
-            <div className="w-8 h-8 rounded-full bg-red-100 flex items-center justify-center flex-shrink-0">
-              <span className="text-xs font-bold text-red-600">
+
+        <div className="relative border-t border-slate-800/80 p-3">
+
+          <div className="flex items-center gap-3 rounded-xl border border-slate-800/60 bg-slate-900/50 p-2.5">
+
+            <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-slate-600 to-slate-800 ring-2 ring-slate-700/80">
+
+              <span className="text-xs font-bold text-slate-100">
+
                 {username.slice(0, 2).toUpperCase()}
+
               </span>
+
             </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-xs font-semibold text-gray-800 truncate">
-                {username}
-              </p>
-              <p className="text-[10px] text-gray-400 truncate">
-                Sistem Yöneticisi
-              </p>
+
+            <div className="min-w-0 flex-1">
+
+              <p className="truncate text-xs font-semibold text-slate-100">{username}</p>
+
+              <p className="truncate text-[10px] text-slate-500">Sistem Yöneticisi</p>
+
             </div>
-            <div className="w-4 h-4 flex items-center justify-center">
-              <i className="ri-more-2-line text-gray-400 text-sm"></i>
-            </div>
+
+            <button
+
+              type="button"
+
+              className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-800 hover:text-slate-300"
+
+              aria-label="Menü"
+
+            >
+
+              <i className="ri-more-2-line text-base" />
+
+            </button>
+
           </div>
+
         </div>
+
       )}
+
     </aside>
+
   );
+
 }
+

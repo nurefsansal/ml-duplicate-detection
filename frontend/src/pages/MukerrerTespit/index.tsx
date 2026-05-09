@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
+import { useRequireUploadId } from "../../hooks/useRequireUploadId";
 import DashboardLayout from "../../components/feature/DashboardLayout";
 import Header from "../../components/feature/Header";
 import {
@@ -8,6 +9,9 @@ import {
   type DetectResponse,
   type UploadItem,
 } from "../../services/api";
+import { useJobPolling } from "../../hooks/useJobPolling";
+import { JobStatusBanner } from "../../components/feature/JobStatusBanner";
+import { FlowNav } from "../../components/feature/FlowNav";
 import {
   finalDecisionTone,
   mapDetectPairToView,
@@ -22,6 +26,8 @@ const algorithms = [
 
 export default function MukerrerTespit() {
   const navigate = useNavigate();
+  const [, setSearchParams] = useSearchParams();
+  const uploadId = useRequireUploadId();
   const [selectedAlgo, setSelectedAlgo] = useState<string[]>(["levenshtein", "jaro"]);
   const [threshold, setThreshold] = useState(75);
   const [running, setRunning] = useState(false);
@@ -32,14 +38,11 @@ export default function MukerrerTespit() {
   const [backendHealthy, setBackendHealthy] = useState<boolean | null>(null);
   const [realResults, setRealResults] = useState<DetectResponse | null>(null);
   const [results, setResults] = useState<UiDuplicatePair[]>([]);
+  const [jobId, setJobId] = useState<number | null>(null);
 
   // Upload selection
   const [uploads, setUploads] = useState<UploadItem[]>([]);
   const [loadingUploads, setLoadingUploads] = useState(false);
-  const [selectedUploadId, setSelectedUploadId] = useState<number | "">(() => {
-    const stored = localStorage.getItem("lastUploadId");
-    return stored ? Number(stored) : "";
-  });
   // Tracks the latest_normalization_run_id of the currently selected upload
   const [selectedNormalizationRunId, setSelectedNormalizationRunId] = useState<number | null>(null);
 
@@ -54,26 +57,18 @@ export default function MukerrerTespit() {
 
   // Fetch only uploads that have normalized_records — avoids showing incomplete uploads
   useEffect(() => {
+    if (uploadId === null) return;
     setLoadingUploads(true);
     listUploads(50, { hasNormalizedRecords: true })
       .then((d) => {
         const list = d.uploads ?? [];
         setUploads(list);
-        // Auto-select from localStorage only if that upload is in the filtered list
-        const storedId = localStorage.getItem("lastUploadId");
-        if (storedId) {
-          const found = list.find((u) => u.id === Number(storedId));
-          if (found) {
-            setSelectedUploadId(found.id);
-            setSelectedNormalizationRunId(found.latest_normalization_run_id ?? null);
-          } else {
-            setSelectedUploadId("");
-          }
-        }
+        const found = list.find((u) => u.id === uploadId);
+        setSelectedNormalizationRunId(found?.latest_normalization_run_id ?? null);
       })
       .catch(() => {})
       .finally(() => setLoadingUploads(false));
-  }, []);
+  }, [uploadId]);
 
   const toggleAlgo = (id: string) => {
     setSelectedAlgo((prev) =>
@@ -82,10 +77,7 @@ export default function MukerrerTespit() {
   };
 
   const handleStart = async () => {
-    if (selectedUploadId === "") {
-      setErrorMessage("Lütfen tespit yapılacak bir yükleme seçin.");
-      return;
-    }
+    if (uploadId === null) return;
 
     setRunning(true);
     setDone(false);
@@ -94,6 +86,7 @@ export default function MukerrerTespit() {
     setStatusMessage("");
     setRealResults(null);
     setResults([]);
+    setJobId(null);
 
     const progressInterval = window.setInterval(() => {
       setProgress((value) => {
@@ -108,10 +101,17 @@ export default function MukerrerTespit() {
     }, 400);
 
     try {
-      const result = await startDetectionFromUpload(selectedUploadId, {
+      const result = await startDetectionFromUpload(uploadId, {
         normalizationRunId: selectedNormalizationRunId,
         minRulesToMatch: Math.ceil((threshold / 100) * 4),
       });
+
+      if (typeof result.jobId === "number") {
+        setJobId(result.jobId);
+        setStatusMessage(`Tespit başlatıldı (Job ID: ${result.jobId}). Arka planda işleniyor…`);
+        setProgress(5);
+        return;
+      }
 
       if (typeof result.uploadId === "number") {
         localStorage.setItem("lastDetectUploadId", String(result.uploadId));
@@ -156,22 +156,63 @@ export default function MukerrerTespit() {
     }
   };
 
+  const { job: detectionJob, error: jobError } = useJobPolling(jobId);
+
+  useEffect(() => {
+    if (jobError) setErrorMessage(jobError);
+  }, [jobError]);
+
+  useEffect(() => {
+    if (!detectionJob) return;
+    setProgress(Math.max(0, Math.min(100, Number(detectionJob.progress || 0))));
+    if (detectionJob.status === "running") setRunning(true);
+    if (detectionJob.status === "failed") {
+      setRunning(false);
+      setErrorMessage(detectionJob.error_message || "Tespit sırasında hata oluştu.");
+      setProgress(0);
+    }
+    if (detectionJob.status === "completed") {
+      setRunning(false);
+      setProgress(100);
+      setDone(true);
+      setStatusMessage("Tespit tamamlandı. Sonuçlar listeleniyor…");
+      const id = uploadId;
+      if (id !== null) {
+        navigate(`/mukerrer-kayitlar?upload_id=${id}`);
+      }
+    }
+  }, [detectionJob, navigate, uploadId]);
+
+  if (uploadId === null) {
+    return (
+      <DashboardLayout>
+        <Header
+          title="Mükerrer Tespit"
+          subtitle="Standardize edilmiş kayıtlar üzerinden benzer kayıtları tespit edin"
+        />
+        <div className="flex-1 p-6 text-sm text-gray-600">
+          Yükleme seçilmedi; Veri Yükleme sayfasına yönlendiriliyorsunuz…
+        </div>
+      </DashboardLayout>
+    );
+  }
+
   return (
     <DashboardLayout>
       <Header
         title="Mükerrer Tespit"
-        subtitle="Normalize edilmiş kayıtlar üzerinden benzer kayıtları tespit edin"
+        subtitle="Standardize edilmiş kayıtlar üzerinden benzer kayıtları tespit edin"
         actions={
           <div className="flex items-center gap-3">
             {backendHealthy === false && (
-              <span className="rounded bg-red-50 px-2 py-1 text-xs text-red-600">
+              <span className="rounded-lg border border-danger-200 bg-danger-50 px-2.5 py-1 text-xs font-medium text-danger-800">
                 Backend: Erişilemiyor
               </span>
             )}
             <button
               onClick={handleStart}
-              disabled={running || selectedUploadId === ""}
-              className="flex cursor-pointer items-center gap-2 whitespace-nowrap rounded-lg bg-red-600 px-5 py-2 text-sm font-medium text-white transition-colors hover:bg-red-700 disabled:opacity-60"
+              disabled={running}
+              className="ui-btn-primary disabled:opacity-60"
             >
               <i className={running ? "ri-loader-4-line animate-spin" : "ri-radar-line"} />
               {running ? `Taranıyor... %${progress}` : "Tespiti Başlat"}
@@ -180,15 +221,22 @@ export default function MukerrerTespit() {
         }
       />
 
-      <div className="flex-1 space-y-5 overflow-y-auto p-6">
+      <div className="flex-1 space-y-6 overflow-y-auto p-6 lg:p-8">
+        <FlowNav
+          step="detect"
+          uploadId={uploadId}
+        />
+
+        <JobStatusBanner job={detectionJob} />
+
         {/* Upload selector */}
-        <div className="rounded-xl border border-gray-100 bg-white p-5">
-          <h3 className="mb-3 text-sm font-semibold text-gray-900">
-            Yükleme Seç (Normalize Edilmiş Veri)
+        <div className="ui-card p-6 shadow-card-lg">
+          <h3 className="mb-3 text-sm font-semibold tracking-tight text-slate-900">
+            Yükleme Seç (Standardize Edilmiş Veri)
           </h3>
           <p className="mb-3 text-xs text-gray-400">
-            Tespit yapılacak normalize edilmiş veri setini seçin. Önce Veri Yükleme veya
-            Veri Normalizasyon adımını tamamlamış olmanız gerekir.
+            Tespit yapılacak standardize edilmiş veri setini seçin. Önce Veri Yükleme veya
+            Veri Standardizasyon adımını tamamlamış olmanız gerekir.
           </p>
 
           {loadingUploads ? (
@@ -197,7 +245,7 @@ export default function MukerrerTespit() {
             <div className="flex items-start gap-3 rounded-xl border border-amber-100 bg-amber-50 p-4">
               <i className="ri-alert-line text-lg text-amber-500 mt-0.5 flex-shrink-0" />
               <div>
-                <p className="text-sm text-amber-700 font-medium">Normalize edilmiş yükleme yok</p>
+                <p className="text-sm text-amber-700 font-medium">Standardize edilmiş yükleme yok</p>
                 <p className="text-xs text-amber-600 mt-0.5">
                   Tespit yapabilmek için önce{" "}
                   <button
@@ -208,10 +256,12 @@ export default function MukerrerTespit() {
                   </button>{" "}
                   ve ardından{" "}
                   <button
-                    onClick={() => navigate("/veri-normalizasyon")}
+                    onClick={() =>
+                      navigate(`/veri-normalizasyon?upload_id=${uploadId}`)
+                    }
                     className="underline cursor-pointer"
                   >
-                    Veri Normalizasyon
+                    Veri Standardizasyon
                   </button>{" "}
                   adımlarını tamamlayın.
                 </p>
@@ -220,22 +270,22 @@ export default function MukerrerTespit() {
           ) : (
             <div className="space-y-2">
               <select
-                value={selectedUploadId}
+                value={uploadId}
                 onChange={(e) => {
-                  const v = e.target.value;
-                  if (v === "") {
-                    setSelectedUploadId("");
-                    setSelectedNormalizationRunId(null);
-                  } else {
-                    const numId = Number(v);
-                    setSelectedUploadId(numId);
-                    const found = uploads.find((u) => u.id === numId);
-                    setSelectedNormalizationRunId(found?.latest_normalization_run_id ?? null);
-                  }
+                  const numId = Number(e.target.value);
+                  if (!Number.isFinite(numId) || numId <= 0) return;
+                  setSearchParams(
+                    (p) => {
+                      p.set("upload_id", String(numId));
+                      return p;
+                    },
+                    { replace: true },
+                  );
+                  const found = uploads.find((u) => u.id === numId);
+                  setSelectedNormalizationRunId(found?.latest_normalization_run_id ?? null);
                 }}
-                className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm bg-white focus:outline-none focus:border-red-400 focus:ring-1 focus:ring-red-100"
+                className="ui-focus-ring w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm"
               >
-                <option value="">— Normalize edilmiş yükleme seçin —</option>
                 {uploads.map((u) => (
                   <option key={u.id} value={u.id}>
                     #{u.id} — {u.file_name} ({u.total_records} kayıt
@@ -244,12 +294,12 @@ export default function MukerrerTespit() {
                 ))}
               </select>
 
-              {selectedUploadId !== "" && (
+              {uploadId > 0 && (
                 <p className="text-xs text-green-600">
                   <i className="ri-checkbox-circle-fill mr-1"></i>
-                  Upload #{selectedUploadId}
+                  Upload #{uploadId}
                   {selectedNormalizationRunId
-                    ? ` · Normalizasyon Run #${selectedNormalizationRunId}`
+                    ? ` · Standardizasyon Run #${selectedNormalizationRunId}`
                     : ""}{" "}
                   — tespit başlatılabilir.
                 </p>
@@ -260,9 +310,9 @@ export default function MukerrerTespit() {
 
         {/* Error / Status */}
         {errorMessage && (
-          <div className="flex items-center gap-3 rounded-xl border border-red-100 bg-red-50 p-4">
-            <i className="ri-error-warning-fill text-lg text-red-600" />
-            <p className="text-sm text-red-700">{errorMessage}</p>
+          <div className="flex items-center gap-3 rounded-2xl border border-danger-200 bg-danger-50 p-4 shadow-sm">
+            <i className="ri-error-warning-fill text-lg text-danger-700" />
+            <p className="text-sm font-medium text-danger-800">{errorMessage}</p>
           </div>
         )}
 
@@ -275,8 +325,8 @@ export default function MukerrerTespit() {
 
         {/* Algorithm + threshold */}
         <div className="grid grid-cols-1 gap-5 lg:grid-cols-3">
-          <div className="rounded-xl border border-gray-100 bg-white p-5 lg:col-span-2">
-            <h3 className="mb-4 text-sm font-semibold text-gray-900">Algoritma Seçimi</h3>
+          <div className="ui-card p-6 shadow-card lg:col-span-2">
+            <h3 className="mb-4 text-sm font-semibold tracking-tight text-slate-900">Algoritma Seçimi</h3>
             <div className="grid grid-cols-3 gap-3">
               {algorithms.map((algorithm) => {
                 const active = selectedAlgo.includes(algorithm.id);
@@ -284,14 +334,18 @@ export default function MukerrerTespit() {
                   <button
                     key={algorithm.id}
                     onClick={() => toggleAlgo(algorithm.id)}
-                    className={`cursor-pointer rounded-xl border-2 p-4 text-left transition-all ${
-                      active ? "border-red-500 bg-red-50" : "border-gray-100 hover:border-gray-200"
+                    className={`cursor-pointer rounded-2xl border-2 p-4 text-left transition-all duration-200 ${
+                      active
+                        ? "border-primary-400 bg-primary-50 shadow-sm ring-1 ring-primary-200/60"
+                        : "border-slate-100 hover:border-slate-200 hover:bg-slate-50/80"
                     }`}
                   >
-                    <div className={`mb-2 flex h-8 w-8 items-center justify-center rounded-lg ${active ? "bg-red-100" : "bg-gray-100"}`}>
-                      <i className={`ri-cpu-line text-base ${active ? "text-red-600" : "text-gray-400"}`} />
+                    <div
+                      className={`mb-2 flex h-8 w-8 items-center justify-center rounded-lg ${active ? "bg-primary-100" : "bg-slate-100"}`}
+                    >
+                      <i className={`ri-cpu-line text-base ${active ? "text-primary-700" : "text-slate-400"}`} />
                     </div>
-                    <p className={`text-sm font-semibold ${active ? "text-red-700" : "text-gray-700"}`}>
+                    <p className={`text-sm font-semibold ${active ? "text-primary-900" : "text-slate-700"}`}>
                       {algorithm.label}
                     </p>
                     <p className="mt-0.5 text-xs text-gray-400">{algorithm.desc}</p>
@@ -301,11 +355,13 @@ export default function MukerrerTespit() {
             </div>
           </div>
 
-          <div className="rounded-xl border border-gray-100 bg-white p-5">
-            <h3 className="mb-4 text-sm font-semibold text-gray-900">Benzerlik Eşiği</h3>
+          <div className="ui-card p-6 shadow-card">
+            <h3 className="mb-4 text-sm font-semibold tracking-tight text-slate-900">Benzerlik Eşiği</h3>
             <div className="mb-4 text-center">
-              <span className="text-4xl font-bold text-red-600">%{threshold}</span>
-              <p className="mt-1 text-xs text-gray-400">ve üzeri olasılıklar öne çıkarılacak</p>
+              <span className="bg-gradient-to-r from-primary-600 to-indigo-600 bg-clip-text text-4xl font-bold tabular-nums text-transparent">
+                %{threshold}
+              </span>
+              <p className="mt-1 text-xs text-slate-500">ve üzeri olasılıklar öne çıkarılacak</p>
             </div>
             <input
               type="range"
@@ -313,7 +369,7 @@ export default function MukerrerTespit() {
               max={100}
               value={threshold}
               onChange={(event) => setThreshold(Number(event.target.value))}
-              className="w-full cursor-pointer accent-red-600"
+              className="w-full cursor-pointer accent-primary-600"
             />
             <div className="mt-1 flex justify-between text-[10px] text-gray-400">
               <span>%50 Geniş</span>
@@ -324,19 +380,29 @@ export default function MukerrerTespit() {
 
         {/* Progress */}
         {(running || done) && (
-          <div className={`flex items-center gap-4 rounded-xl border p-4 ${done ? "border-green-100 bg-green-50" : "border-red-100 bg-red-50"}`}>
-            <div className={`flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg ${done ? "bg-green-100" : "bg-red-100"}`}>
-              <i className={`text-lg ${done ? "ri-checkbox-circle-fill text-green-600" : "ri-loader-4-line animate-spin text-red-600"}`} />
+          <div
+            className={`flex items-center gap-4 rounded-2xl border p-4 shadow-sm ${
+              done ? "border-emerald-200 bg-emerald-50" : "border-primary-200 bg-primary-50"
+            }`}
+          >
+            <div
+              className={`flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl ${
+                done ? "bg-emerald-100" : "bg-primary-100"
+              }`}
+            >
+              <i
+                className={`text-lg ${done ? "ri-checkbox-circle-fill text-emerald-600" : "ri-loader-4-line animate-spin text-primary-700"}`}
+              />
             </div>
             <div className="flex-1">
-              <p className={`text-sm font-semibold ${done ? "text-green-700" : "text-red-700"}`}>
+              <p className={`text-sm font-semibold ${done ? "text-emerald-900" : "text-primary-900"}`}>
                 {done
                   ? statusMessage
                   : `${realResults?.totalRecords || "Veri"} taranıyor... %${progress}`}
               </p>
               <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-white/70">
                 <div
-                  className={`h-1.5 rounded-full transition-all duration-150 ${done ? "bg-green-500" : "bg-red-500"}`}
+                  className={`h-1.5 rounded-full transition-all duration-150 ${done ? "bg-emerald-500" : "bg-gradient-to-r from-primary-500 to-indigo-500"}`}
                   style={{ width: `${progress}%` }}
                 />
               </div>
@@ -359,8 +425,8 @@ export default function MukerrerTespit() {
                 label: "Mükerrer Grup",
                 value: realResults.duplicateGroupCount ?? 0,
                 icon: "ri-group-line",
-                color: "text-red-600",
-                bg: "bg-red-50",
+                color: "text-primary-800",
+                bg: "bg-primary-50",
               },
               {
                 label: "Mükerrer Çift",
@@ -392,14 +458,14 @@ export default function MukerrerTespit() {
         {done && (
           <div className="flex flex-wrap gap-3">
             <button
-              onClick={() => navigate("/yonetici-onayi")}
-              className="flex items-center gap-2 bg-red-600 text-white text-sm font-medium px-5 py-2.5 rounded-lg hover:bg-red-700 cursor-pointer transition-colors whitespace-nowrap"
+              onClick={() => navigate(`/yonetici-onayi?upload_id=${uploadId}`)}
+              className="ui-btn-primary cursor-pointer whitespace-nowrap"
             >
               <i className="ri-checkbox-circle-line"></i> Yönetici Onayına Git
             </button>
             <button
-              onClick={() => navigate("/mukerrer-kayitlar")}
-              className="flex items-center gap-2 border border-gray-200 text-gray-700 text-sm font-medium px-5 py-2.5 rounded-lg hover:bg-gray-50 cursor-pointer transition-colors whitespace-nowrap"
+              onClick={() => navigate(`/mukerrer-kayitlar?upload_id=${uploadId}`)}
+              className="ui-btn-secondary cursor-pointer whitespace-nowrap"
             >
               <i className="ri-file-copy-2-line"></i> Mükerrer Kayıtları Gör
             </button>
@@ -408,8 +474,8 @@ export default function MukerrerTespit() {
 
         {/* Results */}
         {done && results.length > 0 && (
-          <div className="rounded-xl border border-gray-100 bg-white">
-            <div className="flex items-center justify-between border-b border-gray-50 px-5 py-4">
+          <div className="overflow-hidden rounded-2xl border border-slate-200/90 bg-white shadow-card">
+            <div className="flex items-center justify-between border-b border-slate-100 bg-slate-50/50 px-5 py-4">
               <div>
                 <h3 className="text-sm font-semibold text-gray-900">Tespit Sonuçları</h3>
                 <p className="mt-0.5 text-xs text-gray-400">{results.length} aday çift</p>
@@ -432,10 +498,10 @@ export default function MukerrerTespit() {
                   {results.map((pair) => {
                     const scoreColor =
                       pair.score >= 90
-                        ? "bg-red-50 text-red-600"
+                        ? "border border-primary-200 bg-primary-50 text-primary-900"
                         : pair.score >= 80
-                          ? "bg-orange-50 text-orange-500"
-                          : "bg-yellow-50 text-yellow-600";
+                          ? "border border-amber-200 bg-amber-50 text-amber-900"
+                          : "border border-slate-200 bg-slate-100 text-slate-800";
                     const decisionTypeLabel =
                       pair.finalDecision === "approved"
                         ? "Otomatik Onaylandı"

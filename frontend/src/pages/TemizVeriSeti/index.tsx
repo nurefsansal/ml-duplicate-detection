@@ -2,6 +2,8 @@ import { useState, useEffect, useCallback } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
 import DashboardLayout from "../../components/feature/DashboardLayout";
 import Header from "../../components/feature/Header";
+import { FlowNav } from "../../components/feature/FlowNav";
+import { useRequireUploadId } from "../../hooks/useRequireUploadId";
 import {
   getNormalizedRecords,
   buildNormalizedRecordsExportUrl,
@@ -43,6 +45,7 @@ function SourceBadge({ source, label }: { source?: string; label?: string }) {
 export default function TemizVeriSeti() {
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
+  const uploadId = useRequireUploadId();
 
   const [records, setRecords] = useState<NormalizedRecordDb[]>([]);
   const [total, setTotal] = useState(0);
@@ -58,23 +61,18 @@ export default function TemizVeriSeti() {
   const [hasMissingEmail, setHasMissingEmail] = useState(false);
   const [hasMissingCity, setHasMissingCity] = useState(false);
 
-  const uploadIdParam = searchParams.get("upload_id");
-  const [selectedUploadId, setSelectedUploadId] = useState<number | "">(
-    uploadIdParam ? Number(uploadIdParam) : (() => {
-      const stored = localStorage.getItem("lastUploadId");
-      return stored ? Number(stored) : "";
-    })(),
-  );
-
   const page = Number(searchParams.get("page") ?? "1");
-  const pageSize = 50;
+  const pageSizeParam = searchParams.get("page_size");
+  const parsedPageSize = pageSizeParam ? Number(pageSizeParam) : 50;
+  const pageSize = [25, 50, 100].includes(parsedPageSize) ? parsedPageSize : 50;
 
   const fetchRecords = useCallback(async () => {
+    if (uploadId === null) return;
     setLoading(true);
     setError("");
     try {
       const data = await getNormalizedRecords({
-        upload_id: selectedUploadId !== "" ? selectedUploadId : undefined,
+        upload_id: uploadId,
         is_valid: filterValid === "" ? undefined : filterValid === "true",
         search: search || undefined,
         has_missing_tc: hasMissingTc || undefined,
@@ -92,7 +90,7 @@ export default function TemizVeriSeti() {
     } finally {
       setLoading(false);
     }
-  }, [selectedUploadId, filterValid, search, hasMissingTc, hasMissingPhone, hasMissingEmail, hasMissingCity, page]);
+  }, [uploadId, filterValid, search, hasMissingTc, hasMissingPhone, hasMissingEmail, hasMissingCity, page, pageSize]);
 
   useEffect(() => {
     listUploads(50)
@@ -113,17 +111,31 @@ export default function TemizVeriSeti() {
   };
 
   const exportUrlCsv = buildNormalizedRecordsExportUrl({
-    upload_id: selectedUploadId !== "" ? selectedUploadId : undefined,
+    upload_id: uploadId ?? undefined,
     format: "csv",
   });
   const exportUrlXlsx = buildNormalizedRecordsExportUrl({
-    upload_id: selectedUploadId !== "" ? selectedUploadId : undefined,
+    upload_id: uploadId ?? undefined,
     format: "xlsx",
   });
   const exportUrlJson = buildNormalizedRecordsExportUrl({
-    upload_id: selectedUploadId !== "" ? selectedUploadId : undefined,
+    upload_id: uploadId ?? undefined,
     format: "json",
   });
+
+  if (uploadId === null) {
+    return (
+      <DashboardLayout>
+        <Header
+          title="Temiz Veri Seti"
+          subtitle="Birleştirilmiş golden record + tekil temiz kayıtlar — operasyonel çıktı"
+        />
+        <div className="flex-1 p-6 text-sm text-gray-600">
+          Yükleme seçilmedi; Veri Yükleme sayfasına yönlendiriliyorsunuz…
+        </div>
+      </DashboardLayout>
+    );
+  }
 
   return (
     <DashboardLayout>
@@ -157,7 +169,7 @@ export default function TemizVeriSeti() {
               <i className="ri-braces-line"></i> JSON
             </a>
             <button
-              onClick={() => navigate("/mukerrer-tespit")}
+              onClick={() => navigate(`/mukerrer-tespit?upload_id=${uploadId}`)}
               className="flex items-center gap-2 bg-red-600 text-white text-sm font-medium px-5 py-2 rounded-lg hover:bg-red-700 cursor-pointer transition-colors whitespace-nowrap"
             >
               <i className="ri-radar-line"></i> Mükerrer Tespite Git
@@ -167,6 +179,12 @@ export default function TemizVeriSeti() {
       />
 
       <div className="flex-1 overflow-y-auto p-6 space-y-5">
+        <FlowNav
+          step="standardize"
+          uploadId={uploadId}
+          canGoNext={total > 0}
+        />
+
         <div className="rounded-xl border border-green-100 bg-green-50/80 p-4 text-sm text-green-900">
           <p className="font-medium">Son kullanıma hazır veri</p>
           <p className="mt-1 text-xs text-green-800">
@@ -189,7 +207,7 @@ export default function TemizVeriSeti() {
           <div className="bg-white rounded-xl p-4 border border-gray-100">
             <p className="text-xs text-gray-400">Seçili Upload</p>
             <p className="text-sm font-semibold text-gray-900 mt-1">
-              {selectedUploadId !== "" ? `#${selectedUploadId}` : "Tümü"}
+              #{uploadId}
             </p>
           </div>
         </div>
@@ -201,15 +219,19 @@ export default function TemizVeriSeti() {
             <div>
               <label className="block text-xs font-medium text-gray-600 mb-1">Upload</label>
               <select
-                value={selectedUploadId}
+                value={uploadId}
                 onChange={(e) => {
                   const v = e.target.value;
-                  setSelectedUploadId(v === "" ? "" : Number(v));
-                  setSearchParams((p) => { p.set("page", "1"); if (v) p.set("upload_id", v); else p.delete("upload_id"); return p; });
+                  const nextId = Number(v);
+                  if (!Number.isFinite(nextId) || nextId <= 0) return;
+                  setSearchParams((p) => {
+                    p.set("page", "1");
+                    p.set("upload_id", String(nextId));
+                    return p;
+                  });
                 }}
                 className="border border-gray-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:border-red-400"
               >
-                <option value="">Tüm Yüklemeler</option>
                 {uploads.map((u) => (
                   <option key={u.id} value={u.id}>#{u.id} — {u.file_name} ({u.total_records} kayıt)</option>
                 ))}
@@ -227,6 +249,27 @@ export default function TemizVeriSeti() {
                 <option value="">Tümü</option>
                 <option value="true">Geçerli</option>
                 <option value="false">Geçersiz</option>
+              </select>
+            </div>
+
+            {/* Page size */}
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Önizleme</label>
+              <select
+                value={pageSize}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setSearchParams((p) => {
+                    p.set("page", "1");
+                    p.set("page_size", v);
+                    return p;
+                  });
+                }}
+                className="border border-gray-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:border-red-400"
+              >
+                <option value="25">25</option>
+                <option value="50">50</option>
+                <option value="100">100</option>
               </select>
             </div>
 
@@ -325,7 +368,7 @@ export default function TemizVeriSeti() {
                   <tr>
                     <td colSpan={10} className="px-5 py-10 text-center text-gray-400">
                       Kayıt bulunamadı.
-                      {total === 0 && " Önce Veri Yükleme veya Veri Normalizasyon adımını tamamlayın."}
+                      {total === 0 && " Önce Veri Yükleme veya Veri Standardizasyon adımını tamamlayın."}
                     </td>
                   </tr>
                 ) : (

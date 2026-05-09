@@ -22,12 +22,29 @@ def test_different_tc_same_name_same_phone_is_not_approved() -> None:
     assert decision != "approved"
 
 
-def test_same_tc_similar_name_is_approved() -> None:
+def test_same_tc_similar_name_without_support_is_pending() -> None:
     decision = resolve_match_decision(
         0.55,
         {
             "tc_exact_match": 1,
             "name_similarity": 0.88,
+            "household_risk_flag": 0,
+            "muhatap_no_conflict": 0,
+            "same_surname_name_conflict": 0,
+        },
+    )
+    assert decision == "pending"
+
+
+def test_same_tc_with_supporting_phone_and_strong_name_is_approved() -> None:
+    decision = resolve_match_decision(
+        0.55,
+        {
+            "tc_exact_match": 1,
+            "name_similarity": 0.91,
+            "first_name_similarity": 0.88,
+            "surname_similarity": 1.0,
+            "phone_exact_match": 1,
             "household_risk_flag": 0,
             "muhatap_no_conflict": 0,
             "same_surname_name_conflict": 0,
