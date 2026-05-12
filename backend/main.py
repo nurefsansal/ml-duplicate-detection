@@ -6,7 +6,7 @@
 #   VeriYukleme      → POST /api/v1/uploads/file
 #   VeriNormalizasyon → POST /api/v1/column-mappings + POST /api/v1/normalization-runs
 #   TemizVeriSeti    → GET  /api/v1/normalized-records
-#   MukerrerTespit   → POST /api/v1/detect  (uploadId ile)
+#   MukerrerTespit   → POST /api/v1/detect  (uploadId; minRulesToMatch=1–4 kural eşiği)
 #   YoneticiOnayi    → GET/POST /api/v1/admin/*
 #   Raporlar         → GET  /api/v1/reports/*
 #

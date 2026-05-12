@@ -699,6 +699,10 @@ export async function startNormalizationRun(
 
 // ─── Detect (from DB — no file needed) ────────────────────────────────────────
 
+/**
+ * Veritabanındaki `normalized_records` üzerinde mükerrer tespit başlatır.
+ * @param options.minRulesToMatch — Backend ile aynı: 1–4 arası “kaç alan kuralı eşleşmeli” (benzerlik % değil).
+ */
 export async function startDetectionFromUpload(
   uploadId: number,
   options?: {
@@ -722,6 +726,7 @@ export async function startDetectionFromUpload(
   return response.data;
 }
 
+/** `normalization_run_id` kapsamında tespit; `minRulesToMatch` 1–4 kural eşiği. */
 export async function startDetectionFromNormalizationRun(
   normalizationRunId: number,
   options?: { minRulesToMatch?: number; sessionId?: string },
@@ -910,6 +915,28 @@ export async function downloadCleanDatasetCsv(options?: {
     "/api/v1/reports/export/clean_dataset.csv",
     "clean_dataset.csv",
     { upload_id: options?.uploadId },
+  );
+}
+
+export async function downloadMergeLineageReportCsv(options?: {
+  uploadId?: number;
+}): Promise<void> {
+  await downloadReportCsv(
+    "/api/v1/reports/export/merge_lineage_report.csv",
+    "merge_lineage_report.csv",
+    { upload_id: options?.uploadId },
+  );
+}
+
+export async function downloadNarrativeReportTxt(options: {
+  uploadId: number;
+  lang?: "tr" | "en";
+}): Promise<void> {
+  const lang = options.lang ?? "tr";
+  await downloadReportCsv(
+    "/api/v1/reports/export/narrative_report.txt",
+    `narrative_report_${options.uploadId}_${lang}.txt`,
+    { upload_id: options.uploadId, lang },
   );
 }
 

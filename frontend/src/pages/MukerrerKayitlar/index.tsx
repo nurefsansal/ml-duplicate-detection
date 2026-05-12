@@ -18,6 +18,7 @@ import {
 import { MatchReviewModal } from "../../components/feature/MatchReviewModal";
 import { DuplicateGroupReviewModal } from "../../components/feature/DuplicateGroupReviewModal";
 import { FlowNav } from "../../components/feature/FlowNav";
+import { DataExportPanel } from "../../components/feature/DataExportPanel";
 import { useRequireUploadId } from "../../hooks/useRequireUploadId";
 
 type RecordDecision = "confirmed" | "pending" | "excluded";
@@ -812,6 +813,11 @@ export default function MukerrerKayitlar() {
             )}
           </div>
         </div>
+
+        <DataExportPanel
+          uploadId={uploadId}
+          flowContext="post_duplicate_review"
+        />
       </div>
 
       <DuplicateGroupReviewModal

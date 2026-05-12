@@ -177,12 +177,29 @@ TARGET_TO_COLUMN = {
 }
 
 
+def column_mappings_are_actionable(items: Optional[list[ColumnMappingItem]]) -> bool:
+    """En az bir kolon kanonik hedefe (TARGET_TO_COLUMN) eşlenmiş mi; 'other' sayılmaz."""
+    if not items:
+        return False
+    return any(
+        bool(item.target_field)
+        and item.target_field != "other"
+        and item.target_field in TARGET_TO_COLUMN
+        for item in items
+    )
+
+
 def _load_saved_mappings(
     db: Session,
     *,
     upload_id: int,
     mapping_id: Optional[int],
 ) -> list[ColumnMapping]:
+    """Kayıtlı kolon eşlemelerini döndürür.
+
+    `mapping_id` verilmişse bu id'nin upload'a ait olduğunu doğrular; normalizasyon için
+    yine de upload'daki *tüm* eşleme satırları kullanılır (tek satır = tek kolon çifti).
+    """
     mappings = (
         db.query(ColumnMapping)
         .filter(ColumnMapping.upload_id == upload_id)
@@ -279,6 +296,23 @@ def create_normalization_run(
                 )
                 for mapping in saved_mappings
             ]
+
+    if not column_mappings_are_actionable(resolved_column_mappings):
+        if job is not None:
+            update_job_progress(
+                db,
+                job_id=job.id,
+                status="failed",
+                error_message="Geçerli kolon eşlemesi yok (en az bir hedef alan gerekli).",
+            )
+            db.commit()
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "En az bir kaynak kolonu hedef alana eşleştirin (ör. Ad Soyad, TC, Telefon). "
+                "'Diğer' hedefi sayılmaz. Önce Kolon eşleştirmelerini kaydedin."
+            ),
+        )
 
     normalization_run = NormalizationRun(
         upload_id=payload.upload_id,

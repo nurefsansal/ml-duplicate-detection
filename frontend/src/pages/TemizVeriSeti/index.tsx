@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
 import DashboardLayout from "../../components/feature/DashboardLayout";
+import { DataExportPanel } from "../../components/feature/DataExportPanel";
 import Header from "../../components/feature/Header";
 import { FlowNav } from "../../components/feature/FlowNav";
 import { useRequireUploadId } from "../../hooks/useRequireUploadId";
@@ -194,6 +195,8 @@ export default function TemizVeriSeti() {
             <strong>source_label</strong> dahil).
           </p>
         </div>
+
+        <DataExportPanel uploadId={uploadId} />
         {/* Stat cards */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <div className="bg-white rounded-xl p-4 border border-gray-100">

@@ -10,7 +10,7 @@ import io
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from sqlalchemy import create_engine, func
 from sqlalchemy.orm import Session, joinedload, sessionmaker
@@ -23,7 +23,11 @@ from backend.models.database import (
     ReviewAction,
     Upload,
 )
-from backend.api.routes.normalized_records_route import build_clean_dataset_rows
+from backend.api.routes.normalized_records_route import (
+    build_clean_dataset_rows,
+    build_merge_lineage_rows,
+)
+from backend.services.narrative_report_service import build_upload_narrative_report
 from backend.services.review_service import get_duplicate_groups
 
 DATABASE_URL = os.getenv(
@@ -346,6 +350,49 @@ def export_clean_dataset_csv(
 ):
     rows = build_clean_dataset_rows(db, upload_id=upload_id)
     return _csv_response(rows, filename="clean_dataset.csv")
+
+
+@router.get("/reports/export/merge_lineage_report.csv")
+def export_merge_lineage_report_csv(
+    upload_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+):
+    """
+    Birleşim özeti: Entity veya onaylı çift birleşiminde üye kayıt kimlikleri,
+    muhatap değerleri (önce) ve golden sonrası tek değer.
+    """
+    rows = build_merge_lineage_rows(db, upload_id=upload_id)
+    return _csv_response(rows, filename="merge_lineage_report.csv")
+
+
+@router.get("/reports/export/narrative_report.txt")
+def export_narrative_report_txt(
+    upload_id: int = Query(..., ge=1, description="Yükleme kimliği (zorunlu)"),
+    lang: str = Query(
+        "tr",
+        pattern="^(tr|en)$",
+        description="Rapor dili: tr veya en",
+    ),
+    db: Session = Depends(get_db),
+):
+    """
+    Sözel özet: yükleme bazlı paragraf rapor (UTF-8 düz metin).
+    Sayısal özet, birleşim sayıları ve kısa örnek satırlar (ilk gruplar).
+    """
+    try:
+        text = build_upload_narrative_report(db, upload_id=upload_id, lang=lang)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Upload not found")
+    body = text.encode("utf-8")
+    return Response(
+        content=body,
+        media_type="text/plain; charset=utf-8",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="narrative_report_{upload_id}_{lang}.txt"'
+            )
+        },
+    )
 
 
 @router.get("/reports/export/approved_matches.csv")

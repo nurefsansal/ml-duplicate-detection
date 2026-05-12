@@ -5,6 +5,7 @@ import { useRequireUploadId } from "../../hooks/useRequireUploadId";
 import DashboardLayout from "../../components/feature/DashboardLayout";
 import Header from "../../components/feature/Header";
 import {
+  getColumnMappings,
   getUploadColumns,
   listUploads,
   saveColumnMappings,
@@ -129,6 +130,17 @@ export default function VeriNormalizasyon() {
           setRunning(false);
           setErrorMessage(
             "Kolon eşleştirmeleri kaydedilemedi. Lütfen tekrar deneyin.",
+          );
+          return;
+        }
+      } else {
+        const existing = await getColumnMappings(uploadId);
+        const saved = existing.mappings?.length ?? 0;
+        if (saved === 0) {
+          setRunning(false);
+          setErrorMessage(
+            "En az bir kolonu hedef alana eşleştirin (Ad Soyad, TC, Telefon vb.). " +
+              "'Diğer' veya boş sayılmaz.",
           );
           return;
         }

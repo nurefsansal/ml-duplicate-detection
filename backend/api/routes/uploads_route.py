@@ -17,7 +17,6 @@ import pandas as pd
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
 from starlette.requests import Request
 from pydantic import BaseModel, Field
-from sqlalchemy import create_engine
 from sqlalchemy import create_engine, func, text
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -232,12 +231,17 @@ def _run_upload_ingestion_job(
                 )
                 db.flush()
                 if job_id is not None:
+                    # Toplam satır sayısı önceden bilinmediği için monoton, üstü sınırlı ilerleme (0–99).
+                    ingest_progress = min(
+                        99.0,
+                        100.0 * (1.0 - 1.0 / (1.0 + float(processed) / 8000.0)),
+                    )
                     update_job_progress(
                         db,
                         job_id=job_id,
                         status="running",
                         processed_rows=processed,
-                        progress=min(99.0, float(processed % 100000) / 1000.0),
+                        progress=ingest_progress,
                     )
                 if run_id is not None:
                     finalize_pipeline_run(db, run_id=run_id, status="running", processed_rows=processed)
@@ -253,12 +257,16 @@ def _run_upload_ingestion_job(
                 )
                 db.flush()
                 if job_id is not None:
+                    ingest_progress = min(
+                        99.0,
+                        100.0 * (1.0 - 1.0 / (1.0 + float(processed) / 8000.0)),
+                    )
                     update_job_progress(
                         db,
                         job_id=job_id,
                         status="running",
                         processed_rows=processed,
-                        progress=min(99.0, float(processed % 100000) / 1000.0),
+                        progress=ingest_progress,
                     )
                 if run_id is not None:
                     finalize_pipeline_run(db, run_id=run_id, status="running", processed_rows=processed)
@@ -319,6 +327,170 @@ def _run_upload_ingestion_job(
                 os.remove(temp_file_path)
             except OSError:
                 pass
+
+
+def _run_institution_ingestion_job(
+    *,
+    connection_data: dict[str, Any],
+    upload_id: int,
+    schema: str,
+    table_name: str,
+    limit_val: int | None,
+    job_id: int | None,
+    request_id: str | None,
+):
+    """Arka plan: kurum DB satırlarını çek, raw_records'a yaz (HTTP zaman aşımı olmadan)."""
+    db = SessionLocal()
+    run_id: int | None = None
+    t0 = time.monotonic()
+    try:
+        conn = ConnectorConnectionInput.model_validate(connection_data)
+        conn.db_schema = schema
+        service = DatabaseConnectorService.from_details(conn.to_details())
+        limit_clause = f" LIMIT {int(limit_val)}" if limit_val is not None else ""
+        sql = f'SELECT * FROM "{table_name}"{limit_clause}'
+
+        run = create_pipeline_run(
+            db,
+            pipeline_type="upload_institution",
+            request_id=request_id,
+            upload_id=upload_id,
+            job_id=job_id,
+            metadata={"schema": schema, "table": table_name, "limit": limit_val},
+        )
+        run_id = run.id
+        add_pipeline_event(
+            db,
+            run_id=run_id,
+            stage="ingest",
+            event_type="started",
+            message="Kurum veritabanı ingest başladı",
+        )
+        db.commit()
+
+        rows = service.fetch_rows(sql)
+        if not rows:
+            raise ValueError("Seçili tablodan veri alınamadı veya tablo boş.")
+
+        total = len(rows)
+        if job_id is not None:
+            update_job_progress(
+                db,
+                job_id=job_id,
+                status="running",
+                total_rows=total,
+                processed_rows=0,
+                progress=1.0,
+            )
+            db.commit()
+
+        BATCH = 2000
+        batch: list[dict[str, Any]] = []
+        processed = 0
+        for r in rows:
+            batch.append(r)
+            if len(batch) >= BATCH:
+                processed += len(batch)
+                _insert_raw_batch(db, upload_id=upload_id, rows=batch)
+                db.flush()
+                if job_id is not None:
+                    prog = min(99.0, 100.0 * float(processed) / float(max(total, 1)))
+                    update_job_progress(
+                        db,
+                        job_id=job_id,
+                        status="running",
+                        processed_rows=processed,
+                        progress=prog,
+                    )
+                if run_id is not None:
+                    finalize_pipeline_run(
+                        db,
+                        run_id=run_id,
+                        status="running",
+                        processed_rows=processed,
+                        total_rows=total,
+                    )
+                db.commit()
+                batch = []
+        if batch:
+            processed += len(batch)
+            _insert_raw_batch(db, upload_id=upload_id, rows=batch)
+            db.flush()
+            if job_id is not None:
+                prog = min(99.0, 100.0 * float(processed) / float(max(total, 1)))
+                update_job_progress(
+                    db,
+                    job_id=job_id,
+                    status="running",
+                    processed_rows=processed,
+                    progress=prog,
+                )
+            if run_id is not None:
+                finalize_pipeline_run(
+                    db,
+                    run_id=run_id,
+                    status="running",
+                    processed_rows=processed,
+                    total_rows=total,
+                )
+            db.commit()
+
+        upload = db.query(Upload).filter(Upload.id == upload_id).first()
+        if upload is not None:
+            upload.total_records = int(total)
+            upload.status = "uploaded"
+            upload.processing_stage = "raw"
+            upload.completed_at = datetime.utcnow()
+            db.flush()
+
+        if job_id is not None:
+            update_job_progress(
+                db,
+                job_id=job_id,
+                status="completed",
+                progress=100.0,
+                total_rows=int(total),
+                processed_rows=int(total),
+            )
+
+        if run_id is not None:
+            duration_ms = int((time.monotonic() - t0) * 1000)
+            add_pipeline_event(
+                db,
+                run_id=run_id,
+                stage="ingest",
+                event_type="completed",
+                message="Kurum veritabanı ingest tamamlandı",
+                total_rows=int(total),
+                processed_rows=int(total),
+                duration_ms=duration_ms,
+            )
+            finalize_pipeline_run(
+                db,
+                run_id=run_id,
+                status="completed",
+                total_rows=int(total),
+                processed_rows=int(total),
+                metadata_patch={"duration_ms": duration_ms},
+            )
+
+        db.commit()
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        if job_id is not None:
+            update_job_progress(db, job_id=job_id, status="failed", error_message=str(exc))
+        if run_id is not None:
+            add_pipeline_event(
+                db,
+                run_id=run_id,
+                stage="ingest",
+                event_type="failed",
+                message=str(exc),
+            )
+            finalize_pipeline_run(db, run_id=run_id, status="failed", error_message=str(exc))
+        db.commit()
+    finally:
+        db.close()
 
 
 router = APIRouter()
@@ -595,63 +767,60 @@ class FromInstitutionUploadRequest(BaseModel):
 
 
 @router.post("/uploads/from-institution-db")
-def upload_from_institution_db(payload: FromInstitutionUploadRequest, db: Session = Depends(get_db)):
-    """Kurum veritabanından seçili tabloyu alıp uploads + raw_records oluşturur."""
+def upload_from_institution_db(
+    payload: FromInstitutionUploadRequest,
+    background_tasks: BackgroundTasks,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Kurum veritabanından seçili tabloyu alıp uploads + raw_records oluşturur (ingest arka planda)."""
     try:
         conn = payload.connection
-        # Determine schema and table name
         if "." in payload.table:
             schema, table_name = payload.table.split(".", 1)
         else:
             schema = conn.db_schema or "public"
             table_name = payload.table
 
-        # Build connector service with requested search_path
-        # ensure db_schema is set so preview/selects use correct search_path
-        conn.db_schema = schema
-        service = DatabaseConnectorService.from_details(conn.to_details())
+        source_name = f"{conn.label}:{schema}.{table_name}"
+        file_name = f"{schema}.{table_name}"
 
-        # Build select SQL (apply limit if provided)
-        limit_clause = f" LIMIT {int(payload.limit)}" if payload.limit else ""
-        sql = f'SELECT * FROM "{table_name}"{limit_clause}'
-
-        rows = service.fetch_rows(sql)
-
-        if not rows:
-            raise HTTPException(status_code=400, detail="Seçili tablodan veri alınamadı veya tablo boş.")
-
-        # Create upload record
         upload = Upload(
             source_type="institution_db",
-            source_name=f"{conn.label}:{schema}.{table_name}",
-            file_name=f"{schema}.{table_name}",
+            source_name=source_name,
+            file_name=file_name,
             file_size_bytes=0,
-            total_records=len(rows),
-            status="uploaded",
-            processing_stage="raw",
+            total_records=0,
+            status="processing",
+            processing_stage="ingesting",
         )
         db.add(upload)
         db.flush()
 
-        # Insert raw records in chunks
-        BATCH = 2000
-        batch = []
-        for r in rows:
-            batch.append(r)
-            if len(batch) >= BATCH:
-                _insert_raw_batch(db, upload_id=upload.id, rows=batch)
-                db.flush()
-                batch = []
-        if batch:
-            _insert_raw_batch(db, upload_id=upload.id, rows=batch)
-
+        job = create_job(db, job_type="upload_institution")
+        if job is not None:
+            db.flush()
         db.commit()
         db.refresh(upload)
+
+        req_id = getattr(getattr(request, "state", None), "request_id", None)
+        background_tasks.add_task(
+            _run_institution_ingestion_job,
+            connection_data=payload.connection.model_dump(),
+            upload_id=int(upload.id),
+            schema=schema,
+            table_name=table_name,
+            limit_val=payload.limit,
+            job_id=job.id if job is not None else None,
+            request_id=req_id,
+        )
+
         return {
             "success": True,
             "upload_id": upload.id,
-            "source": upload.source_name,
-            "total_records": upload.total_records,
+            "job_id": job.id if job is not None else None,
+            "source": source_name,
+            "total_records": 0,
         }
 
     except HTTPException:

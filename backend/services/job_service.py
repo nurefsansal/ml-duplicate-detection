@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.orm import Session
@@ -44,7 +44,7 @@ def update_job_progress(
         job.processed_rows = int(processed_rows)
     if error_message is not None:
         job.error_message = error_message
-    job.updated_at = datetime.utcnow()
+    job.updated_at = datetime.now(UTC).replace(tzinfo=None)
     session.flush()
     return job
 

@@ -128,9 +128,15 @@ export default function Raporlar() {
     setExporting(true);
     setError("");
     try {
-      const lastUploadIdRaw = localStorage.getItem("lastDetectUploadId");
-      const parsedUploadId = lastUploadIdRaw ? Number(lastUploadIdRaw) : Number.NaN;
-      const uploadId = Number.isFinite(parsedUploadId) ? parsedUploadId : undefined;
+      const lastUploadRaw = localStorage.getItem("lastUploadId");
+      const lastDetectRaw = localStorage.getItem("lastDetectUploadId");
+      const parsedFromUpload = lastUploadRaw ? Number(lastUploadRaw) : Number.NaN;
+      const parsedDetect = lastDetectRaw ? Number(lastDetectRaw) : Number.NaN;
+      const uploadId = Number.isFinite(parsedFromUpload)
+        ? parsedFromUpload
+        : Number.isFinite(parsedDetect)
+          ? parsedDetect
+          : undefined;
 
       if (exportType === "clean") {
         await downloadCleanDatasetCsv({ uploadId });
@@ -413,7 +419,9 @@ export default function Raporlar() {
             <div className="bg-gray-50 rounded-xl p-4 border border-gray-100">
               <p className="text-xs font-semibold text-gray-700 mb-2">Dışa Aktarma</p>
               <p className="text-xs text-gray-500 mb-3">
-                Export dosyalari gerçek DB verilerinden üretilir.
+                Gerçek veritabanından üretilir. Mümkünse{" "}
+                <code className="rounded bg-gray-200/80 px-1">lastUploadId</code> ile filtrelenir; yoksa{" "}
+                <code className="rounded bg-gray-200/80 px-1">lastDetectUploadId</code> kullanılır.
               </p>
               <div className="space-y-2">
                 <button

@@ -1,6 +1,15 @@
 # ml-duplicate-detection
 
-Bu proje Streamlit tabanli duplicate tespit uygulamasidir.
+Bu proje Streamlit tabanli duplicate tespit uygulamasidir. **Üretim akışı** React + FastAPI üzerindedir.
+
+### Ana pipeline (React + API)
+
+1. **Veri yükleme:** `POST /api/v1/uploads/file` → `uploads`, `raw_records`. Kurum DB: `POST /api/v1/uploads/from-institution-db` ingest’i **arka planda** çalıştırır; yanıtta `job_id` ile ilerleme takibi.
+2. **Kolon eşlemesi + standardizasyon:** `POST /api/v1/column-mappings`, `POST /api/v1/normalization-runs` → `normalized_records`. Normalizasyon için en az bir kolonun kanonik hedefe (ad, TC, telefon, …) eşlenmesi gerekir; yalnızca “Diğer” yeterli değildir.
+3. **Mükerrer tespit:** `POST /api/v1/detect` — `uploadId` (isteğe bağlı `normalizationRunId`); `minRulesToMatch` **1–4** *alan kuralı* eşiğidir (yüzde benzerlik değildir).
+4. **Dışa aktarma:** `GET /api/v1/normalized-records/export`, `GET /api/v1/reports/export/*.csv`
+
+Legacy tek dosya akışları (`/api/v1/normalize-file`, `/api/v1/detect-file`) hâlâ vardır; ana arayüz yukarıdaki sırayı kullanır. Otomatik testler: `pip install -r requirements-dev.txt` ve `python -m pytest backend/tests -q`.
 
 ## React Frontend (Yeni)
 
@@ -51,7 +60,14 @@ Baglanti dizesi icin `DATABASE_URL` ortam degiskenini kullanabilirsiniz (ornek: 
 uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-4. Endpointler:
+4. Backend testleri (geliştirme):
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest backend/tests -q
+```
+
+5. Endpointler:
 
 - `GET /health`
 - `POST /api/v1/normalize`
@@ -61,12 +77,7 @@ uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
 
 Frontend varsayilan olarak `http://localhost:8000` adresine istek atar.
 
-React Veri Yukleme sayfasinda su akıslar canli backend ile calisir:
-
-- Excel/CSV dosya yukleme -> `detect-file`
-- API URL'den veri cekme -> `detect-from-url`
-- Manuel kayit girisi -> `detect`
-- "Sonuclari PostgreSQL'e kaydet" secenegi ile DB insert
+Ana React akisi: **Veri Yükleme** (`uploads/file`) → **Veri Normalizasyon** → **Mükerrer Tespit** (`detect` + DB) → inceleme ve rapor/export sayfalari. Legacy olarak dosyadan doğrudan tespit: `detect-file`.
 
 ## PostgreSQL + Docker Kurulumu
 

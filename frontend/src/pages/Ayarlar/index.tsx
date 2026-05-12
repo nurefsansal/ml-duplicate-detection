@@ -28,7 +28,6 @@ const defaultThresholds = { otoOnayla: 97, bayrakla: 75, yoksay: 50 };
 type Settings = {
   weights: typeof defaultWeights;
   thresholds: typeof defaultThresholds;
-  algorithms: string[];
   autoDetectPeriod: string;
   maxFileSize: number;
   approvalLimitDays: number;
@@ -52,7 +51,6 @@ const DEFAULT_CONNECTOR_PROFILE: ConnectorConnectionInput = {
 export default function Ayarlar() {
   const [weights, setWeights] = useState(defaultWeights);
   const [thresholds, setThresholds] = useState(defaultThresholds);
-  const [algo, setAlgo] = useState<string[]>(["levenshtein", "jaro"]);
   const [saved, setSaved] = useState(false);
   const [autoDetectPeriod, setAutoDetectPeriod] = useState("Her hafta");
   const [maxFileSize, setMaxFileSize] = useState(50);
@@ -82,11 +80,6 @@ export default function Ayarlar() {
         const parsed = settings as Partial<Settings>;
         setWeights({ ...defaultWeights, ...(parsed.weights || {}) });
         setThresholds({ ...defaultThresholds, ...(parsed.thresholds || {}) });
-        setAlgo(
-          Array.isArray(parsed.algorithms)
-            ? parsed.algorithms
-            : ["levenshtein", "jaro"],
-        );
         setAutoDetectPeriod(parsed.autoDetectPeriod || "Her hafta");
         setMaxFileSize(Number(parsed.maxFileSize || 50));
         setApprovalLimitDays(Number(parsed.approvalLimitDays || 7));
@@ -133,7 +126,6 @@ export default function Ayarlar() {
     const settings: Settings = {
       weights,
       thresholds,
-      algorithms: algo,
       autoDetectPeriod,
       maxFileSize,
       approvalLimitDays,
@@ -152,11 +144,6 @@ export default function Ayarlar() {
       setLoading(false);
     }
   };
-
-  const toggleAlgo = (id: string) =>
-    setAlgo((prev) =>
-      prev.includes(id) ? prev.filter((a) => a !== id) : [...prev, id],
-    );
 
   const handleResetWeights = () => setWeights(defaultWeights);
   const handleResetThresholds = () => setThresholds(defaultThresholds);
@@ -274,7 +261,7 @@ export default function Ayarlar() {
     <DashboardLayout>
       <Header
         title="Ayarlar"
-        subtitle="Sistem parametrelerini ve algoritma konfigürasyonunu yönetin"
+        subtitle="Tespit ağırlıkları, karar eşikleri ve kurum veritabanı bağlantısı"
         actions={
           <button
             onClick={handleSave}
@@ -469,59 +456,19 @@ export default function Ayarlar() {
               </div>
             </div>
 
-            {/* Algoritma */}
-            <div className="bg-white rounded-xl p-5 border border-gray-100">
-              <h3 className="text-sm font-semibold text-gray-900 mb-4">
-                Aktif Algoritmalar
+            {/* Mükerrer motoru — bilgi (Splink içi karşılaştırmalar kullanıcıdan seçilmez) */}
+            <div className="rounded-xl border border-slate-200 bg-slate-50/80 p-5">
+              <h3 className="mb-2 text-sm font-semibold text-gray-900">
+                Mükerrer tespit motoru
               </h3>
-              <div className="space-y-3">
-                {[
-                  {
-                    id: "levenshtein",
-                    label: "Levenshtein Mesafesi",
-                    desc: "Karakter bazlı düzenleme mesafesi hesabı",
-                  },
-                  {
-                    id: "jaro",
-                    label: "Jaro-Winkler",
-                    desc: "Önek ağırlıklı string benzerliği",
-                  },
-                  {
-                    id: "soundex",
-                    label: "Soundex",
-                    desc: "Fonetik ses benzerliği algoritması",
-                  },
-                  {
-                    id: "exact",
-                    label: "Tam Eşleşme",
-                    desc: "Birebir string karşılaştırması",
-                  },
-                ].map((a) => {
-                  const active = algo.includes(a.id);
-                  return (
-                    <div
-                      key={a.id}
-                      className={`flex items-center gap-3 p-3 rounded-lg border cursor-pointer transition-all ${active ? "border-red-200 bg-red-50/30" : "border-gray-100 hover:border-gray-200"}`}
-                      onClick={() => toggleAlgo(a.id)}
-                    >
-                      <button
-                        className={`relative w-11 min-w-[44px] h-5 rounded-full overflow-hidden flex items-center transition-colors flex-shrink-0 cursor-pointer ${active ? "bg-red-500" : "bg-gray-200"}`}
-                        type="button"
-                      >
-                        <span
-                          className={`absolute left-0.5 top-0.5 w-4 h-4 bg-white rounded-full shadow-sm transition-transform ${active ? "translate-x-6" : "translate-x-0"}`}
-                        />
-                      </button>
-                      <div>
-                        <p className="text-sm font-medium text-gray-800">
-                          {a.label}
-                        </p>
-                        <p className="text-xs text-gray-400">{a.desc}</p>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
+              <p className="text-xs leading-relaxed text-gray-600">
+                Kayıt benzerliği Splink ve kural motoru ile hesaplanır (ör. isim alanında Jaro-Winkler
+                tabanlı karşılaştırmalar). Bu karşılaştırma türlerini ekrandan açıp kapatamazsınız;{" "}
+                <strong className="font-medium text-gray-800">yukarıdaki ağırlık ve olasılık eşikleri</strong>{" "}
+                sonraki tespit çalıştırmalarında kullanılır. Kaç alan kuralının eşleşmesi gerektiğini{" "}
+                <strong className="font-medium text-gray-800">Mükerrer Tespit</strong> sayfasındaki{" "}
+                <strong className="font-medium text-gray-800">minRulesToMatch (1–4)</strong> ayarı belirler.
+              </p>
             </div>
 
             {/* Sistem */}

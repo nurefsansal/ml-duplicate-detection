@@ -3,6 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 
 import DashboardLayout from "../../components/feature/DashboardLayout";
 import Header from "../../components/feature/Header";
+import { useI18n } from "../../i18n/I18nProvider";
 import { withUploadContext } from "../../utils/uploadContextNav";
 import {
   getMatches,
@@ -116,6 +117,7 @@ function scoreTone(score: number): string {
 }
 
 export default function Dashboard() {
+  const { t, locale } = useI18n();
   const navigate = useNavigate();
   const [overview, setOverview] = useState<LoadState<ReportOverview>>(initialState);
   const [uploads, setUploads] = useState<LoadState<UploadItem[]>>(initialState);
@@ -297,6 +299,23 @@ export default function Dashboard() {
             </div>
           )}
         </div>
+
+        {latestUpload?.id != null && (
+          <div
+            className="rounded-2xl border border-slate-200/90 bg-slate-50/80 p-4 text-sm leading-relaxed text-slate-600 shadow-sm"
+            lang={locale}
+          >
+            <span className="font-semibold text-slate-800">{t("dashboard.postApprovalLead")} </span>
+            <Link
+              to={`/mukerrer-kayitlar?upload_id=${latestUpload.id}`}
+              className="font-semibold text-primary-700 hover:underline"
+            >
+              {t("dashboard.postApprovalLink")}
+            </Link>
+            {" "}
+            {t("dashboard.postApprovalTrail")}
+          </div>
+        )}
 
         <div className="grid grid-cols-1 gap-5 xl:grid-cols-5">
           <div className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-card xl:col-span-3">

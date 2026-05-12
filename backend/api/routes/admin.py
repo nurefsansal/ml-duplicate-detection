@@ -9,7 +9,7 @@ import os
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import create_engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
@@ -57,6 +57,8 @@ router = APIRouter(dependencies=[Depends(get_current_user)])
 class PendingMatchResponse(BaseModel):
     """Beklemede olan match detaylari."""
 
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     left_id: int
     right_id: int
@@ -87,9 +89,6 @@ class PendingMatchResponse(BaseModel):
     splinkMatchProbability: Optional[float] = None
     splinkMatchWeight: Optional[float] = None
     created_at: Optional[str] = None
-
-    class Config:
-        from_attributes = True
 
 
 class ApproveMatchRequest(BaseModel):

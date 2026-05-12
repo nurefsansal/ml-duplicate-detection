@@ -3,6 +3,7 @@ import { useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 
 import { withUploadContext } from "../../utils/uploadContextNav";
+import { useI18n } from "../../i18n/I18nProvider";
 
 
 
@@ -35,6 +36,8 @@ const navItems = [
 export default function Sidebar() {
 
   const [collapsed, setCollapsed] = useState(false);
+
+  const { locale, setLocale, t } = useI18n();
 
   const location = useLocation();
 
@@ -212,7 +215,53 @@ export default function Sidebar() {
 
       {!collapsed && (
 
-        <div className="relative border-t border-slate-800/80 p-3">
+        <div className="relative space-y-3 border-t border-slate-800/80 p-3">
+
+          <div>
+
+            <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+
+              {t("sidebar.language")}
+
+            </p>
+
+            <div className="flex rounded-lg bg-slate-900/60 p-0.5 ring-1 ring-slate-800/80">
+
+              <button
+
+                type="button"
+
+                onClick={() => setLocale("tr")}
+
+                className={`flex-1 rounded-md px-2 py-1.5 text-[11px] font-bold transition-colors ${locale === "tr" ? "bg-primary-600 text-white shadow" : "text-slate-400 hover:text-white"}`}
+
+                aria-pressed={locale === "tr"}
+
+              >
+
+                TR
+
+              </button>
+
+              <button
+
+                type="button"
+
+                onClick={() => setLocale("en")}
+
+                className={`flex-1 rounded-md px-2 py-1.5 text-[11px] font-bold transition-colors ${locale === "en" ? "bg-primary-600 text-white shadow" : "text-slate-400 hover:text-white"}`}
+
+                aria-pressed={locale === "en"}
+
+              >
+
+                EN
+
+              </button>
+
+            </div>
+
+          </div>
 
           <div className="flex items-center gap-3 rounded-xl border border-slate-800/60 bg-slate-900/50 p-2.5">
 

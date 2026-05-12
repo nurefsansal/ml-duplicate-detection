@@ -135,48 +135,48 @@ CREATE TABLE IF NOT EXISTS entity_map (
 -- ============================================================================
 
 -- Uploads
-CREATE INDEX idx_uploads_status ON uploads(status);
-CREATE INDEX idx_uploads_created_at ON uploads(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_uploads_status ON uploads(status);
+CREATE INDEX IF NOT EXISTS idx_uploads_created_at ON uploads(created_at DESC);
 
 -- Raw Donors
-CREATE INDEX idx_raw_donors_upload_id ON raw_donors(upload_id);
-CREATE INDEX idx_raw_donors_full_name ON raw_donors(full_name);
+CREATE INDEX IF NOT EXISTS idx_raw_donors_upload_id ON raw_donors(upload_id);
+CREATE INDEX IF NOT EXISTS idx_raw_donors_full_name ON raw_donors(full_name);
 
 -- Normalized Donors
-CREATE INDEX idx_norm_donors_upload_id ON normalized_donors(upload_id);
-CREATE INDEX idx_norm_donors_raw_id ON normalized_donors(raw_id);
-CREATE INDEX idx_norm_donors_email ON normalized_donors(clean_email);
-CREATE INDEX idx_norm_donors_phone ON normalized_donors(clean_phone);
-CREATE INDEX idx_norm_donors_tc ON normalized_donors(clean_tc);
-CREATE INDEX idx_norm_donors_city ON normalized_donors(clean_city);
-CREATE INDEX idx_norm_donors_phonetic ON normalized_donors(name_phonetic_key);
-CREATE INDEX idx_norm_donors_email_key ON normalized_donors(email_normalized_key);
+CREATE INDEX IF NOT EXISTS idx_norm_donors_upload_id ON normalized_donors(upload_id);
+CREATE INDEX IF NOT EXISTS idx_norm_donors_raw_id ON normalized_donors(raw_id);
+CREATE INDEX IF NOT EXISTS idx_norm_donors_email ON normalized_donors(clean_email);
+CREATE INDEX IF NOT EXISTS idx_norm_donors_phone ON normalized_donors(clean_phone);
+CREATE INDEX IF NOT EXISTS idx_norm_donors_tc ON normalized_donors(clean_tc);
+CREATE INDEX IF NOT EXISTS idx_norm_donors_city ON normalized_donors(clean_city);
+CREATE INDEX IF NOT EXISTS idx_norm_donors_phonetic ON normalized_donors(name_phonetic_key);
+CREATE INDEX IF NOT EXISTS idx_norm_donors_email_key ON normalized_donors(email_normalized_key);
 
 -- Matches
-CREATE INDEX idx_matches_upload_id ON matches(upload_id);
-CREATE INDEX idx_matches_donor1_id ON matches(donor1_id);
-CREATE INDEX idx_matches_donor2_id ON matches(donor2_id);
-CREATE INDEX idx_matches_status ON matches(status);
-CREATE INDEX idx_matches_ml_score ON matches(ml_score DESC);
-CREATE INDEX idx_matches_created_at ON matches(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_matches_upload_id ON matches(upload_id);
+CREATE INDEX IF NOT EXISTS idx_matches_donor1_id ON matches(donor1_id);
+CREATE INDEX IF NOT EXISTS idx_matches_donor2_id ON matches(donor2_id);
+CREATE INDEX IF NOT EXISTS idx_matches_status ON matches(status);
+CREATE INDEX IF NOT EXISTS idx_matches_ml_score ON matches(ml_score DESC);
+CREATE INDEX IF NOT EXISTS idx_matches_created_at ON matches(created_at DESC);
 
 -- Entities
-CREATE INDEX idx_entities_canonical_name ON entities(canonical_name);
-CREATE INDEX idx_entities_canonical_email ON entities(canonical_email);
-CREATE INDEX idx_entities_canonical_phone ON entities(canonical_phone);
-CREATE INDEX idx_entities_created_at ON entities(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_entities_canonical_name ON entities(canonical_name);
+CREATE INDEX IF NOT EXISTS idx_entities_canonical_email ON entities(canonical_email);
+CREATE INDEX IF NOT EXISTS idx_entities_canonical_phone ON entities(canonical_phone);
+CREATE INDEX IF NOT EXISTS idx_entities_created_at ON entities(created_at DESC);
 
 -- Entity Map
-CREATE INDEX idx_entity_map_entity_id ON entity_map(entity_id);
-CREATE INDEX idx_entity_map_donor_id ON entity_map(donor_id);
-CREATE INDEX idx_entity_map_is_active ON entity_map(is_active);
+CREATE INDEX IF NOT EXISTS idx_entity_map_entity_id ON entity_map(entity_id);
+CREATE INDEX IF NOT EXISTS idx_entity_map_donor_id ON entity_map(donor_id);
+CREATE INDEX IF NOT EXISTS idx_entity_map_is_active ON entity_map(is_active);
 
 -- ============================================================================
 -- 📊 VIEWS - Raporlama için
 -- ============================================================================
 
 -- Henüz onaylanmamış eşleşmeler
-CREATE VIEW v_pending_matches AS
+CREATE OR REPLACE VIEW v_pending_matches AS
 SELECT 
     m.id,
     m.donor1_id,
@@ -196,7 +196,7 @@ WHERE m.status = 'pending'
 ORDER BY m.ml_score DESC;
 
 -- Her entity'ye kaç donor mapped
-CREATE VIEW v_entity_summary AS
+CREATE OR REPLACE VIEW v_entity_summary AS
 SELECT 
     e.id,
     e.canonical_name,
@@ -210,7 +210,7 @@ LEFT JOIN entity_map em ON e.id = em.entity_id
 GROUP BY e.id, e.canonical_name, e.canonical_email, e.canonical_phone, e.created_at;
 
 -- Workflow: Hangi match'ler onaylandı/reddedildi
-CREATE VIEW v_match_statistics AS
+CREATE OR REPLACE VIEW v_match_statistics AS
 SELECT 
     upload_id,
     COUNT(*) as total_matches,

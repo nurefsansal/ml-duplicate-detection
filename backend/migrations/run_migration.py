@@ -111,7 +111,8 @@ def run_migration(*, dry_run: bool = False) -> int:
         try:
             with engine.begin() as connection:
                 for statement in statements:
-                    connection.execute(text(statement))
+                    # Execute migration SQL verbatim to avoid parameter parsing in literals.
+                    connection.exec_driver_sql(statement)
                 _mark_applied(connection, migration_file.name)
         except Exception as exc:  # noqa: BLE001
             try:

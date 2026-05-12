@@ -110,6 +110,14 @@ export default function VeriYukleme() {
 
   const { job: uploadJob, error: jobError } = useJobPolling(jobId);
 
+  /** Dosya yüklemesinde API ilk yanıtta 0 döner; job tamamlanınca total_rows / processed_rows kullanılır. */
+  const displayedRawRecordCount =
+    uploadJob?.status === "completed"
+      ? uploadJob.total_rows || uploadJob.processed_rows
+      : uploadJob?.status === "running"
+        ? uploadJob.processed_rows
+        : result?.total_records ?? 0;
+
   useEffect(() => {
     if (jobError) {
       setErrorMessage(jobError);
@@ -124,10 +132,16 @@ export default function VeriYukleme() {
       setUploading(false);
       setProgress(100);
       const uploadId = result?.upload_id;
+      const n = uploadJob.total_rows || uploadJob.processed_rows;
       setStatusMessage(
         uploadId
-          ? `Yükleme tamamlandı — ham kayıtlar hazır (Upload ID: ${uploadId})`
+          ? `Yükleme tamamlandı — ${n.toLocaleString("tr-TR")} ham kayıt (Upload ID: ${uploadId})`
           : "Yükleme tamamlandı — ham kayıtlar hazır",
+      );
+      setResult((prev) =>
+        prev && typeof prev.upload_id === "number"
+          ? { ...prev, total_records: n || prev.total_records }
+          : prev,
       );
     }
     if (uploadJob.status === "failed") {
@@ -176,7 +190,7 @@ export default function VeriYukleme() {
           <div className="ui-card p-5">
             <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Yüklenen Ham Kayıt</p>
             <p className="mt-1 text-2xl font-bold tabular-nums tracking-tight text-slate-900">
-              {result ? result.total_records : 0}
+              {displayedRawRecordCount.toLocaleString("tr-TR")}
             </p>
           </div>
           <div className="ui-card p-5">
@@ -299,10 +313,34 @@ export default function VeriYukleme() {
                   if (!selectedConnectorTable) { setInstError("Bir tablo seçin"); return; }
                   setInstLoading(true); setInstError(""); setInstStatus("");
                   try {
-                    const resp = await apiClient.post('/api/v1/uploads/from-institution-db', { connection: connectionPayload, table: selectedConnectorTable });
-                    // mimic upload response
-                    setResult({ upload_id: resp.data.upload_id, total_records: resp.data.total_records, source_columns: [], source_type: 'institution', file_name: resp.data.source } as any);
-                    setStatusMessage(`İçe aktarma tamamlandı — ${resp.data.total_records} kayıt (Upload ID: ${resp.data.upload_id})`);
+                    const resp = await apiClient.post("/api/v1/uploads/from-institution-db", {
+                      connection: connectionPayload,
+                      table: selectedConnectorTable,
+                    });
+                    const data = resp.data as {
+                      upload_id: number;
+                      job_id?: number | null;
+                      total_records?: number;
+                      source?: string;
+                    };
+                    const jid = typeof data.job_id === "number" ? data.job_id : null;
+                    localStorage.setItem("lastUploadId", String(data.upload_id));
+                    setJobId(jid);
+                    setResult({
+                      success: true,
+                      upload_id: data.upload_id,
+                      job_id: jid,
+                      file_name: data.source ?? "kurum-db",
+                      source_type: "institution_db",
+                      total_records: data.total_records ?? 0,
+                      source_columns: [],
+                      suggested_mappings: {},
+                    });
+                    setStatusMessage(
+                      jid
+                        ? `Kurum tablosu arka planda içe aktarılıyor (Job #${jid}, Upload #${data.upload_id})…`
+                        : `İçe aktarma kuyruğa alındı (Upload #${data.upload_id}).`,
+                    );
                   } catch (e) {
                     setInstError(e instanceof Error ? e.message : String(e));
                   } finally { setInstLoading(false); }
@@ -382,7 +420,7 @@ export default function VeriYukleme() {
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
               {[
                 { label: "Upload ID", value: String(result.upload_id) },
-                { label: "Toplam Kayıt", value: String(result.total_records) },
+                { label: "Toplam Kayıt", value: String(displayedRawRecordCount) },
                 { label: "Kaynak Tip", value: result.source_type },
                 { label: "Kolon Sayısı", value: String(result.source_columns.length) },
               ].map((s) => (

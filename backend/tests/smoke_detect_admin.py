@@ -1,3 +1,10 @@
+"""Manuel uçtan uca deneme (auth + canlı DB gerekir).
+
+    python -m backend.tests.smoke_detect_admin
+
+CI / şema doğrulama için: `pytest backend/tests/test_smoke_openapi_routes.py`
+"""
+
 from fastapi.testclient import TestClient
 
 from backend.main import app

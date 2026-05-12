@@ -18,18 +18,14 @@ import {
   type UiDuplicatePair,
 } from "../../utils/duplicatePairView";
 
-const algorithms = [
-  { id: "levenshtein", label: "Levenshtein", desc: "Karakter düzenleme mesafesi" },
-  { id: "jaro", label: "Jaro-Winkler", desc: "Önek ağırlıklı benzerlik" },
-  { id: "soundex", label: "Soundex", desc: "Fonetik eşleştirme" },
-];
+/** Backend `minRulesToMatch`: 1–4 alan eşleşmesi gerekir (ad, TC, telefon, e-posta vb. kurallar). */
+const MIN_RULES_DEFAULT = 3;
 
 export default function MukerrerTespit() {
   const navigate = useNavigate();
   const [, setSearchParams] = useSearchParams();
   const uploadId = useRequireUploadId();
-  const [selectedAlgo, setSelectedAlgo] = useState<string[]>(["levenshtein", "jaro"]);
-  const [threshold, setThreshold] = useState(75);
+  const [minRulesToMatch, setMinRulesToMatch] = useState(MIN_RULES_DEFAULT);
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState(0);
   const [done, setDone] = useState(false);
@@ -70,12 +66,6 @@ export default function MukerrerTespit() {
       .finally(() => setLoadingUploads(false));
   }, [uploadId]);
 
-  const toggleAlgo = (id: string) => {
-    setSelectedAlgo((prev) =>
-      prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id],
-    );
-  };
-
   const handleStart = async () => {
     if (uploadId === null) return;
 
@@ -103,7 +93,7 @@ export default function MukerrerTespit() {
     try {
       const result = await startDetectionFromUpload(uploadId, {
         normalizationRunId: selectedNormalizationRunId,
-        minRulesToMatch: Math.ceil((threshold / 100) * 4),
+        minRulesToMatch,
       });
 
       if (typeof result.jobId === "number") {
@@ -323,57 +313,37 @@ export default function MukerrerTespit() {
           </div>
         )}
 
-        {/* Algorithm + threshold */}
-        <div className="grid grid-cols-1 gap-5 lg:grid-cols-3">
-          <div className="ui-card p-6 shadow-card lg:col-span-2">
-            <h3 className="mb-4 text-sm font-semibold tracking-tight text-slate-900">Algoritma Seçimi</h3>
-            <div className="grid grid-cols-3 gap-3">
-              {algorithms.map((algorithm) => {
-                const active = selectedAlgo.includes(algorithm.id);
-                return (
-                  <button
-                    key={algorithm.id}
-                    onClick={() => toggleAlgo(algorithm.id)}
-                    className={`cursor-pointer rounded-2xl border-2 p-4 text-left transition-all duration-200 ${
-                      active
-                        ? "border-primary-400 bg-primary-50 shadow-sm ring-1 ring-primary-200/60"
-                        : "border-slate-100 hover:border-slate-200 hover:bg-slate-50/80"
-                    }`}
-                  >
-                    <div
-                      className={`mb-2 flex h-8 w-8 items-center justify-center rounded-lg ${active ? "bg-primary-100" : "bg-slate-100"}`}
-                    >
-                      <i className={`ri-cpu-line text-base ${active ? "text-primary-700" : "text-slate-400"}`} />
-                    </div>
-                    <p className={`text-sm font-semibold ${active ? "text-primary-900" : "text-slate-700"}`}>
-                      {algorithm.label}
-                    </p>
-                    <p className="mt-0.5 text-xs text-gray-400">{algorithm.desc}</p>
-                  </button>
-                );
-              })}
+        {/* Eşleşen kural sayısı — API'deki minRulesToMatch ile birebir */}
+        <div className="ui-card p-6 shadow-card-lg">
+          <h3 className="mb-2 text-sm font-semibold tracking-tight text-slate-900">
+            Gerekli eşleşen kural sayısı
+          </h3>
+          <p className="mb-4 text-xs leading-relaxed text-slate-500">
+            İki kaydın mükerrer adayı sayılması için tanımlı alan kurallarından (ör. ad, TC, telefon,
+            e-posta) en az kaçının eşleşmesi gerektiğini seçin.{" "}
+            <strong className="font-medium text-slate-700">Düşük</strong> değer daha çok aday üretir;{" "}
+            <strong className="font-medium text-slate-700">yüksek</strong> değer daha seçici davranır.
+            Bu ayar benzerlik yüzdesi değil; backend’deki <code className="rounded bg-slate-100 px-1 text-[11px]">minRulesToMatch</code>{" "}
+            parametresidir (1–4).
+          </p>
+          <div className="flex flex-wrap items-center gap-4">
+            <div className="flex h-14 min-w-[4rem] items-center justify-center rounded-xl border border-primary-200 bg-primary-50 px-4">
+              <span className="text-3xl font-bold tabular-nums text-primary-800">{minRulesToMatch}</span>
             </div>
-          </div>
-
-          <div className="ui-card p-6 shadow-card">
-            <h3 className="mb-4 text-sm font-semibold tracking-tight text-slate-900">Benzerlik Eşiği</h3>
-            <div className="mb-4 text-center">
-              <span className="bg-gradient-to-r from-primary-600 to-indigo-600 bg-clip-text text-4xl font-bold tabular-nums text-transparent">
-                %{threshold}
-              </span>
-              <p className="mt-1 text-xs text-slate-500">ve üzeri olasılıklar öne çıkarılacak</p>
-            </div>
-            <input
-              type="range"
-              min={50}
-              max={100}
-              value={threshold}
-              onChange={(event) => setThreshold(Number(event.target.value))}
-              className="w-full cursor-pointer accent-primary-600"
-            />
-            <div className="mt-1 flex justify-between text-[10px] text-gray-400">
-              <span>%50 Geniş</span>
-              <span>%100 Tam</span>
+            <div className="min-w-0 flex-1">
+              <input
+                type="range"
+                min={1}
+                max={4}
+                step={1}
+                value={minRulesToMatch}
+                onChange={(e) => setMinRulesToMatch(Number(e.target.value))}
+                className="w-full cursor-pointer accent-primary-600"
+              />
+              <div className="mt-1 flex justify-between text-[10px] text-slate-400">
+                <span>1 — en geniş</span>
+                <span>4 — en sıkı</span>
+              </div>
             </div>
           </div>
         </div>
@@ -557,7 +527,9 @@ export default function MukerrerTespit() {
           <div className="rounded-xl border border-gray-100 bg-white px-5 py-10 text-center">
             <i className="ri-checkbox-circle-line text-3xl text-green-500 mb-2 block"></i>
             <p className="text-sm font-medium text-gray-700">Mükerrer kayıt bulunamadı.</p>
-            <p className="text-xs text-gray-400 mt-1">Seçili veri seti için eşik değerini düşürmeyi deneyin.</p>
+            <p className="text-xs text-gray-400 mt-1">
+              Seçili veri seti için gerekli kural sayısını düşürmeyi deneyin.
+            </p>
           </div>
         )}
       </div>

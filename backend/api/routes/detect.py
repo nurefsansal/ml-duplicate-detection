@@ -104,7 +104,15 @@ def _run_detection_job_process(payload_dict: dict[str, Any], job_id: int | None,
     _run_detection_job(payload=payload, job_id=job_id, request_id=request_id)
 
 
-@router.post("/detect", response_model=DetectResponse)
+@router.post(
+    "/detect",
+    response_model=DetectResponse,
+    summary="Mükerrer tespit",
+    description=(
+        "`uploadId` veya `normalizationRunId` ile veritabanındaki `normalized_records` üzerinde çalışır; "
+        "büyük veri setlerinde arka planda işlenir. `minRulesToMatch` (1–4) kural eşiğidir, yüzde benzerlik değildir."
+    ),
+)
 def detect(background_tasks: BackgroundTasks, request: Request, payload: DetectRequest):
     db = SessionLocal()
     job = create_job(db, job_type="detection")
