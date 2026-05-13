@@ -1,0 +1,28 @@
+{
+  "accuracy": 1.0,
+  "precision": 1.0,
+  "recall": 1.0,
+  "f1": 1.0,
+  "train_size": 1600,
+  "test_size": 400,
+  "total_labeled_samples": 2000,
+  "label_counts": {
+    "0": 1000,
+    "1": 1000
+  },
+  "source_files": [
+    "mukerrer_veri_seti.csv",
+    "mukerrer_veri_seti_v2.csv"
+  ],
+  "feature_columns": [
+    "name_similarity",
+    "email_similarity",
+    "phone_exact_match",
+    "tc_exact_match",
+    "city_exact_match",
+    "address_similarity"
+  ],
+  "ml_feature_schema": "canonical_v1",
+  "feature_source": "synthetic_pair_csvs",
+  "training_data_path": "backend\\models\\training_data.csv"
+}
