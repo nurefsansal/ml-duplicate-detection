@@ -620,6 +620,45 @@ def _candidate_confidence(match_candidate: MatchCandidate) -> float:
     )
 
 
+def _candidate_display_score(
+    match_candidate: MatchCandidate,
+    *,
+    weights: dict[str, float],
+) -> float:
+    """Return the UI-facing score as a 0-1 value.
+
+    Stored Splink probability is intentionally capped for some safety rejects
+    (for example TC conflicts). For group rows, use the field-weighted score so
+    rejected groups do not all display the same threshold cap.
+    """
+    left_record = match_candidate.left_record
+    right_record = match_candidate.right_record
+    if left_record is None or right_record is None:
+        return _candidate_confidence(match_candidate)
+
+    try:
+        field_comparisons = _build_field_comparisons(left_record, right_record)
+        features = _derive_features(left_record, right_record, field_comparisons)
+        score_breakdown = compute_weighted_score_breakdown(features, weights)
+        return _safe_float(score_breakdown.get("general_weighted_percent")) / 100.0
+    except Exception:
+        return _candidate_confidence(match_candidate)
+
+
+def _group_display_scores(
+    match_candidates: list[MatchCandidate],
+    *,
+    weights: dict[str, float],
+) -> tuple[float, float]:
+    scores = [
+        _candidate_display_score(candidate, weights=weights)
+        for candidate in match_candidates
+    ]
+    if not scores:
+        return 0.0, 0.0
+    return round(sum(scores) / len(scores), 4), round(max(scores), 4)
+
+
 def _decision_to_final_decision(decision: str) -> str:
     return _normalize_decision(decision)
 
@@ -1119,6 +1158,7 @@ def get_duplicate_groups(
     if not candidates:
         return []
 
+    weights, _thresholds = load_scoring_app_settings(session)
     adjacency: dict[int, set[int]] = {}
     edge_by_pair: dict[tuple[int, int], MatchCandidate] = {}
     record_by_id: dict[int, NormalizedRecord] = {}
@@ -1166,14 +1206,10 @@ def get_duplicate_groups(
             for (left_id, right_id), candidate in edge_by_pair.items()
             if left_id in component and right_id in component
         ]
-        match_scores = [
-            _candidate_confidence(candidate) for candidate in match_candidates_in_group
-        ]
-        group_score = round(
-            (sum(match_scores) / len(match_scores)) if match_scores else 0.0,
-            4,
+        group_score, score_max = _group_display_scores(
+            match_candidates_in_group,
+            weights=weights,
         )
-        score_max = round(max(match_scores), 4) if match_scores else 0.0
 
         group_id = f"group_{component_index}"
 
@@ -1334,6 +1370,7 @@ def get_duplicate_groups_page(
         record_ids_by_group[gid] = sorted(record_ids_by_group[gid])
 
     membership_by_record = _membership_snapshots_by_record(session, record_ids)
+    weights, _thresholds = load_scoring_app_settings(session)
 
     groups: list[dict[str, Any]] = []
     for g in group_rows:
@@ -1357,16 +1394,38 @@ def get_duplicate_groups_page(
                 entity_ids.append(int(serialized_record["entity_id"]))
             serialized_records.append(serialized_record)
 
+        group_candidates = (
+            session.query(MatchCandidate)
+            .options(
+                joinedload(MatchCandidate.left_record),
+                joinedload(MatchCandidate.right_record),
+            )
+            .filter(MatchCandidate.detection_run_id == int(g.detection_run_id))
+            .filter(MatchCandidate.decision == decision)
+            .filter(MatchCandidate.left_id.in_(member_ids))
+            .filter(MatchCandidate.right_id.in_(member_ids))
+            .all()
+            if member_ids
+            else []
+        )
+        display_score, display_score_max = _group_display_scores(
+            group_candidates,
+            weights=weights,
+        )
+        if not group_candidates:
+            display_score = round(float(g.avg_score or 0.0), 4)
+            display_score_max = round(float(g.max_score or 0.0), 4)
+
         groups.append(
             {
                 "group_id": f"dg_{int(g.id)}",
                 "entity_id": entity_ids[0] if entity_ids else None,
                 "record_ids": member_ids,
                 "pair_count": int(g.match_count or 0),
-                "avg_score": round(float(g.avg_score or 0.0), 4),
-                "max_score": round(float(g.max_score or 0.0), 4),
-                "group_score": round(float(g.avg_score or 0.0), 4),
-                "group_score_max": round(float(g.max_score or 0.0), 4),
+                "avg_score": display_score,
+                "max_score": display_score_max,
+                "group_score": display_score,
+                "group_score_max": display_score_max,
                 "match_count": int(g.match_count or 0),
                 "match_candidate_ids": [],
                 "muhatap_codes": list(g.muhatap_codes or []),
@@ -1432,6 +1491,66 @@ def _get_or_create_entity_for_group(
     session.add(entity)
     session.flush()
     return entity
+
+
+def _refresh_materialized_duplicate_groups_for_runs(
+    session: Session,
+    detection_run_ids: set[int],
+) -> None:
+    """Rebuild cached duplicate-group rows after manual review decisions."""
+    if not detection_run_ids:
+        return
+
+    try:
+        bind = session.get_bind()
+        inspector = sa_inspect(bind) if bind is not None else None
+        has_tables = bool(
+            inspector
+            and inspector.has_table("materialized_duplicate_groups")
+            and inspector.has_table("materialized_duplicate_group_members")
+        )
+        if not has_tables:
+            return
+
+        from backend.models.database import MaterializedDuplicateGroup
+        from backend.services.detection_service import (
+            _materialize_duplicate_groups_from_match_candidates,
+        )
+
+        session.flush()
+        runs = (
+            session.query(DetectionRun)
+            .filter(DetectionRun.id.in_(sorted(detection_run_ids)))
+            .all()
+        )
+        run_by_id = {int(run.id): run for run in runs}
+
+        (
+            session.query(MaterializedDuplicateGroup)
+            .filter(MaterializedDuplicateGroup.detection_run_id.in_(sorted(detection_run_ids)))
+            .delete(synchronize_session=False)
+        )
+        session.flush()
+
+        for run_id in sorted(detection_run_ids):
+            run = run_by_id.get(run_id)
+            if run is None or run.upload_id is None:
+                continue
+            _materialize_duplicate_groups_from_match_candidates(
+                session=session,
+                detection_run_id=run_id,
+                upload_id=int(run.upload_id),
+                normalization_run_id=(
+                    int(run.normalization_run_id)
+                    if run.normalization_run_id is not None
+                    else None
+                ),
+            )
+    except Exception:
+        # Review decisions are the source of truth. If cache rebuild fails,
+        # keep the decision save path working and let the legacy fallback or
+        # a later detection run refresh the materialized view.
+        return
 
 
 def approve_group_partial(
@@ -1538,8 +1657,11 @@ def approve_group_partial(
     approved_pair_ids: list[int] = []
     rejected_pair_ids: list[int] = []
     pending_pair_ids: list[int] = []
+    affected_detection_run_ids: set[int] = set()
     now = datetime.utcnow()
     for candidate in pair_candidates:
+        if candidate.detection_run_id is not None:
+            affected_detection_run_ids.add(int(candidate.detection_run_id))
         left_id = int(candidate.left_id)
         right_id = int(candidate.right_id)
         if left_id in approved_set and right_id in approved_set:
@@ -1618,6 +1740,7 @@ def approve_group_partial(
         )
     )
     session.flush()
+    _refresh_materialized_duplicate_groups_for_runs(session, affected_detection_run_ids)
 
     return {
         "entity_id": entity.id,
