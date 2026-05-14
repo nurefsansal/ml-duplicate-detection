@@ -6,17 +6,21 @@ import {
   downloadCleanDatasetCsv,
   downloadDuplicateGroupsCsv,
   downloadGoldenRecordsCsv,
+  downloadMuhatapMergeDetailCsv,
   getMatches,
+  getMuhatapMergeReport,
   getReportOverview,
   getReportDataQuality,
   getReportDetectionSummary,
   getReportReviewSummary,
   getReportUploadHistory,
+  type MuhatapMergeReportGroup,
   type ReportOverview,
   type ReportDataQuality,
   type ReportDetectionSummary,
   type ReportReviewSummary,
   type ReportUploadHistoryItem,
+  type DuplicateGroupRecord,
 } from "../../services/api";
 
 const reportTabs = [
@@ -24,6 +28,7 @@ const reportTabs = [
   { id: "data-quality", icon: "ri-shield-check-line", label: "Veri Kalitesi", desc: "Standardizasyon başarısı, geçerli/geçersiz kayıt oranları", badge: "Yeni" },
   { id: "detection", icon: "ri-search-eye-line", label: "Tespit Özeti", desc: "Tespit çalışmaları, mükerrer aday istatistikleri", badge: null },
   { id: "review", icon: "ri-checkbox-circle-line", label: "İnceleme Özeti", desc: "Onay/red kararları ve inceleme istatistikleri", badge: null },
+  { id: "muhatap-merge", icon: "ri-git-merge-line", label: "Muhatap Birleştirme", desc: "Farklı muhatap kodlu onaylı gruplar, golden ve eski kayıt detayı", badge: null },
   { id: "upload-history", icon: "ri-upload-cloud-2-line", label: "Yükleme Geçmişi", desc: "Kaynak bazlı yükleme istatistikleri", badge: null },
 ];
 
@@ -64,6 +69,13 @@ export default function Raporlar() {
     approved: 0,
     rejected: 0,
   });
+  const [mergeReportGroups, setMergeReportGroups] = useState<MuhatapMergeReportGroup[]>([]);
+  const [mergeReportMeta, setMergeReportMeta] = useState<{
+    totalAll: number;
+    withDetail: number;
+  } | null>(null);
+  const [mergeReportLoading, setMergeReportLoading] = useState(false);
+  const [mergeReportError, setMergeReportError] = useState("");
   const [exporting, setExporting] = useState(false);
 
   const dateParams = {
@@ -105,6 +117,50 @@ export default function Raporlar() {
 
   useEffect(() => { fetchAll(); }, []);
 
+  useEffect(() => {
+    if (selectedTab !== "muhatap-merge") return;
+    let cancelled = false;
+    const load = async () => {
+      setMergeReportLoading(true);
+      setMergeReportError("");
+      try {
+        const raw = localStorage.getItem("lastDetectUploadId");
+        const parsed = raw ? Number(raw) : NaN;
+        const uploadId = Number.isFinite(parsed) ? parsed : undefined;
+        const res = await getMuhatapMergeReport({
+          uploadId,
+          decision: "approved",
+          page: 1,
+          pageSize: 100,
+        });
+        if (cancelled) return;
+        if (!res.success) {
+          setMergeReportError(res.error || "Rapor alınamadı.");
+          setMergeReportGroups([]);
+          setMergeReportMeta(null);
+          return;
+        }
+        setMergeReportGroups(res.groups || []);
+        setMergeReportMeta({
+          totalAll: res.total_all_groups ?? 0,
+          withDetail: res.count_with_merge_detail ?? 0,
+        });
+      } catch {
+        if (!cancelled) {
+          setMergeReportError("Muhatap birleştirme raporu yüklenemedi.");
+          setMergeReportGroups([]);
+          setMergeReportMeta(null);
+        }
+      } finally {
+        if (!cancelled) setMergeReportLoading(false);
+      }
+    };
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedTab]);
+
   const handleQuickDate = (range: string) => {
     const today = new Date();
     let from = new Date();
@@ -123,7 +179,8 @@ export default function Raporlar() {
       | "clean"
       | "duplicate_groups"
       | "approved_matches"
-      | "golden_records",
+      | "golden_records"
+      | "muhatap_merge",
   ) => {
     setExporting(true);
     setError("");
@@ -138,8 +195,10 @@ export default function Raporlar() {
         await downloadDuplicateGroupsCsv({ uploadId, decision: "approved" });
       } else if (exportType === "approved_matches") {
         await downloadApprovedMatchesCsv({ uploadId });
-      } else {
+      } else if (exportType === "golden_records") {
         await downloadGoldenRecordsCsv({ uploadId, decision: "approved" });
+      } else {
+        await downloadMuhatapMergeDetailCsv({ uploadId, decision: "approved" });
       }
     } catch {
       setError("Export dosyasi indirilemedi. Lütfen tekrar deneyin.");
@@ -323,6 +382,121 @@ export default function Raporlar() {
                     </div>
                   )}
 
+                  {selectedTab === "muhatap-merge" && (
+                    <div className="space-y-4">
+                      <p className="text-xs text-gray-500 leading-relaxed">
+                        Son tespit yükleme ID&apos;si <code className="rounded bg-gray-100 px-1">localStorage.lastDetectUploadId</code> ile
+                        filtrelenir. Liste: yalnızca <strong>farklı muhatap kodlu</strong> ve kayıt sırasında birleşim özeti oluşturulmuş
+                        <strong> onaylı</strong> gruplar. CSV export: her grup için{" "}
+                        <code className="rounded bg-gray-100 px-1">GOLDEN_RECORD</code> satırı, ardından her önceki üye için{" "}
+                        <code className="rounded bg-gray-100 px-1">PRIOR_MATCHED_MEMBER</code> satırı (normalize ve ham JSON sütunlarıyla).
+                      </p>
+                      {mergeReportLoading ? (
+                        <p className="text-sm text-gray-500 py-6 text-center">
+                          <i className="ri-loader-4-line animate-spin mr-2" />
+                          Rapor yükleniyor…
+                        </p>
+                      ) : mergeReportError ? (
+                        <p className="text-sm text-red-600">{mergeReportError}</p>
+                      ) : (
+                        <>
+                          {mergeReportMeta && (
+                            <p className="text-xs text-gray-600">
+                              Bu sayfada birleşim detayı olan grup:{" "}
+                              <strong>{mergeReportMeta.withDetail}</strong>
+                              {" · "}
+                              Aynı filtrede toplam farklı-muhatap grup (sayfa başına):{" "}
+                              <strong>{mergeReportMeta.totalAll}</strong>
+                            </p>
+                          )}
+                          {mergeReportGroups.length === 0 ? (
+                            <p className="text-sm text-gray-500 py-6">
+                              Henüz kayıtlı birleşim detayı yok. Mükerrer kayıtlarda farklı muhatap kodlu bir grupta
+                              golden kaydı &quot;Kaydet&quot; ile onayladığınızda burada ve CSV exportta görünür.
+                            </p>
+                          ) : (
+                            <div className="space-y-8 max-h-[560px] overflow-y-auto pr-1">
+                              {mergeReportGroups.map((g) => {
+                                const gr = g.golden_record as {
+                                  merged_muhatap_report_line?: string;
+                                  merged_member_snapshots?: Array<
+                                    DuplicateGroupRecord & { muhatap_no_effective?: string }
+                                  >;
+                                  clean_name?: string;
+                                  clean_muhatap_no?: string;
+                                };
+                                const snaps = gr.merged_member_snapshots || [];
+                                return (
+                                  <div
+                                    key={g.group_id}
+                                    className="rounded-xl border border-gray-100 bg-slate-50/60 p-4"
+                                  >
+                                    <div className="flex flex-wrap items-start justify-between gap-2 border-b border-gray-100 pb-2 mb-3">
+                                      <div>
+                                        <p className="text-sm font-semibold text-gray-900">{g.group_id}</p>
+                                        <p className="text-[11px] text-gray-500 mt-0.5">
+                                          Entity #{g.entity_id ?? "—"} · Skor %{(Number(g.group_score || 0) * 100).toFixed(1)}
+                                          {g.muhatap_codes?.length ? (
+                                            <span> · Muhatap kodları: {g.muhatap_codes.join(", ")}</span>
+                                          ) : null}
+                                        </p>
+                                      </div>
+                                      <div className="text-right text-[11px] text-gray-500">
+                                        Golden: {gr.clean_name || "—"} / {gr.clean_muhatap_no || "—"}
+                                      </div>
+                                    </div>
+                                    {gr.merged_muhatap_report_line ? (
+                                      <p className="text-xs text-gray-800 leading-relaxed mb-3">
+                                        {gr.merged_muhatap_report_line}
+                                      </p>
+                                    ) : null}
+                                    <p className="text-[11px] font-semibold text-gray-600 mb-2">
+                                      Birleşmeden önceki kayıtlar (tam alanlar)
+                                    </p>
+                                    <div className="overflow-x-auto rounded-lg border border-gray-100 bg-white">
+                                      <table className="w-full min-w-[720px] text-[10px]">
+                                        <thead>
+                                          <tr className="bg-gray-50 text-left text-gray-500">
+                                            <th className="px-2 py-2">Kayıt</th>
+                                            <th className="px-2 py-2">Muhatap</th>
+                                            <th className="px-2 py-2">Ad</th>
+                                            <th className="px-2 py-2">TC</th>
+                                            <th className="px-2 py-2">Tel</th>
+                                            <th className="px-2 py-2">E-posta</th>
+                                            <th className="px-2 py-2">Şehir</th>
+                                            <th className="px-2 py-2">Adres</th>
+                                          </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-gray-50">
+                                          {snaps.map((row) => (
+                                            <tr key={row.record_id} className="text-gray-800">
+                                              <td className="px-2 py-1.5 font-mono">{row.record_id}</td>
+                                              <td className="px-2 py-1.5 font-medium">
+                                                {row.muhatap_no_effective || row.clean_muhatap_no || "—"}
+                                              </td>
+                                              <td className="px-2 py-1.5">{row.clean_name || "—"}</td>
+                                              <td className="px-2 py-1.5">{row.clean_tc || "—"}</td>
+                                              <td className="px-2 py-1.5">{row.clean_phone || "—"}</td>
+                                              <td className="px-2 py-1.5 break-all">{row.clean_email || "—"}</td>
+                                              <td className="px-2 py-1.5">{row.clean_city || "—"}</td>
+                                              <td className="px-2 py-1.5 max-w-[140px] truncate" title={row.clean_address}>
+                                                {row.clean_address || "—"}
+                                              </td>
+                                            </tr>
+                                          ))}
+                                        </tbody>
+                                      </table>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  )}
+
                   {/* Upload History */}
                   {selectedTab === "upload-history" && (
                     <div className="overflow-x-auto">
@@ -403,6 +577,9 @@ export default function Raporlar() {
                       <span className={`font-semibold ${s.color}`}>{s.value}</span>
                     </div>
                   ))}
+                  <p className="text-[10px] text-gray-400 pt-2 border-t border-gray-100">
+                    Bekleyen / onaylanan sayıları yalnızca <strong>farklı muhatap kodlu</strong> eşleşme çiftlerini içerir.
+                  </p>
                 </div>
               ) : (
                 <p className="text-xs text-gray-400">Backend verisi bekleniyor…</p>
@@ -447,6 +624,14 @@ export default function Raporlar() {
                 >
                   <i className="ri-download-2-line"></i>
                   golden_records.csv
+                </button>
+                <button
+                  onClick={() => handleExport("muhatap_merge")}
+                  disabled={exporting}
+                  className="w-full flex items-center justify-center gap-2 bg-white text-gray-700 text-sm font-semibold py-2.5 rounded-xl border border-gray-200 hover:bg-gray-50 disabled:opacity-60"
+                >
+                  <i className="ri-download-2-line"></i>
+                  muhatap_merge_detail.csv
                 </button>
               </div>
             </div>

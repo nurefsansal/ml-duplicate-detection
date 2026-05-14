@@ -10,7 +10,9 @@ import io
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends
+import json
+
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import Response
 from sqlalchemy import create_engine, func
 from sqlalchemy.orm import Session, joinedload, sessionmaker
@@ -24,7 +26,7 @@ from backend.models.database import (
     Upload,
 )
 from backend.api.routes.normalized_records_route import build_clean_dataset_rows
-from backend.services.review_service import get_duplicate_groups
+from backend.services.review_service import get_duplicate_groups, get_duplicate_groups_page
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
@@ -56,18 +58,158 @@ def _parse_date(value: Optional[str]) -> Optional[datetime]:
 router = APIRouter()
 
 
-def _csv_response(rows: list[dict], *, filename: str) -> Response:
+def _csv_response(
+    rows: list[dict],
+    *,
+    filename: str,
+    fieldnames: Optional[list[str]] = None,
+) -> Response:
     output = io.StringIO()
-    fieldnames = list(rows[0].keys()) if rows else []
-    writer = csv.DictWriter(output, fieldnames=fieldnames)
-    if fieldnames:
-        writer.writeheader()
-        writer.writerows(rows)
+    if not rows:
+        rows = [{}]
+    fn = fieldnames if fieldnames is not None else list(rows[0].keys())
+    writer = csv.DictWriter(output, fieldnames=fn, extrasaction="ignore")
+    writer.writeheader()
+    for row in rows:
+        line = {}
+        for key in fn:
+            val = row.get(key, "")
+            if val is None:
+                line[key] = ""
+            elif isinstance(val, (dict, list)):
+                line[key] = json.dumps(val, ensure_ascii=False)
+            elif isinstance(val, str):
+                line[key] = val
+            else:
+                line[key] = str(val)
+        writer.writerow(line)
     return Response(
         content=output.getvalue(),
-        media_type="text/csv",
+        media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f"attachment; filename={filename}"},
     )
+
+
+MUHATAP_MERGE_DETAIL_CSV_FIELDS = [
+    "row_type",
+    "group_id",
+    "entity_id",
+    "group_score",
+    "merge_report_line",
+    "golden_clean_name",
+    "golden_clean_muhatap_no",
+    "golden_clean_tc",
+    "golden_clean_phone",
+    "golden_clean_email",
+    "golden_clean_city",
+    "golden_clean_address",
+    "prior_record_id",
+    "prior_raw_id",
+    "prior_upload_id",
+    "prior_batch_id",
+    "prior_muhatap_effective",
+    "prior_clean_name",
+    "prior_clean_tc",
+    "prior_clean_phone",
+    "prior_clean_email",
+    "prior_clean_city",
+    "prior_clean_address",
+    "prior_clean_muhatap_no",
+    "prior_completeness_score",
+    "prior_normalized_payload_json",
+    "prior_raw_payload_json",
+]
+
+
+def _golden_block_from_canonical(gr: dict) -> dict[str, str]:
+    return {
+        "golden_clean_name": gr.get("clean_name") or "",
+        "golden_clean_muhatap_no": gr.get("clean_muhatap_no") or "",
+        "golden_clean_tc": gr.get("clean_tc") or "",
+        "golden_clean_phone": gr.get("clean_phone") or "",
+        "golden_clean_email": gr.get("clean_email") or "",
+        "golden_clean_city": gr.get("clean_city") or "",
+        "golden_clean_address": gr.get("clean_address") or "",
+    }
+
+
+def _empty_prior_columns() -> dict[str, str]:
+    return {
+        "prior_record_id": "",
+        "prior_raw_id": "",
+        "prior_upload_id": "",
+        "prior_batch_id": "",
+        "prior_muhatap_effective": "",
+        "prior_clean_name": "",
+        "prior_clean_tc": "",
+        "prior_clean_phone": "",
+        "prior_clean_email": "",
+        "prior_clean_city": "",
+        "prior_clean_address": "",
+        "prior_clean_muhatap_no": "",
+        "prior_completeness_score": "",
+        "prior_normalized_payload_json": "",
+        "prior_raw_payload_json": "",
+    }
+
+
+def _rows_muhatap_merge_detail_long(groups: list[dict]) -> list[dict]:
+    """Her grup: bir GOLDEN_RECORD satırı; ardından her önceki üye için PRIOR_MATCHED_MEMBER."""
+    rows: list[dict] = []
+    for group in groups:
+        gr = group.get("golden_record") or {}
+        snaps = gr.get("merged_member_snapshots") or []
+        report = gr.get("merged_muhatap_report_line") or ""
+        if not snaps and not report:
+            continue
+        gid = group.get("group_id") or ""
+        eid = group.get("entity_id")
+        score = group.get("group_score")
+        golden_vals = _golden_block_from_canonical(gr)
+        common = {
+            "group_id": gid,
+            "entity_id": "" if eid is None else str(eid),
+            "group_score": "" if score is None else str(score),
+            "merge_report_line": report,
+        }
+        rows.append(
+            {
+                "row_type": "GOLDEN_RECORD",
+                **common,
+                **golden_vals,
+                **_empty_prior_columns(),
+            }
+        )
+        for snap in snaps:
+            np = snap.get("normalized_payload")
+            rp = snap.get("raw_payload")
+            rows.append(
+                {
+                    "row_type": "PRIOR_MATCHED_MEMBER",
+                    **common,
+                    **golden_vals,
+                    "prior_record_id": str(snap.get("record_id") or ""),
+                    "prior_raw_id": str(snap.get("raw_id") or ""),
+                    "prior_upload_id": str(snap.get("upload_id") or ""),
+                    "prior_batch_id": snap.get("batch_id") or "",
+                    "prior_muhatap_effective": snap.get("muhatap_no_effective") or "",
+                    "prior_clean_name": snap.get("clean_name") or "",
+                    "prior_clean_tc": snap.get("clean_tc") or "",
+                    "prior_clean_phone": snap.get("clean_phone") or "",
+                    "prior_clean_email": snap.get("clean_email") or "",
+                    "prior_clean_city": snap.get("clean_city") or "",
+                    "prior_clean_address": snap.get("clean_address") or "",
+                    "prior_clean_muhatap_no": snap.get("clean_muhatap_no") or "",
+                    "prior_completeness_score": str(snap.get("completeness_score", "")),
+                    "prior_normalized_payload_json": (
+                        json.dumps(np, ensure_ascii=False) if isinstance(np, (dict, list)) else (np or "")
+                    ),
+                    "prior_raw_payload_json": (
+                        json.dumps(rp, ensure_ascii=False) if isinstance(rp, (dict, list)) else (rp or "")
+                    ),
+                }
+            )
+    return rows
 
 
 @router.get("/reports/overview")
@@ -424,7 +566,108 @@ def export_golden_records_csv(
             "clean_city": group["golden_record"].get("clean_city", ""),
             "clean_address": group["golden_record"].get("clean_address", ""),
             "clean_muhatap_no": group["golden_record"].get("clean_muhatap_no", ""),
+            "merged_muhatap_report_line": group["golden_record"].get(
+                "merged_muhatap_report_line", ""
+            ),
+            "merged_members_json": json.dumps(
+                group["golden_record"].get("merged_member_snapshots") or [],
+                ensure_ascii=False,
+            ),
         }
         for group in groups
     ]
     return _csv_response(rows, filename="golden_records.csv")
+
+
+@router.get("/reports/muhatap-merge-detail")
+def get_muhatap_merge_report(
+    upload_id: Optional[int] = None,
+    decision: str = Query("approved", pattern="^(pending|approved|rejected)$"),
+    page: int = 1,
+    page_size: int = 50,
+    db: Session = Depends(get_db),
+):
+    """
+    Farklı muhatap kodlu gruplar: golden + birleşim öncesi kayıt anlık görüntüleri (entity kaydından).
+    """
+    try:
+        page = max(1, int(page))
+        page_size = max(1, min(200, int(page_size)))
+        groups, total = get_duplicate_groups_page(
+            db,
+            upload_id=upload_id,
+            decision=decision,
+            limit=5000,
+            page=page,
+            page_size=page_size,
+            different_muhatap_code=True,
+        )
+        out_groups: list[dict] = []
+        for g in groups:
+            gr = g.get("golden_record") or {}
+            if not gr.get("merged_member_snapshots") and not gr.get("merged_muhatap_report_line"):
+                continue
+            out_groups.append(
+                {
+                    "group_id": g.get("group_id"),
+                    "entity_id": g.get("entity_id"),
+                    "muhatap_codes": g.get("muhatap_codes"),
+                    "record_ids": g.get("record_ids"),
+                    "group_score": g.get("group_score"),
+                    "golden_record": gr,
+                    "records": g.get("records"),
+                }
+            )
+        return {
+            "success": True,
+            "decision": decision,
+            "upload_id": upload_id,
+            "total_all_groups": total,
+            "count_with_merge_detail": len(out_groups),
+            "page": page,
+            "page_size": page_size,
+            "groups": out_groups,
+        }
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
+@router.get("/reports/export/muhatap_merge_detail.csv")
+def export_muhatap_merge_detail_csv(
+    upload_id: Optional[int] = None,
+    decision: str = Query("approved", pattern="^(pending|approved|rejected)$"),
+    db: Session = Depends(get_db),
+):
+    """
+    Farklı muhatap kodlu gruplarda birleşim raporu: her grup için GOLDEN_RECORD satırı,
+    ardından birleşmeden önceki her üye için PRIOR_MATCHED_MEMBER satırı (tam alanlar + JSON).
+    """
+    groups = get_duplicate_groups(
+        db,
+        upload_id=upload_id,
+        decision=decision,
+        limit=50_000,
+        different_muhatap_code=True,
+    )
+    rows = _rows_muhatap_merge_detail_long(groups)
+    if not rows:
+        rows = [
+            {
+                "row_type": "NO_DATA",
+                "group_id": "",
+                "entity_id": "",
+                "group_score": "",
+                "merge_report_line": (
+                    "Bu yükleme ve filtre için birleşim detayı (onaylı golden + üye snapshot) "
+                    "bulunamadı. Önce mükerrer kayıtlarda farklı muhatap kodlu bir grupta "
+                    "Kaydet ile onaylayın."
+                ),
+                **_golden_block_from_canonical({}),
+                **_empty_prior_columns(),
+            }
+        ]
+    return _csv_response(
+        rows,
+        filename="muhatap_merge_detail.csv",
+        fieldnames=MUHATAP_MERGE_DETAIL_CSV_FIELDS,
+    )

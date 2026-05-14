@@ -6,6 +6,7 @@ import Header from "../../components/feature/Header";
 import {
   startDetectionFromUpload,
   listUploads,
+  downloadMuhatapMergeDetailCsv,
   type DetectResponse,
   type UploadItem,
 } from "../../services/api";
@@ -39,6 +40,11 @@ export default function MukerrerTespit() {
   const [realResults, setRealResults] = useState<DetectResponse | null>(null);
   const [results, setResults] = useState<UiDuplicatePair[]>([]);
   const [jobId, setJobId] = useState<number | null>(null);
+  const [csvExporting, setCsvExporting] = useState(false);
+  const [csvExportBanner, setCsvExportBanner] = useState<{
+    type: "ok" | "err";
+    text: string;
+  } | null>(null);
 
   // Upload selection
   const [uploads, setUploads] = useState<UploadItem[]>([]);
@@ -156,6 +162,30 @@ export default function MukerrerTespit() {
     }
   };
 
+  const handleMergeDetailCsv = async () => {
+    if (uploadId === null) return;
+    setCsvExporting(true);
+    setCsvExportBanner(null);
+    try {
+      await downloadMuhatapMergeDetailCsv({
+        uploadId,
+        decision: "approved",
+        filename: `muhatap_birlestirme_detay_upload_${uploadId}.csv`,
+      });
+      setCsvExportBanner({
+        type: "ok",
+        text: "Rapor indirildi: her grupta golden satırı (GOLDEN_RECORD) ve birleşmeden önceki üyeler (PRIOR_MATCHED_MEMBER).",
+      });
+    } catch {
+      setCsvExportBanner({
+        type: "err",
+        text: "CSV indirilemedi. Oturum / backend bağlantısını kontrol edin.",
+      });
+    } finally {
+      setCsvExporting(false);
+    }
+  };
+
   const { job: detectionJob, error: jobError } = useJobPolling(jobId);
 
   useEffect(() => {
@@ -203,12 +233,22 @@ export default function MukerrerTespit() {
         title="Mükerrer Tespit"
         subtitle="Standardize edilmiş kayıtlar üzerinden benzer kayıtları tespit edin"
         actions={
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center justify-end gap-2 sm:gap-3">
             {backendHealthy === false && (
               <span className="rounded-lg border border-danger-200 bg-danger-50 px-2.5 py-1 text-xs font-medium text-danger-800">
                 Backend: Erişilemiyor
               </span>
             )}
+            <button
+              type="button"
+              onClick={() => void handleMergeDetailCsv()}
+              disabled={csvExporting}
+              title="Onaylanmış farklı muhatap kodlu gruplar: son golden kayıt + birleşmeden önceki eşleşen kayıtların tüm alanları"
+              className="ui-focus-ring flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm hover:bg-slate-50 disabled:opacity-60"
+            >
+              <i className={csvExporting ? "ri-loader-4-line animate-spin" : "ri-file-download-line"} />
+              Birleştirme detay raporu (CSV)
+            </button>
             <button
               onClick={handleStart}
               disabled={running}
@@ -226,6 +266,25 @@ export default function MukerrerTespit() {
           step="detect"
           uploadId={uploadId}
         />
+
+        {csvExportBanner && (
+          <div
+            className={`flex items-start gap-3 rounded-2xl border p-4 text-sm ${
+              csvExportBanner.type === "ok"
+                ? "border-emerald-200 bg-emerald-50 text-emerald-900"
+                : "border-danger-200 bg-danger-50 text-danger-800"
+            }`}
+          >
+            <i
+              className={
+                csvExportBanner.type === "ok"
+                  ? "ri-checkbox-circle-line text-lg text-emerald-600"
+                  : "ri-error-warning-fill text-lg text-danger-600"
+              }
+            />
+            <p className="font-medium leading-relaxed">{csvExportBanner.text}</p>
+          </div>
+        )}
 
         <JobStatusBanner job={detectionJob} />
 

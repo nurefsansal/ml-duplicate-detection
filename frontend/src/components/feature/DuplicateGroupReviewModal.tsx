@@ -1,7 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import type { DuplicateGroup, DuplicateGroupRecord } from "../../services/api";
-
-type RecordDecision = "confirmed" | "pending" | "excluded";
 
 function pickScalar(v: unknown): string {
   if (v == null) return "";
@@ -16,16 +14,10 @@ function valueOrDash(v: unknown): string {
 export function DuplicateGroupReviewModal(props: {
   open: boolean;
   group: DuplicateGroup | null;
-  decisionFilter: "pending" | "approved" | "rejected";
-  recordDecisions: Record<number, RecordDecision>;
-  onSetRecordDecision: (recordId: number, decision: RecordDecision) => void;
-  onClose: () => void;
-  onSave: () => void;
-  saving: boolean;
-  confirmedCount: number;
-  excludedCount: number;
+  /** Sol üst özet: düzenleme taslağı (goldenDraft) ile senkron */
+  goldenPreview?: DuplicateGroup["golden_record"] | null;
   getRecordMuhatapNoDisplay: (record: DuplicateGroupRecord) => string;
-  // Golden record edit block (optional, kept as-is from pages)
+  onClose: () => void;
   leftExtra?: React.ReactNode;
 }) {
   const { open, group } = props;
@@ -50,14 +42,13 @@ export function DuplicateGroupReviewModal(props: {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [open, records.length, props]);
 
-  const golden = group?.golden_record ?? {};
-
-  const rightDecision: RecordDecision = useMemo(() => {
-    if (!current) return "pending";
-    return props.recordDecisions[current.record_id] ?? "pending";
-  }, [current, props.recordDecisions]);
-
   if (!open || !group) return null;
+
+  const golden = props.goldenPreview ?? group.golden_record ?? {};
+  const mergedReportLine = pickScalar(
+    (group.golden_record as { merged_muhatap_report_line?: unknown })
+      .merged_muhatap_report_line,
+  );
 
   return (
     <div
@@ -89,7 +80,6 @@ export function DuplicateGroupReviewModal(props: {
 
         <div className="flex-1 overflow-y-auto p-6">
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1.15fr_1fr]">
-            {/* Left: Golden record (fixed) */}
             <div className="rounded-xl border border-green-100 bg-green-50 p-4">
               <div className="mb-2 text-sm font-semibold text-green-800">
                 Golden Record (sabit)
@@ -125,12 +115,16 @@ export function DuplicateGroupReviewModal(props: {
                 </div>
               </div>
 
-              {props.leftExtra ? (
-                <div className="mt-4">{props.leftExtra}</div>
+              {mergedReportLine ? (
+                <div className="mt-3 rounded-lg border border-green-200 bg-white/80 px-3 py-2 text-[11px] leading-relaxed text-gray-800">
+                  <span className="font-semibold text-green-900">Birleşim özeti: </span>
+                  {mergedReportLine}
+                </div>
               ) : null}
+
+              {props.leftExtra ? <div className="mt-4">{props.leftExtra}</div> : null}
             </div>
 
-            {/* Right: One record at a time */}
             <div className="overflow-hidden rounded-2xl border border-gray-200 bg-white">
               <div className="flex flex-wrap items-start justify-between gap-3 px-6 py-5">
                 <div>
@@ -145,42 +139,6 @@ export function DuplicateGroupReviewModal(props: {
                       ? props.getRecordMuhatapNoDisplay(current) || "—"
                       : "—"}
                   </div>
-                </div>
-
-                <div className="inline-flex overflow-hidden rounded-xl border border-gray-200 bg-white">
-                  {[
-                    { value: "confirmed", label: "Onayla", icon: "ri-check-line" },
-                    { value: "pending", label: "Beklet", icon: "ri-subtract-line" },
-                    { value: "excluded", label: "Reddet", icon: "ri-close-line" },
-                  ].map((option) => {
-                    const active = rightDecision === option.value;
-                    const activeClass =
-                      option.value === "confirmed"
-                        ? "bg-emerald-50 text-emerald-700 border-emerald-200"
-                        : option.value === "excluded"
-                          ? "bg-red-50 text-red-700 border-red-200"
-                          : "bg-gray-900 text-white border-gray-900";
-                    const idleClass = "bg-white text-gray-600 border-transparent hover:bg-gray-50";
-                    return (
-                      <button
-                        key={option.value}
-                        type="button"
-                        onClick={() =>
-                          current &&
-                          props.onSetRecordDecision(
-                            current.record_id,
-                            option.value as RecordDecision,
-                          )
-                        }
-                        className={`flex items-center gap-2 px-4 py-2 text-sm font-semibold transition-colors ${
-                          active ? activeClass : idleClass
-                        }`}
-                      >
-                        <i className={option.icon} />
-                        {option.label}
-                      </button>
-                    );
-                  })}
                 </div>
               </div>
 
@@ -240,9 +198,7 @@ export function DuplicateGroupReviewModal(props: {
                       <i className={item.icon} />
                     </div>
                     <div className="min-w-0 flex-1">
-                      <div className="text-xs font-semibold text-gray-500">
-                        {item.label}
-                      </div>
+                      <div className="text-xs font-semibold text-gray-500">{item.label}</div>
                       <div
                         className={`mt-0.5 text-sm font-semibold text-gray-900 ${
                           item.label === "E-posta" ? "break-all" : "break-words"
@@ -278,23 +234,7 @@ export function DuplicateGroupReviewModal(props: {
             </div>
           </div>
         </div>
-
-        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-gray-100 bg-white px-6 py-4">
-          <div className="text-sm font-medium text-gray-700">
-            {props.confirmedCount} kayıt onaylandı, {props.excludedCount} kayıt reddedildi
-          </div>
-          <button
-            type="button"
-            onClick={props.onSave}
-            disabled={props.saving}
-            className="inline-flex cursor-pointer items-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            <i className={props.saving ? "ri-loader-4-line animate-spin" : "ri-save-line"} />
-            Kaydet
-          </button>
-        </div>
       </div>
     </div>
   );
 }
-

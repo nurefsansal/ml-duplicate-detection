@@ -9,7 +9,6 @@ import {
   getMatches,
   listUploads,
   partialApproveGroup,
-  updateGoldenRecord,
   type DuplicateGroup,
   type DuplicateGroupRecord,
   type AdminPendingMatch,
@@ -20,7 +19,6 @@ import { DuplicateGroupReviewModal } from "../../components/feature/DuplicateGro
 import { FlowNav } from "../../components/feature/FlowNav";
 import { useRequireUploadId } from "../../hooks/useRequireUploadId";
 
-type RecordDecision = "confirmed" | "pending" | "excluded";
 type GoldenField =
   | "clean_name"
   | "clean_tc"
@@ -47,12 +45,6 @@ function pct(value: number): string {
 function filterClass(active: boolean): string {
   return active
     ? "bg-red-600 text-white"
-    : "border border-gray-200 text-gray-600 hover:bg-gray-50";
-}
-
-function muhatapConflictFilterClass(active: boolean): string {
-  return active
-    ? "bg-purple-600 text-white shadow-sm"
     : "border border-gray-200 text-gray-600 hover:bg-gray-50";
 }
 
@@ -140,7 +132,6 @@ export default function MukerrerKayitlar() {
       : "approved",
   );
   const [search, setSearch] = useState("");
-  const [filterMuhatapConflict, setFilterMuhatapConflict] = useState(false);
   const [detailGroup, setDetailGroup] = useState<DuplicateGroup | null>(null);
   const [loading, setLoading] = useState(false);
   const [groups, setGroups] = useState<DuplicateGroup[]>([]);
@@ -155,7 +146,6 @@ export default function MukerrerKayitlar() {
   const [reviewError, setReviewError] = useState<string | null>(null);
   const [uploads, setUploads] = useState<UploadItem[]>([]);
   const [apiError, setApiError] = useState("");
-  const [recordDecisions, setRecordDecisions] = useState<Record<number, RecordDecision>>({});
   const [goldenDraft, setGoldenDraft] = useState<Record<GoldenField, string>>({
     clean_name: "",
     clean_tc: "",
@@ -166,8 +156,7 @@ export default function MukerrerKayitlar() {
     clean_muhatap_no: "",
   });
   const [editingGoldenField, setEditingGoldenField] = useState<GoldenField | null>(null);
-  const [savingPartial, setSavingPartial] = useState(false);
-  const [savingGolden, setSavingGolden] = useState(false);
+  const [savingGroupFinalize, setSavingGroupFinalize] = useState(false);
   const isMountedRef = useRef(true);
 
   useEffect(() => {
@@ -185,11 +174,6 @@ export default function MukerrerKayitlar() {
   useEffect(() => {
     if (!detailGroup) return;
 
-    const nextDecisions: Record<number, RecordDecision> = {};
-    for (const record of detailGroup.records) {
-      nextDecisions[record.record_id] = record.membership_status ?? "pending";
-    }
-    setRecordDecisions(nextDecisions);
     setGoldenDraft({
       clean_name: detailGroup.golden_record.clean_name ?? "",
       clean_tc: detailGroup.golden_record.clean_tc ?? "",
@@ -202,31 +186,36 @@ export default function MukerrerKayitlar() {
     setEditingGoldenField(null);
   }, [detailGroup]);
 
-  const fetchGroups = useCallback(async () => {
-    setLoading(true);
-    setApiError("");
-    try {
-      const response = await getDuplicateGroups({
-        decision: decisionFilter,
-        uploadId: uploadId ?? undefined,
-        limit: 5000,
-        page,
-        pageSize,
-        differentMuhatapCode: filterMuhatapConflict,
-      });
-      if (!isMountedRef.current) return;
-      setGroups(response.groups || []);
-      setTotal(Number(response.total ?? 0));
-      setTotalPages(Number(response.total_pages ?? 1));
-    } catch (error) {
-      if (!isMountedRef.current) return;
-      setApiError(
-        error instanceof Error ? error.message : "Duplicate group verisi alınamadı.",
-      );
-    } finally {
-      if (isMountedRef.current) setLoading(false);
-    }
-  }, [decisionFilter, filterMuhatapConflict, uploadId, page, pageSize]);
+  const fetchGroups = useCallback(
+    async (overrides?: { decision?: typeof decisionFilter; page?: number }) => {
+      setLoading(true);
+      setApiError("");
+      try {
+        const d = overrides?.decision ?? decisionFilter;
+        const p = overrides?.page ?? page;
+        const response = await getDuplicateGroups({
+          decision: d,
+          uploadId: uploadId ?? undefined,
+          limit: 5000,
+          page: p,
+          pageSize,
+          differentMuhatapCode: true,
+        });
+        if (!isMountedRef.current) return;
+        setGroups(response.groups || []);
+        setTotal(Number(response.total ?? 0));
+        setTotalPages(Number(response.total_pages ?? 1));
+      } catch (error) {
+        if (!isMountedRef.current) return;
+        setApiError(
+          error instanceof Error ? error.message : "Duplicate group verisi alınamadı.",
+        );
+      } finally {
+        if (isMountedRef.current) setLoading(false);
+      }
+    },
+    [decisionFilter, uploadId, page, pageSize],
+  );
 
   const fetchMatches = useCallback(async () => {
     setLoading(true);
@@ -328,96 +317,39 @@ export default function MukerrerKayitlar() {
     });
   };
 
-  const confirmedCount = useMemo(
-    () => Object.values(recordDecisions).filter((decision) => decision === "confirmed").length,
-    [recordDecisions],
-  );
-
-  const excludedCount = useMemo(
-    () => Object.values(recordDecisions).filter((decision) => decision === "excluded").length,
-    [recordDecisions],
-  );
-
-  const entityIdForDetail = useMemo(() => {
-    if (!detailGroup) return null;
-    return (
-      detailGroup.entity_id ??
-      detailGroup.records.find((record) => record.entity_id != null)?.entity_id ??
-      null
-    );
-  }, [detailGroup]);
-
-  const changedGoldenFields = useMemo(() => {
-    if (!detailGroup) return [];
-    return goldenFields
-      .filter(({ key }) => goldenDraft[key] !== (detailGroup.golden_record[key] ?? ""))
-      .map(({ key }) => key);
-  }, [detailGroup, goldenDraft]);
-
-  const setRecordDecision = (recordId: number, decision: RecordDecision) => {
-    setRecordDecisions((prev) => ({ ...prev, [recordId]: decision }));
-  };
-
-  const savePartialDecisions = async () => {
+  const saveGroupGoldenFinalize = async () => {
     if (!detailGroup) return;
-    setSavingPartial(true);
+    setSavingGroupFinalize(true);
     setApiError("");
     try {
-      const approvedRecordIds = Object.entries(recordDecisions)
-        .filter(([, decision]) => decision === "confirmed")
-        .map(([recordId]) => Number(recordId));
-      const rejectedRecordIds = Object.entries(recordDecisions)
-        .filter(([, decision]) => decision === "excluded")
-        .map(([recordId]) => Number(recordId));
-
-      await partialApproveGroup({
-        groupId: detailGroup.group_id,
-        recordIds: detailGroup.record_ids,
-        approvedRecordIds,
-        rejectedRecordIds,
-        uploadId: uploadId ?? detailGroup.records[0]?.upload_id,
-        decision: decisionFilter,
-      });
-      setDetailGroup(null);
-      await fetchGroups();
-    } catch (error) {
-      setApiError(getErrorMessage(error, "Kısmi onay kaydedilemedi."));
-    } finally {
-      setSavingPartial(false);
-    }
-  };
-
-  const saveGoldenRecord = async () => {
-    if (!entityIdForDetail || changedGoldenFields.length === 0) return;
-    setSavingGolden(true);
-    setApiError("");
-    try {
-      const fields = changedGoldenFields.reduce<DuplicateGroup["golden_record"]>(
-        (acc, key) => {
+      const goldenRecordOverride = goldenFields.reduce<DuplicateGroup["golden_record"]>(
+        (acc, { key }) => {
           acc[key] = goldenDraft[key];
           return acc;
         },
         {},
       );
-      await updateGoldenRecord({ entityId: entityIdForDetail, fields });
-      setDetailGroup((prev) =>
-        prev
-          ? {
-              ...prev,
-              golden_record: {
-                ...prev.golden_record,
-                ...fields,
-              },
-            }
-          : prev,
-      );
-      await fetchGroups();
+      await partialApproveGroup({
+        groupId: detailGroup.group_id,
+        recordIds: detailGroup.record_ids,
+        approvedRecordIds: [...detailGroup.record_ids],
+        rejectedRecordIds: [],
+        uploadId: uploadId ?? detailGroup.records[0]?.upload_id,
+        decision: decisionFilter,
+        goldenRecordOverride,
+      });
+      setDetailGroup(null);
+      setDecisionFilter("approved");
+      setSearchParams((p) => {
+        p.set("decision", "approved");
+        p.set("page", "1");
+        return p;
+      });
+      await fetchGroups({ decision: "approved", page: 1 });
     } catch (error) {
-      setApiError(
-        error instanceof Error ? error.message : "Golden record güncellenemedi.",
-      );
+      setApiError(getErrorMessage(error, "Golden record ve grup kararı kaydedilemedi."));
     } finally {
-      setSavingGolden(false);
+      setSavingGroupFinalize(false);
     }
   };
 
@@ -590,17 +522,10 @@ export default function MukerrerKayitlar() {
           >
             Reddedildi
           </button>
-          <button
-            type="button"
-            onClick={() => setFilterMuhatapConflict((prev) => !prev)}
-            className={`flex cursor-pointer items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-medium transition-colors ${muhatapConflictFilterClass(
-              filterMuhatapConflict,
-            )}`}
-          >
-            <i className="ri-git-branch-line" />
-            Farklı Muhatap Kodlu
-          </button>
         </div>
+        <p className="text-[11px] text-gray-500">
+          Gruplar ve aday eşleşmeler yalnızca <strong>farklı muhatap kodlu</strong> kayıtları kapsar.
+        </p>
 
         <div className="relative w-full">
           <i className="ri-search-line absolute left-3 top-1/2 -translate-y-1/2 text-sm text-gray-400" />
@@ -750,8 +675,8 @@ export default function MukerrerKayitlar() {
                   const line = displayVals.join(", ");
                   const distinctNonEmpty = displayVals.length;
                   const showConflictBadge = groupHasDistinctMuhatapConflict(group);
-                  const muhatapCellClass = filterMuhatapConflict
-                    ? "bg-amber-100/90 text-gray-800"
+                  const muhatapCellClass = showConflictBadge
+                    ? "bg-amber-50/80 text-gray-800"
                     : "";
 
                   return (
@@ -817,39 +742,33 @@ export default function MukerrerKayitlar() {
       <DuplicateGroupReviewModal
         open={viewMode !== "candidates" && Boolean(detailGroup)}
         group={detailGroup}
-        decisionFilter={decisionFilter}
-        recordDecisions={recordDecisions}
-        onSetRecordDecision={setRecordDecision}
-        onClose={() => setDetailGroup(null)}
-        onSave={savePartialDecisions}
-        saving={savingPartial}
-        confirmedCount={confirmedCount}
-        excludedCount={excludedCount}
+        goldenPreview={goldenDraft}
         getRecordMuhatapNoDisplay={getRecordMuhatapNoDisplay}
+        onClose={() => setDetailGroup(null)}
         leftExtra={
           <div>
+            <p className="mb-2 text-[10px] leading-snug text-gray-500">
+              Kaydet: golden record değerleri kaydedilir, gruptaki tüm kayıtlar onaylanır ve
+              farklı muhatap kodları rapor için birleşim özeti metninde saklanır.
+            </p>
             <div className="mb-3 flex items-center justify-between gap-3">
               <div className="text-xs font-semibold text-gray-700">
                 Golden Record düzenle
               </div>
               <button
                 type="button"
-                onClick={saveGoldenRecord}
-                disabled={
-                  savingGolden ||
-                  changedGoldenFields.length === 0 ||
-                  !entityIdForDetail
-                }
+                onClick={saveGroupGoldenFinalize}
+                disabled={savingGroupFinalize}
                 className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg bg-green-700 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-green-800 disabled:cursor-not-allowed disabled:bg-gray-300"
               >
                 <i
                   className={
-                    savingGolden
+                    savingGroupFinalize
                       ? "ri-loader-4-line animate-spin"
                       : "ri-save-line"
                   }
                 />
-                Güncelle
+                Kaydet
               </button>
             </div>
             <div className="grid grid-cols-1 gap-2 text-[11px] md:grid-cols-2">
