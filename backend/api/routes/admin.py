@@ -17,14 +17,18 @@ from sqlalchemy.orm import Session, sessionmaker
 from backend.models.database import AuditLog, Entity, EntityMap
 from backend.services.database_service import EntityMapService
 from backend.services.review_service import (
+    MuhatapConflictError,
     approve_match_candidate,
     approve_group_partial,
+    check_golden_muhatap_no_conflicts_for_entity,
     get_duplicate_groups_page,
     get_duplicate_groups,
     get_match_candidates,
     get_match_candidates_page,
     get_entity_memberships,
     get_match_candidate_statistics,
+    merge_pending_into_entity,
+    remove_confirmed_member_from_entity,
     get_pending_match_candidates,
     reject_match_candidate,
     remove_entity_membership,
@@ -119,9 +123,23 @@ class PartialApproveGroupRequest(BaseModel):
     decision: Optional[str] = Field(default=None, pattern="^(pending|approved|rejected)$")
     note: Optional[str] = None
     golden_record_override: Optional[dict[str, Any]] = None
+    co_review_acknowledged: bool = False
 
 
-class GoldenRecordUpdateRequest(BaseModel):
+class MergeIntoEntityRequest(BaseModel):
+    """Bekleyen gruptan mevcut onaylı entity'ye ekleme."""
+
+    entity_id: int
+    record_ids: list[int] = Field(default_factory=list)
+    approved_record_ids: list[int] = Field(default_factory=list)
+    upload_id: int
+    note: Optional[str] = None
+    golden_record_override: Optional[dict[str, Any]] = None
+    co_review_acknowledged: bool = False
+
+
+class RemoveMergeMemberRequest(BaseModel):
+    upload_id: int
     """Entity canonical_data alanini guncelleme istegi."""
 
     fields: dict[str, Any] = Field(default_factory=dict)
@@ -323,6 +341,7 @@ def partial_approve_group(
             note=request.note,
             reviewed_by=current_user,
             golden_record_override=request.golden_record_override,
+            co_review_acknowledged=bool(request.co_review_acknowledged),
         )
         if result is None:
             raise HTTPException(
@@ -335,6 +354,16 @@ def partial_approve_group(
 
         db.commit()
         return result
+    except MuhatapConflictError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "MUHATAP_CONFLICT",
+                "proposed_muhatap": exc.proposed_muhatap,
+                "conflicts": exc.conflicts,
+            },
+        ) from exc
     except ValueError as exc:
         db.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -343,6 +372,98 @@ def partial_approve_group(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Error approving group: {str(e)}")
+
+
+@router.post("/matches/group/{group_id}/merge-into-entity")
+def merge_into_entity_route(
+    group_id: str,
+    request: MergeIntoEntityRequest,
+    db: Session = Depends(get_db),
+    current_user: str = Depends(get_current_user),
+):
+    """Bekleyen duplicate gruptan seçilen kayıtları mevcut onaylı entity ile birleştirir."""
+    try:
+        if not request.record_ids:
+            raise HTTPException(
+                status_code=400,
+                detail="record_ids zorunludur.",
+            )
+        if not request.approved_record_ids:
+            raise HTTPException(
+                status_code=400,
+                detail="approved_record_ids zorunludur.",
+            )
+        result = merge_pending_into_entity(
+            db,
+            entity_id=request.entity_id,
+            group_id=group_id,
+            record_ids=request.record_ids,
+            approved_record_ids=request.approved_record_ids,
+            upload_id=int(request.upload_id),
+            golden_record_override=request.golden_record_override,
+            note=request.note,
+            reviewed_by=current_user,
+            co_review_acknowledged=bool(request.co_review_acknowledged),
+        )
+        if result is None:
+            raise HTTPException(status_code=404, detail="Entity bulunamadı.")
+        db.commit()
+        return result
+    except MuhatapConflictError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "MUHATAP_CONFLICT",
+                "proposed_muhatap": exc.proposed_muhatap,
+                "conflicts": exc.conflicts,
+            },
+        ) from exc
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Var olan gruba ekleme sırasında hata: {str(e)}",
+        )
+
+
+@router.post("/entities/{entity_id}/merge-members/{record_id}/remove")
+def remove_merge_member_route(
+    entity_id: int,
+    record_id: int,
+    request: RemoveMergeMemberRequest,
+    db: Session = Depends(get_db),
+    current_user: str = Depends(get_current_user),
+):
+    """Onaylı birleşik golden gruptan tek bir kaydı çıkarır."""
+    try:
+        result = remove_confirmed_member_from_entity(
+            db,
+            entity_id=int(entity_id),
+            normalized_record_id=int(record_id),
+            upload_id=int(request.upload_id),
+            reviewed_by=current_user,
+        )
+        if result is None:
+            raise HTTPException(status_code=404, detail="Entity bulunamadı.")
+        db.commit()
+        return {"success": True, **result}
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Üyelik kaldırılırken hata: {str(e)}",
+        )
 
 
 @router.post("/admin/approve-match")
@@ -672,6 +793,9 @@ def update_golden_record(
 
         canonical_data = dict(entity.canonical_data or {})
         canonical_data.update({key: str(value).strip() if value is not None else "" for key, value in updates.items()})
+        proposed_muhatap = str(canonical_data.get("clean_muhatap_no") or "").strip()
+        if "clean_muhatap_no" in updates and proposed_muhatap:
+            check_golden_muhatap_no_conflicts_for_entity(db, int(entity_id), proposed_muhatap)
         entity.canonical_data = canonical_data
         entity.canonical_name = canonical_data.get("clean_name") or entity.canonical_name
         entity.canonical_tc = canonical_data.get("clean_tc") or None
@@ -701,6 +825,16 @@ def update_golden_record(
             "canonical_data": entity.canonical_data,
             "golden_record_id": entity.golden_record_id,
         }
+    except MuhatapConflictError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "MUHATAP_CONFLICT",
+                "proposed_muhatap": exc.proposed_muhatap,
+                "conflicts": exc.conflicts,
+            },
+        ) from exc
     except HTTPException:
         raise
     except Exception as e:

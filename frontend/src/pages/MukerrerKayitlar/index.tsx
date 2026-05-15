@@ -7,10 +7,16 @@ import Header from "../../components/feature/Header";
 import {
   downloadMuhatapMergePdf,
   getDuplicateGroups,
+  getSettings,
+  isMuhatapConflictDetail,
   listUploads,
+  mergePendingIntoEntity,
   partialApproveGroup,
+  removeMergeMember,
+  updateGoldenRecord,
   type DuplicateGroup,
   type DuplicateGroupRecord,
+  type MuhatapConflictDetail,
   type UploadItem,
 } from "../../services/api";
 import { DuplicateGroupReviewModal } from "../../components/feature/DuplicateGroupReviewModal";
@@ -56,8 +62,38 @@ function getErrorMessage(error: unknown, fallback: string): string {
   if (axios.isAxiosError(error)) {
     const detail = error.response?.data?.detail ?? error.response?.data?.error;
     if (typeof detail === "string" && detail.trim()) return detail;
+    if (detail && typeof detail === "object" && "code" in detail) {
+      const c = (detail as { code?: string }).code;
+      if (c === "MUHATAP_CONFLICT") {
+        return "Muhatap kodu başka onaylı bir grupla çakışıyor. Modalda düzenleyebilirsiniz.";
+      }
+    }
   }
   return error instanceof Error ? error.message : fallback;
+}
+
+function parseMuhatapConflict(error: unknown): MuhatapConflictDetail | null {
+  if (!axios.isAxiosError(error)) return null;
+  const raw = error.response?.data?.detail;
+  if (isMuhatapConflictDetail(raw)) return raw;
+  return null;
+}
+
+const MERGE_ENTITY_ONBOARD_KEY = "mukerrer_merge_entity_onboarding_v1";
+
+function parseMergeMinReviewers(raw: unknown): number {
+  if (typeof raw === "number" && Number.isFinite(raw)) {
+    return Math.max(1, Math.min(20, Math.trunc(raw)));
+  }
+  if (raw && typeof raw === "object" && "value" in raw) {
+    const v = Number((raw as { value: unknown }).value);
+    if (Number.isFinite(v)) return Math.max(1, Math.min(20, Math.trunc(v)));
+  }
+  if (typeof raw === "string") {
+    const v = Number(raw);
+    if (Number.isFinite(v)) return Math.max(1, Math.min(20, Math.trunc(v)));
+  }
+  return 1;
 }
 
 /** Çakışma filtresi: backend'in group.muhatap_codes alanıyla aynı önceliği izler. */
@@ -146,6 +182,19 @@ export default function MukerrerKayitlar() {
   const [editingGoldenField, setEditingGoldenField] = useState<GoldenField | null>(null);
   const [savingGroupFinalize, setSavingGroupFinalize] = useState(false);
   const [mergePdfBusy, setMergePdfBusy] = useState(false);
+  const [savingGolden, setSavingGolden] = useState(false);
+  const [removeBusyId, setRemoveBusyId] = useState<number | null>(null);
+  const [muhatapConflict, setMuhatapConflict] = useState<MuhatapConflictDetail | null>(null);
+  const [mergeModalOpen, setMergeModalOpen] = useState(false);
+  const [mergeApprovedGroups, setMergeApprovedGroups] = useState<DuplicateGroup[]>([]);
+  const [mergeTargetEntityId, setMergeTargetEntityId] = useState<number | "">("");
+  const [mergeLoading, setMergeLoading] = useState(false);
+  const [mergeSubmitting, setMergeSubmitting] = useState(false);
+  const [mergeOnboardingDismissed, setMergeOnboardingDismissed] = useState(
+    () => typeof localStorage !== "undefined" && localStorage.getItem(MERGE_ENTITY_ONBOARD_KEY) === "1",
+  );
+  const [mergeMinReviewers, setMergeMinReviewers] = useState(1);
+  const [coReviewAcknowledged, setCoReviewAcknowledged] = useState(false);
   const isMountedRef = useRef(true);
 
   useEffect(() => {
@@ -158,6 +207,15 @@ export default function MukerrerKayitlar() {
     listUploads(100)
       .then((d) => setUploads(d.uploads ?? []))
       .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    getSettings()
+      .then((s) => {
+        const raw = (s as Record<string, unknown>).mukerrer_merge_min_reviewers;
+        setMergeMinReviewers(parseMergeMinReviewers(raw));
+      })
+      .catch(() => setMergeMinReviewers(1));
   }, []);
 
   useEffect(() => {
@@ -174,6 +232,7 @@ export default function MukerrerKayitlar() {
     });
     setEditingGoldenField(null);
     setSelectedRecordIds(new Set());
+    setCoReviewAcknowledged(false);
   }, [detailGroup]);
 
   const toggleRecordSelection = (recordId: number) => {
@@ -282,6 +341,23 @@ export default function MukerrerKayitlar() {
     return list;
   }, [groups, search]);
 
+  const goldenDirtyApproved = useMemo(() => {
+    if (!detailGroup) return false;
+    return goldenFields.some(
+      ({ key }) =>
+        goldenDraft[key] !== (detailGroup.golden_record[key] ?? ""),
+    );
+  }, [detailGroup, goldenDraft]);
+
+  const buildGoldenOverride = useCallback(
+    () =>
+      goldenFields.reduce<DuplicateGroup["golden_record"]>((acc, { key }) => {
+        acc[key] = goldenDraft[key];
+        return acc;
+      }, {}),
+    [goldenDraft],
+  );
+
   const selectUpload = (raw: string) => {
     const id = Number(raw);
     if (!Number.isFinite(id) || id <= 0) return;
@@ -297,20 +373,15 @@ export default function MukerrerKayitlar() {
   const saveGroupGoldenFinalize = async () => {
     if (!detailGroup) return;
     const approvedRecordIds = [...selectedRecordIds];
-    if (approvedRecordIds.length === 0) {
-      setApiError("Kaydetmek için en az bir eşleşen kayıt seçin.");
+    if (approvedRecordIds.length < 2) {
+      setApiError("Yeni birleşik grup oluşturmak için en az iki kayıt seçmelisiniz.");
       return;
     }
     setSavingGroupFinalize(true);
     setApiError("");
+    setMuhatapConflict(null);
     try {
-      const goldenRecordOverride = goldenFields.reduce<DuplicateGroup["golden_record"]>(
-        (acc, { key }) => {
-          acc[key] = goldenDraft[key];
-          return acc;
-        },
-        {},
-      );
+      const goldenRecordOverride = buildGoldenOverride();
       await partialApproveGroup({
         groupId: detailGroup.group_id,
         recordIds: detailGroup.record_ids,
@@ -318,6 +389,8 @@ export default function MukerrerKayitlar() {
         rejectedRecordIds: [],
         uploadId: uploadId ?? detailGroup.records[0]?.upload_id,
         goldenRecordOverride,
+        coReviewAcknowledged:
+          mergeMinReviewers <= 1 ? true : coReviewAcknowledged,
       });
       setDetailGroup(null);
       setDecisionFilter("approved");
@@ -329,9 +402,150 @@ export default function MukerrerKayitlar() {
       groupsCacheRef.current.clear();
       await fetchGroups({ decision: "approved", page: 1 });
     } catch (error) {
+      const conflict = parseMuhatapConflict(error);
+      if (conflict) {
+        setMuhatapConflict(conflict);
+      }
       setApiError(getErrorMessage(error, "Golden record ve grup kararı kaydedilemedi."));
     } finally {
       setSavingGroupFinalize(false);
+    }
+  };
+
+  const saveApprovedGolden = async () => {
+    if (!detailGroup?.entity_id || !goldenDirtyApproved) return;
+    setSavingGolden(true);
+    setApiError("");
+    setMuhatapConflict(null);
+    try {
+      const changed = goldenFields.reduce<Record<string, string>>((acc, { key }) => {
+        if (goldenDraft[key] !== (detailGroup.golden_record[key] ?? "")) {
+          acc[key] = goldenDraft[key];
+        }
+        return acc;
+      }, {});
+      await updateGoldenRecord({
+        entityId: detailGroup.entity_id,
+        fields: changed as DuplicateGroup["golden_record"],
+        note: "Mükerrer kayıtlar ekranı",
+      });
+      setDetailGroup(null);
+      groupsCacheRef.current.clear();
+      await fetchGroups();
+    } catch (error) {
+      const conflict = parseMuhatapConflict(error);
+      if (conflict) setMuhatapConflict(conflict);
+      setApiError(getErrorMessage(error, "Golden güncellenemedi."));
+    } finally {
+      setSavingGolden(false);
+    }
+  };
+
+  const openMergeIntoEntityModal = async () => {
+    if (mergeMinReviewers > 1 && !coReviewAcknowledged) {
+      setApiError(
+        `Ayarlar en az ${mergeMinReviewers} inceleme onayı istiyor; önce onay kutusunu işaretleyin.`,
+      );
+      return;
+    }
+    if (!detailGroup || selectedRecordIds.size < 1) {
+      setApiError("Var olan gruba eklemek için en az bir kayıt seçin.");
+      return;
+    }
+    if (uploadId === null) return;
+    setMergeModalOpen(true);
+    setMergeTargetEntityId("");
+    setMergeLoading(true);
+    setApiError("");
+    try {
+      const res = await getDuplicateGroups({
+        decision: "approved",
+        uploadId,
+        limit: 500,
+        page: 1,
+        pageSize: 100,
+        differentMuhatapCode: false,
+      });
+      setMergeApprovedGroups(res.groups ?? []);
+    } catch (e) {
+      setMergeApprovedGroups([]);
+      setApiError(e instanceof Error ? e.message : "Onaylı gruplar yüklenemedi.");
+    } finally {
+      setMergeLoading(false);
+    }
+  };
+
+  const submitMergeIntoEntity = async () => {
+    if (mergeMinReviewers > 1 && !coReviewAcknowledged) {
+      setApiError(
+        `En az ${mergeMinReviewers} onay için önce onay kutusunu işaretleyin.`,
+      );
+      return;
+    }
+    if (!detailGroup || uploadId === null || mergeTargetEntityId === "") return;
+    const ids = [...selectedRecordIds];
+    if (ids.length < 1) {
+      setApiError("En az bir kayıt seçin.");
+      return;
+    }
+    setMergeSubmitting(true);
+    setApiError("");
+    setMuhatapConflict(null);
+    try {
+      await mergePendingIntoEntity({
+        groupId: detailGroup.group_id,
+        entityId: Number(mergeTargetEntityId),
+        recordIds: detailGroup.record_ids,
+        approvedRecordIds: ids,
+        uploadId,
+        goldenRecordOverride: buildGoldenOverride(),
+        coReviewAcknowledged:
+          mergeMinReviewers <= 1 ? true : coReviewAcknowledged,
+      });
+      setMergeModalOpen(false);
+      setDetailGroup(null);
+      groupsCacheRef.current.clear();
+      await fetchGroups();
+    } catch (error) {
+      const conflict = parseMuhatapConflict(error);
+      if (conflict) setMuhatapConflict(conflict);
+      setApiError(getErrorMessage(error, "Var olan gruba eklenemedi."));
+    } finally {
+      setMergeSubmitting(false);
+    }
+  };
+
+  const removeMemberFromApprovedGroup = async (recordId: number) => {
+    if (!detailGroup?.entity_id || uploadId === null) return;
+    const n = detailGroup.record_ids.length;
+    const lastPair =
+      n <= 2
+        ? "\n\nKalan tek kayıt onaylı gruplar listesinde görünmeyebilir. Kaldırılan kayıt bekleyen mükerrer incelemede yalnız başına görünmeyebilir."
+        : "\n\nKaldırılan kayıt, bekleyen tarafta diğer adaylarla yeniden eşleşebilir.";
+    const ok = window.confirm(
+      `Kayıt #${recordId} bu onaylı golden gruptan çıkarılsın mı?${lastPair}`,
+    );
+    if (!ok) return;
+    setRemoveBusyId(recordId);
+    setApiError("");
+    try {
+      const res = await removeMergeMember({
+        entityId: detailGroup.entity_id,
+        recordId,
+        uploadId,
+      });
+      if (!res.likely_visible_in_pending_heuristic) {
+        window.alert(
+          "Kaldırılan kayıt için bu yüklemede bekleyen (pending) eşleşme ucu bulunamadı; mükerrer inceleme listesinde görünmeyebilir.",
+        );
+      }
+      setDetailGroup(null);
+      groupsCacheRef.current.clear();
+      await fetchGroups();
+    } catch (error) {
+      setApiError(getErrorMessage(error, "Kayıt gruptan kaldırılamadı."));
+    } finally {
+      setRemoveBusyId(null);
     }
   };
 
@@ -668,15 +882,75 @@ export default function MukerrerKayitlar() {
         goldenPreview={goldenDraft}
         selectedRecordIds={selectedRecordIds}
         onToggleRecord={toggleRecordSelection}
-        onSelectAllRecords={selectAllInGroup}
-        onClearAllRecords={clearRecordSelection}
+        onSelectAllRecords={
+          decisionFilter === "pending" ? selectAllInGroup : undefined
+        }
+        onClearAllRecords={
+          decisionFilter === "pending" ? clearRecordSelection : undefined
+        }
         getRecordMuhatapNoDisplay={getRecordMuhatapNoDisplay}
         onClose={() => setDetailGroup(null)}
-        onSave={() => void saveGroupGoldenFinalize()}
-        saving={savingGroupFinalize}
+        onSave={() =>
+          void (decisionFilter === "approved"
+            ? saveApprovedGolden()
+            : saveGroupGoldenFinalize())
+        }
+        saving={
+          decisionFilter === "approved" ? savingGolden : savingGroupFinalize
+        }
+        reviewMode={
+          decisionFilter === "approved" ? "approved_entity" : "pending_merge"
+        }
+        onRemoveMember={
+          decisionFilter === "approved"
+            ? (id) => void removeMemberFromApprovedGroup(id)
+            : undefined
+        }
+        blockingRecordActionId={removeBusyId}
+        primaryActionEnabled={
+          decisionFilter === "approved"
+            ? goldenDirtyApproved && !savingGolden
+            : selectedRecordIds.size >= 2 &&
+              (mergeMinReviewers <= 1 || coReviewAcknowledged)
+        }
+        footerStartExtra={
+          decisionFilter === "pending" ? (
+            <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
+              {mergeMinReviewers > 1 ? (
+                <label className="flex cursor-pointer items-center gap-2 rounded-lg border border-amber-200 bg-amber-50/80 px-3 py-2 text-xs text-amber-950">
+                  <input
+                    type="checkbox"
+                    checked={coReviewAcknowledged}
+                    onChange={(e) => setCoReviewAcknowledged(e.target.checked)}
+                  />
+                  <span>
+                    En az {mergeMinReviewers} ayrı inceleme onayı tamamlandı
+                    (Ayarlar: mukerrer_merge_min_reviewers)
+                  </span>
+                </label>
+              ) : null}
+              <button
+                type="button"
+                onClick={() => void openMergeIntoEntityModal()}
+                disabled={
+                  savingGroupFinalize ||
+                  mergeSubmitting ||
+                  selectedRecordIds.size < 1 ||
+                  (mergeMinReviewers > 1 && !coReviewAcknowledged)
+                }
+                className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-blue-200 bg-white px-3 py-1.5 text-xs font-semibold text-blue-800 hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <i className="ri-links-line" />
+                Var olan gruba ekle
+              </button>
+            </div>
+          ) : undefined
+        }
         leftExtra={
           <div>
-            <div className="mb-3 text-xs font-semibold text-gray-700">Golden Record düzenle</div>
+            <div className="mb-3 text-xs font-semibold text-gray-700">
+              Golden Record düzenle
+            </div>
             <div className="grid grid-cols-1 gap-2 text-[11px] md:grid-cols-2">
               {goldenFields.map(({ key, label }) => {
                 const changed =
@@ -728,6 +1002,183 @@ export default function MukerrerKayitlar() {
           </div>
         }
       />
+
+      {muhatapConflict ? (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-4"
+          role="presentation"
+          onClick={() => setMuhatapConflict(null)}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl bg-white p-5 shadow-xl"
+            role="dialog"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-base font-semibold text-amber-900">
+              Muhatap kodu çakışıyor
+            </h3>
+            <p className="mt-2 text-xs text-gray-600">
+              Önerilen kod{" "}
+              <span className="font-mono font-semibold">
+                {muhatapConflict.proposed_muhatap || "—"}
+              </span>{" "}
+              aşağıdaki onaylı gruplarda zaten kullanılıyor. Muhatap kodunu (veya golden
+              alanları) düzenleyip tekrar deneyin.
+            </p>
+            <ul className="mt-3 max-h-40 list-inside list-disc overflow-y-auto text-xs text-gray-800">
+              {muhatapConflict.conflicts.map((c) => (
+                <li key={`${c.entity_id}-${c.upload_id ?? ""}`}>
+                  Entity #{c.entity_id}
+                  {c.upload_id != null ? ` · yükleme #${c.upload_id}` : ""}
+                  {c.canonical_name ? ` — ${c.canonical_name}` : ""}
+                </li>
+              ))}
+            </ul>
+            <label className="mb-1 mt-4 block text-xs font-medium text-gray-700">
+              Muhatap kodunu düzenle
+            </label>
+            <input
+              value={goldenDraft.clean_muhatap_no}
+              onChange={(e) =>
+                setGoldenDraft((prev) => ({
+                  ...prev,
+                  clean_muhatap_no: e.target.value,
+                }))
+              }
+              className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"
+            />
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setMuhatapConflict(null)}
+                className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+              >
+                Kapat
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (mergeModalOpen) void submitMergeIntoEntity();
+                  else if (detailGroup && decisionFilter === "pending")
+                    void saveGroupGoldenFinalize();
+                  else void saveApprovedGolden();
+                }}
+                disabled={
+                  !goldenDraft.clean_muhatap_no.trim() ||
+                  savingGroupFinalize ||
+                  savingGolden ||
+                  mergeSubmitting ||
+                  (mergeModalOpen &&
+                    (mergeTargetEntityId === "" || mergeLoading))
+                }
+                className="rounded-lg bg-amber-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-amber-800 disabled:opacity-50"
+              >
+                Yeniden dene
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {mergeModalOpen && detailGroup && uploadId !== null ? (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4"
+          role="presentation"
+          onClick={() => !mergeSubmitting && setMergeModalOpen(false)}
+        >
+          <div
+            className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-2xl bg-white p-5 shadow-xl"
+            role="dialog"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-base font-semibold text-gray-900">
+              Var olan onaylı gruba ekle
+            </h3>
+            {!mergeOnboardingDismissed ? (
+              <div className="mt-3 rounded-lg border border-blue-100 bg-blue-50/80 p-3 text-xs text-blue-950">
+                <p>
+                  Seçtiğiniz kayıtlar yeni bir birleşik grup oluşturmak yerine, aşağıda
+                  seçeceğiniz mevcut onaylı gruba bağlanır. Muhatap kodu diğer
+                  onaylı gruplarla çakışırsa sistem uyarı verir; golden alanını
+                  düzenleyip tekrar deneyebilirsiniz.
+                </p>
+                <button
+                  type="button"
+                  className="mt-2 text-xs font-semibold text-blue-800 underline"
+                  onClick={() => {
+                    localStorage.setItem(MERGE_ENTITY_ONBOARD_KEY, "1");
+                    setMergeOnboardingDismissed(true);
+                  }}
+                >
+                  Anladım
+                </button>
+              </div>
+            ) : null}
+            <p className="mt-2 text-xs text-gray-500">
+              Kaynak grup: <span className="font-medium">{detailGroup.group_id}</span> ·
+              Seçili {selectedRecordIds.size} kayıt
+            </p>
+            <label className="mb-1 mt-4 block text-xs font-medium text-gray-600">
+              Hedef onaylı grup (entity)
+            </label>
+            {mergeLoading ? (
+              <p className="text-xs text-gray-500">Liste yükleniyor…</p>
+            ) : (
+              <select
+                value={mergeTargetEntityId === "" ? "" : String(mergeTargetEntityId)}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setMergeTargetEntityId(v === "" ? "" : Number(v));
+                }}
+                className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"
+              >
+                <option value="">— Seçin —</option>
+                {mergeApprovedGroups.map((g) => {
+                  const eid = g.entity_id;
+                  if (eid == null) return null;
+                  return (
+                    <option key={g.group_id} value={String(eid)}>
+                      #{eid} — {g.golden_record.clean_name || g.group_id} (
+                      {g.record_ids.length} üye)
+                    </option>
+                  );
+                })}
+              </select>
+            )}
+            <p className="mt-3 text-[11px] text-gray-500">
+              Bu yüklemedeki tüm onaylı birleşik gruplar (tek/çok muhatap) listelenir.
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                disabled={mergeSubmitting}
+                onClick={() => setMergeModalOpen(false)}
+                className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+              >
+                Vazgeç
+              </button>
+              <button
+                type="button"
+                disabled={
+                  mergeSubmitting ||
+                  mergeTargetEntityId === "" ||
+                  mergeLoading ||
+                  (mergeMinReviewers > 1 && !coReviewAcknowledged)
+                }
+                onClick={() => void submitMergeIntoEntity()}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-blue-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-800 disabled:opacity-50"
+              >
+                {mergeSubmitting ? (
+                  <i className="ri-loader-4-line animate-spin" />
+                ) : (
+                  <i className="ri-check-line" />
+                )}
+                Ekle
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
     </DashboardLayout>
   );

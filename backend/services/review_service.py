@@ -3,11 +3,12 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import func, inspect as sa_inspect, text
+from sqlalchemy import func, inspect as sa_inspect, or_, text
 from sqlalchemy.orm import Session, joinedload
 
 from backend.models.database import (
     AuditLog,
+    AppSettings,
     DetectionRun,
     Entity,
     EntityMembership,
@@ -1141,6 +1142,156 @@ _GOLDEN_VALUE_KEYS = (
 )
 
 
+class MuhatapConflictError(Exception):
+    """Aynı yüklemede başka onaylı entity ile canonical muhatap çakışması."""
+
+    def __init__(self, proposed_muhatap: str, conflicts: list[dict[str, Any]]):
+        self.proposed_muhatap = proposed_muhatap
+        self.conflicts = conflicts
+        super().__init__("MUHATAP_CONFLICT")
+
+
+def _confirmed_entity_member_ids(session: Session, entity_id: int) -> set[int]:
+    rows = (
+        session.query(EntityMembership.normalized_record_id)
+        .filter(EntityMembership.entity_id == int(entity_id))
+        .filter(EntityMembership.status == "confirmed")
+        .all()
+    )
+    return {int(r[0]) for r in rows}
+
+
+def _proposed_muhatap_for_approval(
+    confirmed_records: list[NormalizedRecord],
+    golden_record_override: dict[str, Any] | None,
+) -> str:
+    if golden_record_override and golden_record_override.get("clean_muhatap_no") is not None:
+        m = _safe_str(golden_record_override.get("clean_muhatap_no"))
+        if m:
+            return m
+    canonical = _build_golden_record(confirmed_records)
+    return _safe_str(canonical.get("clean_muhatap_no"))
+
+
+def _find_muhatap_conflicts_for_upload(
+    session: Session,
+    upload_id: int,
+    proposed_muhatap: str,
+    exclude_entity_ids: set[int] | None = None,
+) -> list[dict[str, Any]]:
+    prop = _safe_str(proposed_muhatap)
+    if not prop:
+        return []
+    exclude_entity_ids = exclude_entity_ids or set()
+    norm_target = prop.casefold()
+    rows = (
+        session.query(Entity.id, Entity.canonical_name, Entity.canonical_muhatap_no)
+        .join(EntityMembership, EntityMembership.entity_id == Entity.id)
+        .join(NormalizedRecord, NormalizedRecord.id == EntityMembership.normalized_record_id)
+        .filter(EntityMembership.status == "confirmed")
+        .filter(NormalizedRecord.upload_id == int(upload_id))
+        .distinct()
+        .all()
+    )
+    conflicts: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for eid, cname, cmu in rows:
+        eidi = int(eid)
+        if eidi in exclude_entity_ids or eidi in seen:
+            continue
+        if _safe_str(cmu).casefold() != norm_target:
+            continue
+        seen.add(eidi)
+        conflicts.append(
+            {
+                "entity_id": eidi,
+                "canonical_name": cname,
+                "canonical_muhatap_no": cmu,
+            }
+        )
+    return conflicts
+
+
+def get_merge_min_reviewers(session: Session) -> int:
+    """
+    AppSettings: mukerrer_merge_min_reviewers (int veya { value: int }).
+    >1 ise kısmi onay / var olan gruba ekle isteğinde co_review_acknowledged gerekir.
+    """
+    row = session.query(AppSettings).filter(AppSettings.key == "mukerrer_merge_min_reviewers").first()
+    if row is None or row.value is None:
+        return 1
+    v: Any = row.value
+    if isinstance(v, bool):
+        return 1
+    if isinstance(v, int):
+        return max(1, min(int(v), 20))
+    if isinstance(v, float):
+        return max(1, min(int(v), 20))
+    if isinstance(v, str):
+        try:
+            return max(1, min(int(v.strip()), 20))
+        except ValueError:
+            return 1
+    if isinstance(v, dict):
+        for k in ("min_reviewers", "value", "count"):
+            if k in v and v[k] is not None:
+                try:
+                    return max(1, min(int(v[k]), 20))
+                except (TypeError, ValueError):
+                    pass
+    return 1
+
+
+def _entity_confirmed_upload_ids(session: Session, entity_id: int) -> list[int]:
+    rows = (
+        session.query(NormalizedRecord.upload_id)
+        .join(EntityMembership, EntityMembership.normalized_record_id == NormalizedRecord.id)
+        .filter(
+            EntityMembership.entity_id == int(entity_id),
+            EntityMembership.status == "confirmed",
+        )
+        .distinct()
+        .all()
+    )
+    out: list[int] = []
+    for t in rows:
+        if t[0] is not None:
+            out.append(int(t[0]))
+    return sorted(set(out))
+
+
+def check_golden_muhatap_no_conflicts_for_entity(
+    session: Session,
+    entity_id: int,
+    proposed_muhatap: str,
+) -> None:
+    """Golden muhatap güncellemesi için aynı yüklemedeki diğer onaylı entity ile çakışmayı kontrol eder."""
+    prop = _safe_str(proposed_muhatap)
+    if not prop:
+        return
+    upload_ids = _entity_confirmed_upload_ids(session, entity_id)
+    if not upload_ids:
+        return
+    all_conflicts: list[dict[str, Any]] = []
+    seen: set[tuple[int, int]] = set()
+    for uid in upload_ids:
+        for c in _find_muhatap_conflicts_for_upload(
+            session,
+            uid,
+            prop,
+            exclude_entity_ids={int(entity_id)},
+        ):
+            sig = (int(c["entity_id"]), int(uid))
+            if sig in seen:
+                continue
+            seen.add(sig)
+            entry = dict(c)
+            entry["upload_id"] = int(uid)
+            all_conflicts.append(entry)
+    if all_conflicts:
+        raise MuhatapConflictError(prop, all_conflicts)
+
+
 def _overlay_entity_canonical_on_golden(
     base_golden: dict[str, Any],
     canonical_data: dict[str, Any] | None,
@@ -1587,7 +1738,8 @@ def _entity_merge_groups_for_upload(
             or canonical.get("merged_member_snapshots")
         )
         if len(record_ids) < 2 and not has_merge_detail:
-            continue
+            if len(record_ids) != 1:
+                continue
 
         group_records = [record_by_id[rid] for rid in record_ids if rid in record_by_id]
         if not group_records:
@@ -1612,7 +1764,8 @@ def _entity_merge_groups_for_upload(
         )
         has_different_muhatap = len(muhatap_codes) > 1
         if different_muhatap_code and not has_different_muhatap and not has_merge_detail:
-            continue
+            if len(record_ids) != 1:
+                continue
 
         group_candidates = candidates_by_entity.get(entity_id, [])
         group_score, score_max = _group_display_scores(
@@ -1979,6 +2132,468 @@ def _refresh_materialized_duplicate_groups_for_runs(
         return
 
 
+def _finalize_entity_canonical_fields(
+    session: Session,
+    entity: Entity,
+    confirmed_records: list[NormalizedRecord],
+    golden_record_override: dict[str, Any] | None,
+    *,
+    excluded_records: list[NormalizedRecord] | None = None,
+) -> NormalizedRecord | None:
+    """Entity golden_record_id, canonical_data ve özet kolonlarını yazar."""
+    if not confirmed_records:
+        entity.golden_record_id = None
+        entity.canonical_data = {}
+        entity.canonical_name = f"Entity {entity.id}" if entity.id is not None else "Entity"
+        entity.canonical_phone = None
+        entity.canonical_email = None
+        entity.canonical_city = None
+        entity.canonical_tc = None
+        entity.canonical_muhatap_no = None
+        if entity.id is not None:
+            _sync_entity_donor_count(session, int(entity.id))
+        return None
+
+    golden_source = sorted(
+        confirmed_records,
+        key=lambda record: (_record_completeness_score(record), int(record.id)),
+        reverse=True,
+    )[0]
+    entity.golden_record_id = int(golden_source.id)
+    canonical = _build_golden_record(confirmed_records)
+    if golden_record_override:
+        for key, value in golden_record_override.items():
+            if key in _GOLDEN_VALUE_KEYS and value is not None:
+                canonical[key] = _safe_str(value)
+    if len(confirmed_records) >= 2:
+        sources: list[dict[str, Any]] = []
+        for record in sorted(confirmed_records, key=lambda r: int(r.id)):
+            sources.append(
+                {
+                    "record_id": int(record.id),
+                    "clean_name": _safe_str(record.clean_name),
+                    "clean_muhatap_no": _record_group_muhatap_code(record)
+                    or _safe_str(record.clean_muhatap_no),
+                }
+            )
+        canonical["merged_muhatap_sources"] = sources
+        snapshots: list[dict[str, Any]] = []
+        for record in sorted(confirmed_records, key=lambda r: int(r.id)):
+            snap = _serialize_group_record(record)
+            snap["muhatap_no_effective"] = (
+                _record_group_muhatap_code(record) or _safe_str(record.clean_muhatap_no)
+            )
+            raw_pl = _raw_payload(record)
+            if raw_pl:
+                snap["raw_payload"] = raw_pl
+            snapshots.append(snap)
+        canonical["merged_member_snapshots"] = snapshots
+
+    if excluded_records:
+        excluded_snapshots: list[dict[str, Any]] = []
+        for record in sorted(excluded_records, key=lambda r: int(r.id)):
+            snap = _serialize_group_record(record)
+            snap["muhatap_no_effective"] = (
+                _record_group_muhatap_code(record) or _safe_str(record.clean_muhatap_no)
+            )
+            raw_pl = _raw_payload(record)
+            if raw_pl:
+                snap["raw_payload"] = raw_pl
+            excluded_snapshots.append(snap)
+        canonical["excluded_member_snapshots"] = excluded_snapshots
+
+    if len(confirmed_records) >= 2:
+        from backend.services.muhatap_merge_report import build_merge_summary
+
+        merge_summary = build_merge_summary(canonical)
+        canonical["target_muhatap_code"] = merge_summary["target_muhatap_code"]
+        canonical["prior_muhatap_codes"] = merge_summary["prior_muhatap_codes"]
+        canonical["merged_muhatap_report_line"] = merge_summary["merged_muhatap_report_line"]
+    else:
+        for drop_key in (
+            "merged_muhatap_sources",
+            "merged_member_snapshots",
+            "merged_muhatap_report_line",
+            "target_muhatap_code",
+            "prior_muhatap_codes",
+        ):
+            canonical.pop(drop_key, None)
+
+    entity.canonical_data = canonical
+    canonical_data = entity.canonical_data or {}
+    entity.canonical_name = (
+        _safe_str(canonical_data.get("clean_name"))
+        or (f"Entity {entity.id}" if entity.id is not None else "Entity")
+    )
+    entity.canonical_phone = _safe_str(canonical_data.get("clean_phone")) or None
+    entity.canonical_email = _safe_str(canonical_data.get("clean_email")) or None
+    entity.canonical_city = _safe_str(canonical_data.get("clean_city")) or None
+    entity.canonical_tc = _safe_str(canonical_data.get("clean_tc")) or None
+    entity.canonical_muhatap_no = _safe_str(canonical_data.get("clean_muhatap_no")) or None
+    _sync_entity_donor_count(session, int(entity.id))
+    return golden_source
+
+
+def _pair_decision_merge_into_entity(
+    left_id: int,
+    right_id: int,
+    *,
+    approved_union: set[int],
+    pending_group_unselected: set[int],
+) -> str:
+    if left_id in approved_union and right_id in approved_union:
+        return "approved"
+    if left_id in pending_group_unselected or right_id in pending_group_unselected:
+        if left_id in approved_union or right_id in approved_union:
+            return "rejected"
+        return "pending"
+    return "pending"
+
+
+def merge_pending_into_entity(
+    session: Session,
+    *,
+    entity_id: int,
+    group_id: str,
+    record_ids: list[int],
+    approved_record_ids: list[int],
+    upload_id: int,
+    golden_record_override: dict[str, Any] | None = None,
+    note: str | None = None,
+    reviewed_by: str | None = None,
+    co_review_acknowledged: bool = False,
+) -> dict[str, Any] | None:
+    """Bekleyen gruptan seçilen kayıtları mevcut onaylı entity ile birleştirir."""
+    record_id_set = sorted({int(r) for r in record_ids})
+    approved_set = {int(r) for r in approved_record_ids}
+    ids_set = set(record_id_set)
+    if not approved_set.issubset(ids_set):
+        raise ValueError("Seçilen kayıtlar grup listesine ait olmalıdır.")
+    if len(approved_set) < 1:
+        raise ValueError("En az bir kayıt seçmelisiniz.")
+
+    entity = session.query(Entity).filter(Entity.id == int(entity_id)).first()
+    if entity is None:
+        return None
+
+    min_rev = get_merge_min_reviewers(session)
+    if min_rev > 1 and not co_review_acknowledged:
+        raise ValueError(
+            f"Ayarlar en az {min_rev} inceleme onayı gerektiriyor. İkinci incelemeyi tamamladıysanız "
+            "istek gövdesinde co_review_acknowledged=true gönderin; yoksa Ayarlar'dan "
+            "mukerrer_merge_min_reviewers değerini 1 yapın."
+        )
+
+    e_members = _confirmed_entity_member_ids(session, int(entity_id))
+    if len(e_members | approved_set) < 2:
+        raise ValueError("Birleşik grupta en az iki kayıt olmalıdır.")
+
+    all_ids = ids_set | set(e_members)
+    records = (
+        session.query(NormalizedRecord)
+        .options(joinedload(NormalizedRecord.raw_record))
+        .filter(NormalizedRecord.id.in_(sorted(all_ids)))
+        .all()
+    )
+    record_by_id = {int(r.id): r for r in records}
+    missing = sorted(all_ids - set(record_by_id))
+    if missing:
+        raise ValueError(f"Normalized kayıt bulunamadı: {missing}")
+
+    for rid in record_id_set:
+        if int(record_by_id[rid].upload_id) != int(upload_id):
+            raise ValueError(f"Kayıt {rid} bu yüklemeye ait değil.")
+
+    for rid in e_members:
+        if int(record_by_id[rid].upload_id) != int(upload_id):
+            raise ValueError("Entity üyeleri seçili yüklemeye ait değil.")
+
+    for rid in approved_set:
+        foreign = (
+            session.query(EntityMembership)
+            .filter(
+                EntityMembership.normalized_record_id == rid,
+                EntityMembership.status == "confirmed",
+                EntityMembership.entity_id != int(entity_id),
+            )
+            .first()
+        )
+        if foreign is not None:
+            raise ValueError(
+                f"Kayıt {rid} başka bir onaylı grupta (entity {foreign.entity_id}).",
+            )
+
+    confirmed_preview = [record_by_id[i] for i in sorted(e_members | approved_set)]
+    proposed_muhatap = _proposed_muhatap_for_approval(confirmed_preview, golden_record_override)
+    if proposed_muhatap:
+        conflicts = _find_muhatap_conflicts_for_upload(
+            session,
+            int(upload_id),
+            proposed_muhatap,
+            exclude_entity_ids={int(entity_id)},
+        )
+        if conflicts:
+            raise MuhatapConflictError(proposed_muhatap, conflicts)
+
+    unselected_ids = sorted(ids_set - approved_set)
+    if unselected_ids:
+        session.query(EntityMembership).filter(
+            EntityMembership.normalized_record_id.in_(unselected_ids),
+        ).delete(synchronize_session=False)
+
+    session.query(EntityMembership).filter(
+        EntityMembership.normalized_record_id.in_(list(approved_set)),
+        EntityMembership.entity_id != int(entity_id),
+        EntityMembership.status == "confirmed",
+    ).delete(synchronize_session=False)
+
+    for rid in sorted(approved_set):
+        row = (
+            session.query(EntityMembership)
+            .filter(
+                EntityMembership.entity_id == int(entity_id),
+                EntityMembership.normalized_record_id == rid,
+            )
+            .first()
+        )
+        if row is None:
+            rec = record_by_id[rid]
+            row = EntityMembership(
+                entity_id=int(entity_id),
+                normalized_record_id=rid,
+                confidence_at_merge=float(_record_completeness_score(rec)),
+                status="confirmed",
+            )
+            session.add(row)
+        else:
+            row.status = "confirmed"
+
+    approved_union = e_members | approved_set
+    pending_group_unselected = ids_set - approved_set
+    universe = ids_set | set(e_members)
+
+    run_id_rows = session.query(DetectionRun.id).filter(DetectionRun.upload_id == int(upload_id)).all()
+    run_ids = [int(r[0]) for r in run_id_rows]
+    if not run_ids:
+        raise ValueError("Bu yükleme için detection run bulunamadı.")
+
+    pair_candidates = (
+        session.query(MatchCandidate)
+        .filter(MatchCandidate.detection_run_id.in_(run_ids))
+        .filter(MatchCandidate.left_id.in_(universe))
+        .filter(MatchCandidate.right_id.in_(universe))
+        .all()
+    )
+    if not pair_candidates:
+        raise ValueError("Güncellenecek eşleşme çifti bulunamadı.")
+
+    approved_pair_ids: list[int] = []
+    rejected_pair_ids: list[int] = []
+    pending_pair_ids: list[int] = []
+    affected_detection_run_ids: set[int] = set()
+    now = datetime.utcnow()
+    for candidate in pair_candidates:
+        if candidate.detection_run_id is not None:
+            affected_detection_run_ids.add(int(candidate.detection_run_id))
+        left_id = int(candidate.left_id)
+        right_id = int(candidate.right_id)
+        next_decision = _pair_decision_merge_into_entity(
+            left_id,
+            right_id,
+            approved_union=approved_union,
+            pending_group_unselected=pending_group_unselected,
+        )
+        if next_decision == "approved":
+            approved_pair_ids.append(int(candidate.id))
+        elif next_decision == "rejected":
+            rejected_pair_ids.append(int(candidate.id))
+        else:
+            pending_pair_ids.append(int(candidate.id))
+
+        if candidate.decision != next_decision:
+            candidate.decision = next_decision
+            reason = note or f"Merge into entity {entity_id} via {group_id}"
+            session.add(
+                ReviewAction(
+                    match_id=candidate.id,
+                    decision=next_decision,
+                    decided_by=reviewed_by,
+                    decided_at=now,
+                    reason=reason,
+                )
+            )
+
+    merged_member_ids = sorted(approved_union)
+    confirmed_records = [record_by_id[i] for i in merged_member_ids if i in record_by_id]
+    excluded_records_list: list[NormalizedRecord] | None = None
+    if unselected_ids:
+        excluded_records_list = [
+            record_by_id[i] for i in unselected_ids if i in record_by_id
+        ]
+
+    golden_source = _finalize_entity_canonical_fields(
+        session,
+        entity,
+        confirmed_records,
+        golden_record_override,
+        excluded_records=excluded_records_list,
+    )
+
+    session.add(
+        AuditLog(
+            action_type="merge_into_entity",
+            entity_type="entity",
+            entity_id=int(entity_id),
+            payload={
+                "group_id": group_id,
+                "record_ids": record_id_set,
+                "approved_record_ids": sorted(approved_set),
+                "upload_id": upload_id,
+                "unselected_record_ids": unselected_ids,
+                "approved_pair_ids": approved_pair_ids,
+                "note": note,
+                "golden_record_id": int(golden_source.id) if golden_source else None,
+            },
+            created_by=reviewed_by,
+        )
+    )
+    session.flush()
+    _refresh_materialized_duplicate_groups_for_runs(session, affected_detection_run_ids)
+    return {
+        "entity_id": int(entity_id),
+        "confirmed_count": len(approved_union),
+        "excluded_count": len(unselected_ids),
+        "golden_record_id": entity.golden_record_id,
+        "approved_pair_count": len(approved_pair_ids),
+        "rejected_pair_count": len(rejected_pair_ids),
+        "pending_pair_count": len(pending_pair_ids),
+    }
+
+
+def remove_confirmed_member_from_entity(
+    session: Session,
+    *,
+    entity_id: int,
+    normalized_record_id: int,
+    upload_id: int,
+    reviewed_by: str | None = None,
+) -> dict[str, Any] | None:
+    """Onaylı birleşik entity üyeliğini kaldırır; eşleşme çiftlerini uygun biçimde günceller."""
+    entity = session.query(Entity).filter(Entity.id == int(entity_id)).first()
+    if entity is None:
+        return None
+    rid = int(normalized_record_id)
+    rec = session.query(NormalizedRecord).filter(NormalizedRecord.id == rid).first()
+    if rec is None:
+        raise ValueError("Kayıt bulunamadı.")
+    if int(rec.upload_id) != int(upload_id):
+        raise ValueError("Kayıt bu yüklemeye ait değil.")
+
+    e_members = _confirmed_entity_member_ids(session, int(entity_id))
+    if rid not in e_members:
+        raise ValueError("Kayıt bu onaylı grupta değil.")
+    if len(e_members) < 2:
+        raise ValueError("Grupta tek kayıt var; kaldırma bu ekrandan yapılamaz.")
+
+    remaining = set(e_members) - {rid}
+    removed_ok = remove_entity_membership(
+        session,
+        entity_id=int(entity_id),
+        normalized_record_id=rid,
+    )
+    if not removed_ok:
+        raise ValueError("Üyelik kaldırılamadı.")
+
+    run_id_rows = session.query(DetectionRun.id).filter(DetectionRun.upload_id == int(upload_id)).all()
+    run_ids = [int(r[0]) for r in run_id_rows]
+    affected_detection_run_ids: set[int] = set()
+    now = datetime.utcnow()
+    if run_ids:
+        candidates = (
+            session.query(MatchCandidate)
+            .filter(MatchCandidate.detection_run_id.in_(run_ids))
+            .filter(or_(MatchCandidate.left_id == rid, MatchCandidate.right_id == rid))
+            .all()
+        )
+        for candidate in candidates:
+            if candidate.detection_run_id is not None:
+                affected_detection_run_ids.add(int(candidate.detection_run_id))
+            left_id = int(candidate.left_id)
+            other = int(candidate.right_id) if left_id == rid else left_id
+            if other in remaining:
+                next_decision = "rejected"
+            else:
+                next_decision = "pending"
+            if candidate.decision != next_decision:
+                candidate.decision = next_decision
+                session.add(
+                    ReviewAction(
+                        match_id=candidate.id,
+                        decision=next_decision,
+                        decided_by=reviewed_by,
+                        decided_at=now,
+                        reason=f"Removed record {rid} from entity {entity_id}",
+                    )
+                )
+
+    pending_edge_count = 0
+    pending_neighbor_record_ids: list[int] = []
+    if run_ids:
+        pend_rows = (
+            session.query(MatchCandidate)
+            .filter(MatchCandidate.detection_run_id.in_(run_ids))
+            .filter(MatchCandidate.decision == "pending")
+            .filter(or_(MatchCandidate.left_id == rid, MatchCandidate.right_id == rid))
+            .all()
+        )
+        pending_edge_count = len(pend_rows)
+        seen_neighbors: set[int] = set()
+        for c in pend_rows:
+            oid = int(c.right_id) if int(c.left_id) == rid else int(c.left_id)
+            if oid not in seen_neighbors:
+                seen_neighbors.add(oid)
+                pending_neighbor_record_ids.append(oid)
+        pending_neighbor_record_ids.sort()
+
+    remaining_list = sorted(remaining)
+    remaining_records = (
+        session.query(NormalizedRecord)
+        .options(joinedload(NormalizedRecord.raw_record))
+        .filter(NormalizedRecord.id.in_(remaining_list))
+        .all()
+    )
+    rem_by_id = {int(r.id): r for r in remaining_records}
+    ordered_remaining = [rem_by_id[i] for i in remaining_list if i in rem_by_id]
+    _finalize_entity_canonical_fields(session, entity, ordered_remaining, None, excluded_records=None)
+
+    session.add(
+        AuditLog(
+            action_type="remove_entity_member",
+            entity_type="entity",
+            entity_id=int(entity_id),
+            payload={
+                "removed_record_id": rid,
+                "upload_id": upload_id,
+                "remaining_record_ids": remaining_list,
+                "pending_edge_count": pending_edge_count,
+                "pending_neighbor_record_ids": pending_neighbor_record_ids,
+                "likely_visible_in_pending_heuristic": pending_edge_count > 0,
+            },
+            created_by=reviewed_by,
+        )
+    )
+    session.flush()
+    _refresh_materialized_duplicate_groups_for_runs(session, affected_detection_run_ids)
+    return {
+        "entity_id": int(entity_id),
+        "removed_record_id": rid,
+        "remaining_confirmed_count": len(remaining_list),
+        "pending_edge_count": pending_edge_count,
+        "pending_neighbor_record_ids": pending_neighbor_record_ids,
+        "likely_visible_in_pending_heuristic": pending_edge_count > 0,
+    }
+
+
 def approve_group_partial(
     session: Session,
     group_id: str,
@@ -1991,6 +2606,7 @@ def approve_group_partial(
     note: str | None = None,
     reviewed_by: str | None = None,
     golden_record_override: dict[str, Any] | None = None,
+    co_review_acknowledged: bool = False,
 ) -> dict[str, Any] | None:
     requested_record_ids = [int(record_id) for record_id in (record_ids or [])]
     if requested_record_ids:
@@ -2048,6 +2664,28 @@ def approve_group_partial(
     ]
     if not confirmed_records:
         raise ValueError("Kaydetmek için en az bir kayıt onaylanmalıdır.")
+
+    if len(approved_set) < 2:
+        raise ValueError("Kaydetmek için en az iki kayıt seçmelisiniz.")
+
+    min_rev = get_merge_min_reviewers(session)
+    if min_rev > 1 and not co_review_acknowledged:
+        raise ValueError(
+            f"Ayarlar en az {min_rev} inceleme onayı gerektiriyor. İkinci incelemeyi tamamladıysanız "
+            "istek gövdesinde co_review_acknowledged=true gönderin; yoksa Ayarlar'dan "
+            "mukerrer_merge_min_reviewers değerini 1 yapın."
+        )
+
+    proposed_muhatap = _proposed_muhatap_for_approval(confirmed_records, golden_record_override)
+    if upload_id is not None and proposed_muhatap:
+        conflicts = _find_muhatap_conflicts_for_upload(
+            session,
+            int(upload_id),
+            proposed_muhatap,
+            exclude_entity_ids=set(),
+        )
+        if conflicts:
+            raise MuhatapConflictError(proposed_muhatap, conflicts)
 
     unselected_ids = sorted(set(record_ids) - approved_set - rejected_set)
     if unselected_ids:
@@ -2137,86 +2775,20 @@ def approve_group_partial(
                 )
             )
 
-    golden_source = None
-    if confirmed_records:
-        golden_source = sorted(
-            confirmed_records,
-            key=lambda record: (_record_completeness_score(record), int(record.id)),
-            reverse=True,
-        )[0]
-        entity.golden_record_id = int(golden_source.id)
-        canonical = _build_golden_record(confirmed_records)
-        if golden_record_override:
-            for key, value in golden_record_override.items():
-                if key in _GOLDEN_VALUE_KEYS and value is not None:
-                    canonical[key] = _safe_str(value)
-        if len(confirmed_records) >= 2:
-            sources: list[dict[str, Any]] = []
-            for record in sorted(confirmed_records, key=lambda r: int(r.id)):
-                sources.append(
-                    {
-                        "record_id": int(record.id),
-                        "clean_name": _safe_str(record.clean_name),
-                        "clean_muhatap_no": _record_group_muhatap_code(record)
-                        or _safe_str(record.clean_muhatap_no),
-                    }
-                )
-            canonical["merged_muhatap_sources"] = sources
-            snapshots: list[dict[str, Any]] = []
-            for record in sorted(confirmed_records, key=lambda r: int(r.id)):
-                snap = _serialize_group_record(record)
-                snap["muhatap_no_effective"] = (
-                    _record_group_muhatap_code(record) or _safe_str(record.clean_muhatap_no)
-                )
-                raw_pl = _raw_payload(record)
-                if raw_pl:
-                    snap["raw_payload"] = raw_pl
-                snapshots.append(snap)
-            canonical["merged_member_snapshots"] = snapshots
-
-        unselected_ids = sorted(set(record_ids) - approved_set - rejected_set)
-        if unselected_ids:
-            excluded_records = [
-                record_by_id[record_id]
-                for record_id in unselected_ids
-                if record_id in record_by_id
-            ]
-            excluded_snapshots: list[dict[str, Any]] = []
-            for record in sorted(excluded_records, key=lambda r: int(r.id)):
-                snap = _serialize_group_record(record)
-                snap["muhatap_no_effective"] = (
-                    _record_group_muhatap_code(record) or _safe_str(record.clean_muhatap_no)
-                )
-                raw_pl = _raw_payload(record)
-                if raw_pl:
-                    snap["raw_payload"] = raw_pl
-                excluded_snapshots.append(snap)
-            canonical["excluded_member_snapshots"] = excluded_snapshots
-
-        if len(confirmed_records) >= 2:
-            from backend.services.muhatap_merge_report import build_merge_summary
-
-            merge_summary = build_merge_summary(canonical)
-            canonical["target_muhatap_code"] = merge_summary["target_muhatap_code"]
-            canonical["prior_muhatap_codes"] = merge_summary["prior_muhatap_codes"]
-            canonical["merged_muhatap_report_line"] = merge_summary["merged_muhatap_report_line"]
-
-        entity.canonical_data = canonical
-    else:
-        entity.golden_record_id = None
-        entity.canonical_data = {}
-
-    canonical_data = entity.canonical_data or {}
-    entity.canonical_name = (
-        _safe_str(canonical_data.get("clean_name"))
-        or (f"Entity {entity.id}" if entity.id is not None else "Entity")
+    excluded_records_list: list[NormalizedRecord] | None = None
+    if unselected_ids:
+        excluded_records_list = [
+            record_by_id[record_id]
+            for record_id in unselected_ids
+            if record_id in record_by_id
+        ]
+    golden_source = _finalize_entity_canonical_fields(
+        session,
+        entity,
+        confirmed_records,
+        golden_record_override,
+        excluded_records=excluded_records_list,
     )
-    entity.canonical_phone = _safe_str(canonical_data.get("clean_phone")) or None
-    entity.canonical_email = _safe_str(canonical_data.get("clean_email")) or None
-    entity.canonical_city = _safe_str(canonical_data.get("clean_city")) or None
-    entity.canonical_tc = _safe_str(canonical_data.get("clean_tc")) or None
-    entity.canonical_muhatap_no = _safe_str(canonical_data.get("clean_muhatap_no")) or None
-    _sync_entity_donor_count(session, int(entity.id))
 
     session.add(
         AuditLog(
