@@ -815,6 +815,16 @@ def collect_ground_truth_labeled_rows(session: Session) -> list[dict[str, Any]]:
     return rows
 
 
+def _match_pair_has_distinct_muhatap_codes(mc: MatchCandidate) -> bool:
+    left = mc.left_record
+    right = mc.right_record
+    if left is None or right is None:
+        return False
+    a = _record_group_muhatap_code(left) or _safe_str(left.clean_muhatap_no)
+    b = _record_group_muhatap_code(right) or _safe_str(right.clean_muhatap_no)
+    return bool(a and b and a != b)
+
+
 def get_match_candidates(
     session: Session,
     *,
@@ -822,6 +832,7 @@ def get_match_candidates(
     decision: str | None = None,
     limit: int = 50,
     latest_only: bool = True,
+    different_muhatap_pair: bool = False,
 ) -> list[MatchCandidate]:
     query = (
         session.query(MatchCandidate)
@@ -856,14 +867,17 @@ def get_match_candidates(
         )
         query = query.join(DetectionRun).filter(DetectionRun.id.in_(latest_run_ids_subq))
 
-    return (
-        query.order_by(
-            func.coalesce(MatchCandidate.confidence, MatchCandidate.score).desc(),
-            MatchCandidate.created_at.desc(),
-        )
-        .limit(limit)
-        .all()
+    ordered = query.order_by(
+        func.coalesce(MatchCandidate.confidence, MatchCandidate.score).desc(),
+        MatchCandidate.created_at.desc(),
     )
+    if not different_muhatap_pair:
+        return ordered.limit(limit).all()
+
+    scan_cap = max(int(limit) * 50, 5000)
+    pool = ordered.limit(min(scan_cap, 50_000)).all()
+    filtered = [mc for mc in pool if _match_pair_has_distinct_muhatap_codes(mc)]
+    return filtered[: int(limit)]
 
 
 def get_match_candidates_page(
@@ -874,6 +888,7 @@ def get_match_candidates_page(
     page: int = 1,
     page_size: int = 50,
     latest_only: bool = True,
+    different_muhatap_pair: bool = False,
 ) -> tuple[int, list[MatchCandidate]]:
     page = max(1, int(page))
     page_size = max(1, min(200, int(page_size)))
@@ -910,16 +925,31 @@ def get_match_candidates_page(
         )
         query = query.join(DetectionRun).filter(DetectionRun.id.in_(latest_run_ids_subq))
 
-    total = int(query.with_entities(func.count(MatchCandidate.id)).scalar() or 0)
-    rows = (
+    if not different_muhatap_pair:
+        total = int(query.with_entities(func.count(MatchCandidate.id)).scalar() or 0)
+        rows = (
+            query.order_by(
+                func.coalesce(MatchCandidate.confidence, MatchCandidate.score).desc(),
+                MatchCandidate.created_at.desc(),
+            )
+            .offset(offset)
+            .limit(page_size)
+            .all()
+        )
+        return total, rows
+
+    MAX_SCAN = 25_000
+    pool = (
         query.order_by(
             func.coalesce(MatchCandidate.confidence, MatchCandidate.score).desc(),
             MatchCandidate.created_at.desc(),
         )
-        .offset(offset)
-        .limit(page_size)
+        .limit(MAX_SCAN)
         .all()
     )
+    filtered = [mc for mc in pool if _match_pair_has_distinct_muhatap_codes(mc)]
+    total = len(filtered)
+    rows = filtered[offset : offset + page_size]
     return total, rows
 
 
@@ -1100,6 +1130,67 @@ def _build_golden_record(records: list[NormalizedRecord]) -> dict[str, Any]:
     }
 
 
+_GOLDEN_VALUE_KEYS = (
+    "clean_name",
+    "clean_tc",
+    "clean_phone",
+    "clean_email",
+    "clean_city",
+    "clean_address",
+    "clean_muhatap_no",
+)
+
+
+def _overlay_entity_canonical_on_golden(
+    base_golden: dict[str, Any],
+    canonical_data: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Kaydedilmiş entity.canonical_data ile golden_record görünümünü güncelle."""
+    if not canonical_data:
+        return base_golden
+    merged = dict(base_golden)
+    for key in _GOLDEN_VALUE_KEYS:
+        if key not in canonical_data:
+            continue
+        sval = _safe_str(canonical_data.get(key))
+        if sval:
+            merged[key] = sval
+    for meta_key in (
+        "merged_muhatap_sources",
+        "merged_muhatap_report_line",
+        "merged_member_snapshots",
+    ):
+        if meta_key in canonical_data and canonical_data[meta_key] is not None:
+            merged[meta_key] = canonical_data[meta_key]
+    return merged
+
+
+def _hydrate_golden_records_from_entities(
+    session: Session,
+    groups: list[dict[str, Any]],
+) -> None:
+    """groups üzerinde yerinde: entity varsa golden_record entity kaydıyla hizalanır."""
+    entity_ids = sorted(
+        {int(g["entity_id"]) for g in groups if g.get("entity_id") is not None},
+    )
+    if not entity_ids:
+        return
+    rows = session.query(Entity).filter(Entity.id.in_(entity_ids)).all()
+    entity_by_id = {int(e.id): e for e in rows}
+    for group in groups:
+        eid = group.get("entity_id")
+        if eid is None:
+            continue
+        entity = entity_by_id.get(int(eid))
+        if entity is None:
+            continue
+        cd = entity.canonical_data if isinstance(entity.canonical_data, dict) else {}
+        group["golden_record"] = _overlay_entity_canonical_on_golden(
+            group.get("golden_record") or {},
+            cd,
+        )
+
+
 def _get_table_column_names(session: Session, table_name: str) -> set[str]:
     bind = session.get_bind()
     if bind is None:
@@ -1146,7 +1237,7 @@ def get_duplicate_groups(
     upload_id: int | None = None,
     decision: str = "approved",
     limit: int = 5000,
-    different_muhatap_code: bool = False,
+    different_muhatap_code: bool = True,
 ) -> list[dict[str, Any]]:
     candidates = get_match_candidates(
         session,
@@ -1269,6 +1360,7 @@ def get_duplicate_groups(
         key=lambda group: (group["group_score"], group["match_count"]),
         reverse=True,
     )
+    _hydrate_golden_records_from_entities(session, groups)
     return groups
 
 
@@ -1280,7 +1372,7 @@ def get_duplicate_groups_page(
     limit: int = 5000,
     page: int = 1,
     page_size: int = 50,
-    different_muhatap_code: bool = False,
+    different_muhatap_code: bool = True,
 ) -> tuple[list[dict[str, Any]], int]:
     """
     DB-level pagination for duplicate groups when materialized tables exist.
@@ -1435,6 +1527,7 @@ def get_duplicate_groups_page(
             }
         )
 
+    _hydrate_golden_records_from_entities(session, groups)
     return groups, total
 
 
@@ -1564,6 +1657,7 @@ def approve_group_partial(
     decision: str | None = None,
     note: str | None = None,
     reviewed_by: str | None = None,
+    golden_record_override: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     requested_record_ids = [int(record_id) for record_id in (record_ids or [])]
     if requested_record_ids:
@@ -1699,7 +1793,47 @@ def approve_group_partial(
             reverse=True,
         )[0]
         entity.golden_record_id = int(golden_source.id)
-        entity.canonical_data = _build_golden_record(confirmed_records)
+        canonical = _build_golden_record(confirmed_records)
+        if golden_record_override:
+            for key, value in golden_record_override.items():
+                if key in _GOLDEN_VALUE_KEYS and value is not None:
+                    canonical[key] = _safe_str(value)
+        if len(confirmed_records) >= 2:
+            sources: list[dict[str, Any]] = []
+            for record in sorted(confirmed_records, key=lambda r: int(r.id)):
+                sources.append(
+                    {
+                        "record_id": int(record.id),
+                        "clean_name": _safe_str(record.clean_name),
+                        "clean_muhatap_no": _record_group_muhatap_code(record)
+                        or _safe_str(record.clean_muhatap_no),
+                    }
+                )
+            canonical["merged_muhatap_sources"] = sources
+            parts: list[str] = []
+            for item in sources:
+                nm = _safe_str(item.get("clean_name")) or "—"
+                mc = _safe_str(item.get("clean_muhatap_no")) or "—"
+                parts.append(f"{nm} {mc}".strip())
+            detail = " / ".join(parts)
+            chosen_code = _safe_str(canonical.get("clean_muhatap_no"))
+            chosen_name = _safe_str(canonical.get("clean_name"))
+            canonical["merged_muhatap_report_line"] = (
+                f"{chosen_code} muhatap kodlu {chosen_name} —> eski muhatap kodları ve bilgileri: "
+                f"{detail} (tek muhatap kodunda birleştirildi)"
+            )
+            snapshots: list[dict[str, Any]] = []
+            for record in sorted(confirmed_records, key=lambda r: int(r.id)):
+                snap = _serialize_group_record(record)
+                snap["muhatap_no_effective"] = (
+                    _record_group_muhatap_code(record) or _safe_str(record.clean_muhatap_no)
+                )
+                raw_pl = _raw_payload(record)
+                if raw_pl:
+                    snap["raw_payload"] = raw_pl
+                snapshots.append(snap)
+            canonical["merged_member_snapshots"] = snapshots
+        entity.canonical_data = canonical
     else:
         entity.golden_record_id = None
         entity.canonical_data = {}

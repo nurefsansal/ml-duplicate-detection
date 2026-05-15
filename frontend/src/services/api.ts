@@ -499,6 +499,15 @@ export type DuplicateGroup = {
     clean_city?: string;
     clean_address?: string;
     clean_muhatap_no?: string;
+    merged_muhatap_sources?: Array<{
+      record_id: number;
+      clean_name: string;
+      clean_muhatap_no: string;
+    }>;
+    merged_muhatap_report_line?: string;
+    merged_member_snapshots?: Array<
+      DuplicateGroupRecord & { muhatap_no_effective?: string }
+    >;
   };
 };
 
@@ -951,6 +960,61 @@ export async function downloadGoldenRecordsCsv(options?: {
   );
 }
 
+export type MuhatapMergeReportGroup = {
+  group_id: string;
+  entity_id?: number | null;
+  muhatap_codes?: string[];
+  record_ids: number[];
+  group_score: number;
+  golden_record: DuplicateGroup["golden_record"];
+  records: DuplicateGroup["records"];
+};
+
+export type MuhatapMergeReportResponse = {
+  success: boolean;
+  decision?: string;
+  upload_id?: number | null;
+  total_all_groups?: number;
+  count_with_merge_detail?: number;
+  page?: number;
+  page_size?: number;
+  groups: MuhatapMergeReportGroup[];
+  error?: string;
+};
+
+export async function getMuhatapMergeReport(options?: {
+  uploadId?: number;
+  decision?: "pending" | "approved" | "rejected";
+  page?: number;
+  pageSize?: number;
+}): Promise<MuhatapMergeReportResponse> {
+  const response = await apiClient.get("/api/v1/reports/muhatap-merge-detail", {
+    params: {
+      upload_id: options?.uploadId,
+      decision: options?.decision ?? "approved",
+      page: options?.page ?? 1,
+      page_size: options?.pageSize ?? 50,
+    },
+  });
+  return response.data as MuhatapMergeReportResponse;
+}
+
+export async function downloadMuhatapMergeDetailCsv(options?: {
+  uploadId?: number;
+  decision?: "pending" | "approved" | "rejected";
+  /** İstemci tarafında kaydedilecek dosya adı (varsayılan: muhatap_merge_detail.csv) */
+  filename?: string;
+}): Promise<void> {
+  await downloadReportCsv(
+    "/api/v1/reports/export/muhatap_merge_detail.csv",
+    options?.filename ?? "muhatap_merge_detail.csv",
+    {
+      upload_id: options?.uploadId,
+      decision: options?.decision ?? "approved",
+    },
+  );
+}
+
 // ─── Admin ─────────────────────────────────────────────────────────────────────
 
 export async function getPendingMatches(options?: {
@@ -958,6 +1022,7 @@ export async function getPendingMatches(options?: {
   limit?: number;
   page?: number;
   pageSize?: number;
+  differentMuhatapPair?: boolean;
 }): Promise<AdminPendingMatchesResponse> {
   const response = await apiClient.get("/api/v1/matches", {
     params: {
@@ -966,6 +1031,8 @@ export async function getPendingMatches(options?: {
       limit: options?.limit ?? 50,
       page: options?.page,
       page_size: options?.pageSize,
+      different_muhatap_pair:
+        options?.differentMuhatapPair === false ? false : true,
     },
   });
   return response.data;
@@ -977,6 +1044,8 @@ export async function getMatches(options?: {
   limit?: number;
   page?: number;
   pageSize?: number;
+  /** false: tüm çiftler (varsayılan: yalnızca farklı muhatap kodlu çiftler) */
+  differentMuhatapPair?: boolean;
 }): Promise<AdminPendingMatchesResponse> {
   const response = await apiClient.get("/api/v1/matches", {
     params: {
@@ -985,6 +1054,8 @@ export async function getMatches(options?: {
       limit: options?.limit ?? 100,
       page: options?.page,
       page_size: options?.pageSize,
+      different_muhatap_pair:
+        options?.differentMuhatapPair === false ? false : true,
     },
   });
   return response.data;
@@ -1005,7 +1076,8 @@ export async function getDuplicateGroups(options?: {
       limit: options?.limit ?? 5000,
       page: options?.page,
       page_size: options?.pageSize,
-      different_muhatap_code: options?.differentMuhatapCode || undefined,
+      different_muhatap_code:
+        options?.differentMuhatapCode === false ? false : true,
     },
   });
   return response.data;
@@ -1019,17 +1091,22 @@ export async function partialApproveGroup(payload: {
   uploadId?: number;
   decision?: "pending" | "approved" | "rejected";
   note?: string;
+  goldenRecordOverride?: DuplicateGroup["golden_record"];
 }): Promise<PartialApproveGroupResponse> {
+  const body: Record<string, unknown> = {
+    record_ids: payload.recordIds,
+    approved_record_ids: payload.approvedRecordIds,
+    rejected_record_ids: payload.rejectedRecordIds,
+    upload_id: payload.uploadId,
+    decision: payload.decision,
+    note: payload.note,
+  };
+  if (payload.goldenRecordOverride) {
+    body.golden_record_override = payload.goldenRecordOverride;
+  }
   const response = await apiClient.post(
     `/api/v1/matches/group/${encodeURIComponent(payload.groupId)}/partial-approve`,
-    {
-      record_ids: payload.recordIds,
-      approved_record_ids: payload.approvedRecordIds,
-      rejected_record_ids: payload.rejectedRecordIds,
-      upload_id: payload.uploadId,
-      decision: payload.decision,
-      note: payload.note,
-    },
+    body,
   );
   return response.data;
 }

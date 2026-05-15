@@ -48,6 +48,7 @@ from backend.services.normalization_service import (
     normalize_email_key,
     to_dataframe,
 )
+from backend.services.review_service import _record_group_muhatap_code
 
 ENGINE = create_db_engine()
 SessionLocal = sessionmaker(bind=ENGINE)
@@ -580,12 +581,16 @@ def _materialize_edges_by_decision(
             continue
 
         all_record_ids = sorted({rid for members in member_lists for rid in members})
-        muhatap_rows = (
-            session.query(NormalizedRecord.id, NormalizedRecord.clean_muhatap_no)
+        muhatap_records = (
+            session.query(NormalizedRecord)
+            .options(joinedload(NormalizedRecord.raw_record))
             .filter(NormalizedRecord.id.in_(all_record_ids))
             .all()
         )
-        muhatap_by_id = {int(rid): (_safe_str(code) or "") for rid, code in muhatap_rows}
+        muhatap_by_id = {
+            int(r.id): (_record_group_muhatap_code(r) or "")
+            for r in muhatap_records
+        }
 
         comp_key_by_node: dict[int, tuple[int, ...]] = {}
         scores_by_comp: dict[tuple[int, ...], list[float]] = {}

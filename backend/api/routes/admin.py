@@ -118,6 +118,7 @@ class PartialApproveGroupRequest(BaseModel):
     upload_id: Optional[int] = None
     decision: Optional[str] = Field(default=None, pattern="^(pending|approved|rejected)$")
     note: Optional[str] = None
+    golden_record_override: Optional[dict[str, Any]] = None
 
 
 class GoldenRecordUpdateRequest(BaseModel):
@@ -139,6 +140,7 @@ def get_pending_matches(
     limit: int = 50,
     page: int = 1,
     page_size: int = 50,
+    different_muhatap_pair: bool = True,
     db: Session = Depends(get_db),
 ):
     """
@@ -156,6 +158,7 @@ def get_pending_matches(
             page=page,
             page_size=page_size,
             latest_only=True,
+            different_muhatap_pair=different_muhatap_pair,
         )
         result = [serialize_match_candidate(match, db) for match in pending_matches]
 
@@ -179,6 +182,7 @@ def list_matches(
     limit: int = 100,
     page: int = 1,
     page_size: int = 50,
+    different_muhatap_pair: bool = True,
     db: Session = Depends(get_db),
 ):
     """
@@ -198,6 +202,7 @@ def list_matches(
             page=page,
             page_size=min(int(page_size), int(limit)) if limit else page_size,
             latest_only=True,
+            different_muhatap_pair=different_muhatap_pair,
         )
         result = [serialize_match_candidate(match, db) for match in rows]
         return {
@@ -221,7 +226,7 @@ def list_duplicate_groups(
     limit: int = 5000,
     page: int = 1,
     page_size: int = 50,
-    different_muhatap_code: bool = False,
+    different_muhatap_code: bool = True,
     db: Session = Depends(get_db),
 ):
     """
@@ -317,6 +322,7 @@ def partial_approve_group(
             decision=request.decision,
             note=request.note,
             reviewed_by=current_user,
+            golden_record_override=request.golden_record_override,
         )
         if result is None:
             raise HTTPException(
