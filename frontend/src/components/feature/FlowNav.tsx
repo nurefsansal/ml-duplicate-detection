@@ -1,4 +1,5 @@
 import { useNavigate } from "react-router-dom";
+import { useUploadPipelineStatus } from "../../hooks/useUploadPipelineStatus";
 
 type FlowStep = "upload" | "standardize" | "detect" | "review" | "reports";
 
@@ -38,12 +39,15 @@ export function FlowNav(props: {
   const navigate = useNavigate();
   const uploadId = props.uploadId ?? null;
   const currentOrder = STEP_ORDER[props.step];
+  const { canReview, loading: pipelineLoading } = useUploadPipelineStatus(uploadId);
 
   const go = (path: string) => navigate(path);
 
   const canNavigateTo = (target: FlowStep) => {
     if (target === "upload") return true;
-    return uploadId !== null;
+    if (uploadId === null) return false;
+    if (target === "review") return canReview;
+    return true;
   };
 
   const pathFor = (target: FlowStep) => {
@@ -63,8 +67,12 @@ export function FlowNav(props: {
   };
 
   const nextAction = NEXT_ACTION[props.step];
+  const nextTarget = nextAction?.target;
   const nextEnabled =
-    nextAction !== undefined && uploadId !== null && props.canGoNext !== false;
+    nextAction !== undefined &&
+    uploadId !== null &&
+    props.canGoNext !== false &&
+    (nextTarget !== "review" || canReview);
 
   return (
     <div className="ui-card overflow-hidden p-5 shadow-card-lg">
@@ -77,10 +85,21 @@ export function FlowNav(props: {
         </div>
       </div>
 
+      {uploadId !== null && !canReview && !pipelineLoading && props.step !== "detect" ? (
+        <div className="mb-4 flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-900">
+          <i className="ri-information-line mt-0.5 text-base" aria-hidden />
+          <span>
+            İnceleme adımı için önce bu dosyada{" "}
+            <strong>Mükerrer Tespit</strong> çalıştırılmalıdır.
+          </span>
+        </div>
+      ) : null}
+
       <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
         <div className="flex min-w-0 flex-1 flex-wrap items-stretch gap-2 md:gap-3">
           {STEP_META.map((s, idx) => {
             const active = s.id === props.step;
+            const needsDetection = s.id === "review";
             const enabled = canNavigateTo(s.id);
             const done = STEP_ORDER[s.id] < currentOrder;
 
@@ -89,6 +108,11 @@ export function FlowNav(props: {
                 <button
                   type="button"
                   disabled={!enabled}
+                  title={
+                    needsDetection && !enabled && uploadId !== null
+                      ? "Önce Mükerrer Tespit adımını tamamlayın"
+                      : undefined
+                  }
                   aria-current={active ? "step" : undefined}
                   aria-label={`${s.label}, adım ${s.stepNum}`}
                   onClick={() => enabled && go(pathFor(s.id))}
@@ -142,8 +166,13 @@ export function FlowNav(props: {
             <button
               type="button"
               disabled={!nextEnabled}
+              title={
+                nextTarget === "review" && !canReview
+                  ? "Önce Mükerrer Tespit adımını tamamlayın"
+                  : undefined
+              }
               onClick={() => nextEnabled && go(pathFor(nextAction.target))}
-              className="ui-btn-primary ui-focus-ring"
+              className="ui-btn-primary ui-focus-ring disabled:opacity-60"
             >
               {nextAction.label}
               <i className="ri-arrow-right-line text-lg" aria-hidden />

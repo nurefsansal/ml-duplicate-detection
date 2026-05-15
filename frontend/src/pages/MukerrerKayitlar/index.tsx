@@ -5,7 +5,7 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import DashboardLayout from "../../components/feature/DashboardLayout";
 import Header from "../../components/feature/Header";
 import {
-  downloadMuhatapMergeDetailCsv,
+  downloadMuhatapMergePdf,
   getDuplicateGroups,
   listUploads,
   partialApproveGroup,
@@ -16,6 +16,7 @@ import {
 import { DuplicateGroupReviewModal } from "../../components/feature/DuplicateGroupReviewModal";
 import { FlowNav } from "../../components/feature/FlowNav";
 import { useRequireUploadId } from "../../hooks/useRequireUploadId";
+import { useUploadPipelineStatus } from "../../hooks/useUploadPipelineStatus";
 
 type GoldenField =
   | "clean_name"
@@ -112,6 +113,7 @@ function groupHasDistinctMuhatapConflict(group: DuplicateGroup): boolean {
 export default function MukerrerKayitlar() {
   const [searchParams, setSearchParams] = useSearchParams();
   const uploadId = useRequireUploadId();
+  const { canReview, loading: pipelineLoading } = useUploadPipelineStatus(uploadId);
   const decisionParam = searchParams.get("decision");
   const navigate = useNavigate();
   const pageParam = searchParams.get("page");
@@ -143,7 +145,7 @@ export default function MukerrerKayitlar() {
   });
   const [editingGoldenField, setEditingGoldenField] = useState<GoldenField | null>(null);
   const [savingGroupFinalize, setSavingGroupFinalize] = useState(false);
-  const [mergeCsvBusy, setMergeCsvBusy] = useState(false);
+  const [mergePdfBusy, setMergePdfBusy] = useState(false);
   const isMountedRef = useRef(true);
 
   useEffect(() => {
@@ -190,25 +192,46 @@ export default function MukerrerKayitlar() {
 
   const clearRecordSelection = () => setSelectedRecordIds(new Set());
 
+  const groupsCacheRef = useRef<
+    Map<string, { groups: DuplicateGroup[]; total: number; totalPages: number; ts: number }>
+  >(new Map());
+
   const fetchGroups = useCallback(
     async (overrides?: { decision?: typeof decisionFilter; page?: number }) => {
+      const d = overrides?.decision ?? decisionFilter;
+      const p = overrides?.page ?? page;
+      const cacheKey = `${uploadId ?? "none"}-${d}-${p}-${pageSize}`;
+      const cached = groupsCacheRef.current.get(cacheKey);
+      if (cached && Date.now() - cached.ts < 120_000) {
+        setGroups(cached.groups);
+        setTotal(cached.total);
+        setTotalPages(cached.totalPages);
+      }
+
       setLoading(true);
       setApiError("");
       try {
-        const d = overrides?.decision ?? decisionFilter;
-        const p = overrides?.page ?? page;
         const response = await getDuplicateGroups({
           decision: d,
           uploadId: uploadId ?? undefined,
-          limit: 5000,
+          limit: 500,
           page: p,
           pageSize,
-          differentMuhatapCode: d === "pending",
+          differentMuhatapCode: true,
         });
         if (!isMountedRef.current) return;
-        setGroups(response.groups || []);
-        setTotal(Number(response.total ?? 0));
-        setTotalPages(Number(response.total_pages ?? 1));
+        const nextGroups = response.groups || [];
+        const nextTotal = Number(response.total ?? 0);
+        const nextTotalPages = Number(response.total_pages ?? 1);
+        setGroups(nextGroups);
+        setTotal(nextTotal);
+        setTotalPages(nextTotalPages);
+        groupsCacheRef.current.set(cacheKey, {
+          groups: nextGroups,
+          total: nextTotal,
+          totalPages: nextTotalPages,
+          ts: Date.now(),
+        });
       } catch (error) {
         if (!isMountedRef.current) return;
         setApiError(
@@ -223,7 +246,7 @@ export default function MukerrerKayitlar() {
 
   useEffect(() => {
     isMountedRef.current = true;
-    if (uploadId === null) {
+    if (uploadId === null || pipelineLoading || !canReview) {
       return () => {
         isMountedRef.current = false;
       };
@@ -232,7 +255,7 @@ export default function MukerrerKayitlar() {
     return () => {
       isMountedRef.current = false;
     };
-  }, [fetchGroups, uploadId]);
+  }, [fetchGroups, uploadId, canReview, pipelineLoading]);
 
   const goPage = (p: number) => {
     setSearchParams((prev) => {
@@ -303,6 +326,7 @@ export default function MukerrerKayitlar() {
         p.set("page", "1");
         return p;
       });
+      groupsCacheRef.current.clear();
       await fetchGroups({ decision: "approved", page: 1 });
     } catch (error) {
       setApiError(getErrorMessage(error, "Golden record ve grup kararı kaydedilemedi."));
@@ -320,6 +344,37 @@ export default function MukerrerKayitlar() {
         />
         <div className="flex-1 p-6 text-sm text-gray-600">
           Yükleme seçilmedi; Veri Yükleme sayfasına yönlendiriliyorsunuz…
+        </div>
+      </DashboardLayout>
+    );
+  }
+
+  if (!pipelineLoading && !canReview) {
+    return (
+      <DashboardLayout>
+        <Header
+          title="Mükerrer Kayıtlar"
+          subtitle="Önce mükerrer tespiti tamamlanmalı"
+        />
+        <div className="flex-1 space-y-5 overflow-y-auto p-6">
+          <FlowNav step="review" uploadId={uploadId} canGoNext={false} />
+          <div className="rounded-2xl border border-amber-200 bg-amber-50 p-6 text-center">
+            <i className="ri-radar-line mb-3 block text-3xl text-amber-600" />
+            <p className="text-sm font-semibold text-amber-900">
+              Bu dosya için henüz mükerrer tespiti yapılmamış
+            </p>
+            <p className="mt-2 text-xs text-amber-800">
+              İnceleme ve birleştirme adımına geçmeden önce Mükerrer Tespit çalıştırın.
+            </p>
+            <button
+              type="button"
+              onClick={() => navigate(`/mukerrer-tespit?upload_id=${uploadId}`)}
+              className="mt-4 inline-flex cursor-pointer items-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700"
+            >
+              <i className="ri-play-line" />
+              Mükerrer Tespit&apos;e git
+            </button>
+          </div>
         </div>
       </DashboardLayout>
     );
@@ -363,24 +418,28 @@ export default function MukerrerKayitlar() {
             </button>
             <button
               type="button"
-              disabled={mergeCsvBusy}
+              disabled={mergePdfBusy}
               onClick={async () => {
                 if (uploadId === null) return;
-                setMergeCsvBusy(true);
+                setMergePdfBusy(true);
                 try {
-                  await downloadMuhatapMergeDetailCsv({
+                  await downloadMuhatapMergePdf({
                     uploadId,
                     decision: "approved",
-                    filename: `muhatap_birlestirme_upload_${uploadId}.csv`,
+                    filename: `muhatap_birlestirme_${uploadId}.pdf`,
                   });
+                } catch (err) {
+                  setApiError(
+                    err instanceof Error ? err.message : "PDF raporu indirilemedi.",
+                  );
                 } finally {
-                  setMergeCsvBusy(false);
+                  setMergePdfBusy(false);
                 }
               }}
-              className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg bg-gray-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-gray-900 disabled:opacity-60"
+              className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-700 disabled:opacity-60"
             >
-              <i className={mergeCsvBusy ? "ri-loader-4-line animate-spin" : "ri-download-line"} />
-              CSV indir
+              <i className={mergePdfBusy ? "ri-loader-4-line animate-spin" : "ri-file-pdf-2-line"} />
+              PDF indir
             </button>
           </div>
         </div>
@@ -538,16 +597,25 @@ export default function MukerrerKayitlar() {
               </thead>
               <tbody className="divide-y divide-gray-50">
                 {filtered.map((group) => {
+                  const isApproved = decisionFilter === "approved";
+                  const finalMuhatap = pickMuhatapScalar(
+                    group.golden_record?.clean_muhatap_no,
+                  );
                   const displayVals =
                     group.muhatap_codes && group.muhatap_codes.length > 0
                       ? group.muhatap_codes
                       : groupDistinctMuhatapValues(group, getRecordMuhatapNoDisplay);
-                  const line = displayVals.join(", ");
+                  const line = isApproved
+                    ? finalMuhatap || "—"
+                    : displayVals.join(", ");
                   const distinctNonEmpty = displayVals.length;
-                  const showConflictBadge = groupHasDistinctMuhatapConflict(group);
+                  const showConflictBadge =
+                    !isApproved && groupHasDistinctMuhatapConflict(group);
                   const muhatapCellClass = showConflictBadge
                     ? "bg-amber-50/80 text-gray-800"
-                    : "";
+                    : isApproved && finalMuhatap
+                      ? "text-gray-800 font-medium"
+                      : "";
 
                   return (
                     <tr key={group.group_id} className="transition-colors hover:bg-gray-50/50">
