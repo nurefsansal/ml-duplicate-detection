@@ -22,8 +22,6 @@ const navItems = [
 
   { path: "/mukerrer-kayitlar", icon: "ri-file-copy-2-line", label: "Mükerrer Kayıtlar" },
 
-  { path: "/yonetici-onayi", icon: "ri-checkbox-circle-line", label: "Yönetici Onayı" },
-
   { path: "/ayarlar", icon: "ri-settings-4-line", label: "Ayarlar" },
 
   { path: "/raporlar", icon: "ri-bar-chart-box-line", label: "Raporlar" },

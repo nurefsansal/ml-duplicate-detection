@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { useSearchParams } from "react-router-dom";
 import DashboardLayout from "../../components/feature/DashboardLayout";
 import Header from "../../components/feature/Header";
 import {
@@ -24,12 +25,13 @@ import {
 } from "../../services/api";
 
 const reportTabs = [
-  { id: "overview", icon: "ri-dashboard-3-line", label: "Genel Özet", desc: "Toplam kayıt, tespit ve onay istatistikleri" },
-  { id: "data-quality", icon: "ri-shield-check-line", label: "Veri Kalitesi", desc: "Standardizasyon başarısı, geçerli/geçersiz kayıt oranları", badge: "Yeni" },
-  { id: "detection", icon: "ri-search-eye-line", label: "Tespit Özeti", desc: "Tespit çalışmaları, mükerrer aday istatistikleri", badge: null },
-  { id: "review", icon: "ri-checkbox-circle-line", label: "İnceleme Özeti", desc: "Onay/red kararları ve inceleme istatistikleri", badge: null },
-  { id: "muhatap-merge", icon: "ri-git-merge-line", label: "Muhatap Birleştirme", desc: "Farklı muhatap kodlu onaylı gruplar, golden ve eski kayıt detayı", badge: null },
-  { id: "upload-history", icon: "ri-upload-cloud-2-line", label: "Yükleme Geçmişi", desc: "Kaynak bazlı yükleme istatistikleri", badge: null },
+  {
+    id: "muhatap-merge",
+    icon: "ri-git-merge-line",
+    label: "Muhatap Birleştirme",
+    desc: "Onaylı birleştirmeler, golden kayıt ve dahil edilmeyen kayıtlar",
+    badge: null,
+  },
 ];
 
 function formatDate(iso: string | null): string {
@@ -52,7 +54,13 @@ function StatCard({ label, value, color = "text-gray-900", bg = "bg-gray-50" }: 
 }
 
 export default function Raporlar() {
-  const [selectedTab, setSelectedTab] = useState("overview");
+  const [searchParams] = useSearchParams();
+  const tabFromUrl = searchParams.get("tab");
+  const initialTab =
+    tabFromUrl && reportTabs.some((t) => t.id === tabFromUrl)
+      ? tabFromUrl
+      : "muhatap-merge";
+  const [selectedTab, setSelectedTab] = useState(initialTab);
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
 
@@ -84,38 +92,15 @@ export default function Raporlar() {
   };
 
   const fetchAll = async () => {
-    setLoading(true);
+    setLoading(false);
     setError("");
-    try {
-      const [ov, q, d, r, uh, pendingMatches, approvedMatches, rejectedMatches] =
-        await Promise.all([
-        getReportOverview(dateParams),
-        getReportDataQuality(dateParams),
-        getReportDetectionSummary(dateParams),
-        getReportReviewSummary(dateParams),
-        getReportUploadHistory({ ...dateParams, limit: 20 }),
-        getMatches({ decision: "pending", limit: 1_000_000 }),
-        getMatches({ decision: "approved", limit: 1_000_000 }),
-        getMatches({ decision: "rejected", limit: 1_000_000 }),
-      ]);
-      setOverview(ov.success ? ov : null);
-      setQuality(q.success ? q : null);
-      setDetection(d.success ? d : null);
-      setReview(r.success ? r : null);
-      setUploadHistory(uh.success ? uh.uploads : []);
-      setDecisionCounts({
-        pending: pendingMatches.count ?? 0,
-        approved: approvedMatches.count ?? 0,
-        rejected: rejectedMatches.count ?? 0,
-      });
-    } catch {
-      setError("Rapor verileri yüklenemedi. Backend bağlantısını kontrol edin.");
-    } finally {
-      setLoading(false);
-    }
   };
 
-  useEffect(() => { fetchAll(); }, []);
+  useEffect(() => {
+    if (tabFromUrl && reportTabs.some((t) => t.id === tabFromUrl)) {
+      setSelectedTab(tabFromUrl);
+    }
+  }, [tabFromUrl]);
 
   useEffect(() => {
     if (selectedTab !== "muhatap-merge") return;
@@ -124,9 +109,15 @@ export default function Raporlar() {
       setMergeReportLoading(true);
       setMergeReportError("");
       try {
+        const uploadParam = searchParams.get("upload_id");
+        const fromUrl = uploadParam ? Number(uploadParam) : NaN;
         const raw = localStorage.getItem("lastDetectUploadId");
         const parsed = raw ? Number(raw) : NaN;
-        const uploadId = Number.isFinite(parsed) ? parsed : undefined;
+        const uploadId = Number.isFinite(fromUrl)
+          ? fromUrl
+          : Number.isFinite(parsed)
+            ? parsed
+            : undefined;
         const res = await getMuhatapMergeReport({
           uploadId,
           decision: "approved",
@@ -159,7 +150,7 @@ export default function Raporlar() {
     return () => {
       cancelled = true;
     };
-  }, [selectedTab]);
+  }, [selectedTab, searchParams]);
 
   const handleQuickDate = (range: string) => {
     const today = new Date();
@@ -426,6 +417,9 @@ export default function Raporlar() {
                                   clean_muhatap_no?: string;
                                 };
                                 const snaps = gr.merged_member_snapshots || [];
+                                const excluded =
+                                  (gr as { excluded_member_snapshots?: typeof snaps })
+                                    .excluded_member_snapshots || [];
                                 return (
                                   <div
                                     key={g.group_id}
@@ -451,7 +445,7 @@ export default function Raporlar() {
                                       </p>
                                     ) : null}
                                     <p className="text-[11px] font-semibold text-gray-600 mb-2">
-                                      Birleşmeden önceki kayıtlar (tam alanlar)
+                                      Birleşime dahil edilen kayıtlar
                                     </p>
                                     <div className="overflow-x-auto rounded-lg border border-gray-100 bg-white">
                                       <table className="w-full min-w-[720px] text-[10px]">
@@ -487,6 +481,41 @@ export default function Raporlar() {
                                         </tbody>
                                       </table>
                                     </div>
+                                    {excluded.length > 0 ? (
+                                      <>
+                                        <p className="text-[11px] font-semibold text-amber-800 mb-2 mt-4">
+                                          Birleşime dahil edilmeyen kayıtlar (bekleyen grupta)
+                                        </p>
+                                        <div className="overflow-x-auto rounded-lg border border-amber-100 bg-amber-50/40">
+                                          <table className="w-full min-w-[720px] text-[10px]">
+                                            <thead>
+                                              <tr className="bg-amber-50/80 text-left text-amber-900">
+                                                <th className="px-2 py-2">Kayıt</th>
+                                                <th className="px-2 py-2">Muhatap</th>
+                                                <th className="px-2 py-2">Ad</th>
+                                                <th className="px-2 py-2">TC</th>
+                                                <th className="px-2 py-2">Tel</th>
+                                                <th className="px-2 py-2">E-posta</th>
+                                              </tr>
+                                            </thead>
+                                            <tbody className="divide-y divide-amber-100/80">
+                                              {excluded.map((row) => (
+                                                <tr key={`ex-${row.record_id}`} className="text-gray-800">
+                                                  <td className="px-2 py-1.5 font-mono">{row.record_id}</td>
+                                                  <td className="px-2 py-1.5 font-medium">
+                                                    {row.muhatap_no_effective || row.clean_muhatap_no || "—"}
+                                                  </td>
+                                                  <td className="px-2 py-1.5">{row.clean_name || "—"}</td>
+                                                  <td className="px-2 py-1.5">{row.clean_tc || "—"}</td>
+                                                  <td className="px-2 py-1.5">{row.clean_phone || "—"}</td>
+                                                  <td className="px-2 py-1.5 break-all">{row.clean_email || "—"}</td>
+                                                </tr>
+                                              ))}
+                                            </tbody>
+                                          </table>
+                                        </div>
+                                      </>
+                                    ) : null}
                                   </div>
                                 );
                               })}

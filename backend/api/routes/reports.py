@@ -209,6 +209,36 @@ def _rows_muhatap_merge_detail_long(groups: list[dict]) -> list[dict]:
                     ),
                 }
             )
+        excluded = gr.get("excluded_member_snapshots") or []
+        for snap in excluded:
+            np = snap.get("normalized_payload")
+            rp = snap.get("raw_payload")
+            rows.append(
+                {
+                    "row_type": "EXCLUDED_MEMBER",
+                    **common,
+                    **golden_vals,
+                    "prior_record_id": str(snap.get("record_id") or ""),
+                    "prior_raw_id": str(snap.get("raw_id") or ""),
+                    "prior_upload_id": str(snap.get("upload_id") or ""),
+                    "prior_batch_id": snap.get("batch_id") or "",
+                    "prior_muhatap_effective": snap.get("muhatap_no_effective") or "",
+                    "prior_clean_name": snap.get("clean_name") or "",
+                    "prior_clean_tc": snap.get("clean_tc") or "",
+                    "prior_clean_phone": snap.get("clean_phone") or "",
+                    "prior_clean_email": snap.get("clean_email") or "",
+                    "prior_clean_city": snap.get("clean_city") or "",
+                    "prior_clean_address": snap.get("clean_address") or "",
+                    "prior_clean_muhatap_no": snap.get("clean_muhatap_no") or "",
+                    "prior_completeness_score": str(snap.get("completeness_score", "")),
+                    "prior_normalized_payload_json": (
+                        json.dumps(np, ensure_ascii=False) if isinstance(np, (dict, list)) else (np or "")
+                    ),
+                    "prior_raw_payload_json": (
+                        json.dumps(rp, ensure_ascii=False) if isinstance(rp, (dict, list)) else (rp or "")
+                    ),
+                }
+            )
     return rows
 
 

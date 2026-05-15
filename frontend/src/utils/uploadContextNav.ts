@@ -4,7 +4,6 @@ const PATHS_NEEDING_UPLOAD = new Set([
   "/temiz-veri-seti",
   "/mukerrer-tespit",
   "/mukerrer-kayitlar",
-  "/yonetici-onayi",
 ]);
 
 /**

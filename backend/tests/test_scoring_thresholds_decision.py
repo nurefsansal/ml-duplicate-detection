@@ -9,7 +9,7 @@ from backend.services.decision_thresholds import DecisionThresholdsProb
 from backend.services.resolution_service import resolve_match_decision
 
 
-def test_looser_auto_threshold_can_approve_strong_identity() -> None:
+def test_thresholds_do_not_auto_approve_anymore() -> None:
     loose = DecisionThresholdsProb(auto_approve=0.60, manual_review=0.50, reject=0.40)
     decision = resolve_match_decision(
         0.85,
@@ -22,10 +22,10 @@ def test_looser_auto_threshold_can_approve_strong_identity() -> None:
         },
         thresholds=loose,
     )
-    assert decision == "approved"
+    assert decision == "pending"
 
 
-def test_strict_auto_threshold_blocks_approve() -> None:
+def test_strict_thresholds_also_pending() -> None:
     strict = DecisionThresholdsProb(auto_approve=0.995, manual_review=0.75, reject=0.50)
     decision = resolve_match_decision(
         0.97,

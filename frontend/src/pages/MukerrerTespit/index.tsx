@@ -6,7 +6,6 @@ import Header from "../../components/feature/Header";
 import {
   startDetectionFromUpload,
   listUploads,
-  downloadMuhatapMergeDetailCsv,
   type DetectResponse,
   type UploadItem,
 } from "../../services/api";
@@ -19,17 +18,10 @@ import {
   type UiDuplicatePair,
 } from "../../utils/duplicatePairView";
 
-const algorithms = [
-  { id: "levenshtein", label: "Levenshtein", desc: "Karakter düzenleme mesafesi" },
-  { id: "jaro", label: "Jaro-Winkler", desc: "Önek ağırlıklı benzerlik" },
-  { id: "soundex", label: "Soundex", desc: "Fonetik eşleştirme" },
-];
-
 export default function MukerrerTespit() {
   const navigate = useNavigate();
   const [, setSearchParams] = useSearchParams();
   const uploadId = useRequireUploadId();
-  const [selectedAlgo, setSelectedAlgo] = useState<string[]>(["levenshtein", "jaro"]);
   const [threshold, setThreshold] = useState(75);
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -40,12 +32,6 @@ export default function MukerrerTespit() {
   const [realResults, setRealResults] = useState<DetectResponse | null>(null);
   const [results, setResults] = useState<UiDuplicatePair[]>([]);
   const [jobId, setJobId] = useState<number | null>(null);
-  const [csvExporting, setCsvExporting] = useState(false);
-  const [csvExportBanner, setCsvExportBanner] = useState<{
-    type: "ok" | "err";
-    text: string;
-  } | null>(null);
-
   // Upload selection
   const [uploads, setUploads] = useState<UploadItem[]>([]);
   const [loadingUploads, setLoadingUploads] = useState(false);
@@ -75,12 +61,6 @@ export default function MukerrerTespit() {
       .catch(() => {})
       .finally(() => setLoadingUploads(false));
   }, [uploadId]);
-
-  const toggleAlgo = (id: string) => {
-    setSelectedAlgo((prev) =>
-      prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id],
-    );
-  };
 
   const handleStart = async () => {
     if (uploadId === null) return;
@@ -162,30 +142,6 @@ export default function MukerrerTespit() {
     }
   };
 
-  const handleMergeDetailCsv = async () => {
-    if (uploadId === null) return;
-    setCsvExporting(true);
-    setCsvExportBanner(null);
-    try {
-      await downloadMuhatapMergeDetailCsv({
-        uploadId,
-        decision: "approved",
-        filename: `muhatap_birlestirme_detay_upload_${uploadId}.csv`,
-      });
-      setCsvExportBanner({
-        type: "ok",
-        text: "Rapor indirildi: her grupta golden satırı (GOLDEN_RECORD) ve birleşmeden önceki üyeler (PRIOR_MATCHED_MEMBER).",
-      });
-    } catch {
-      setCsvExportBanner({
-        type: "err",
-        text: "CSV indirilemedi. Oturum / backend bağlantısını kontrol edin.",
-      });
-    } finally {
-      setCsvExporting(false);
-    }
-  };
-
   const { job: detectionJob, error: jobError } = useJobPolling(jobId);
 
   useEffect(() => {
@@ -208,7 +164,7 @@ export default function MukerrerTespit() {
       setStatusMessage("Tespit tamamlandı. Sonuçlar listeleniyor…");
       const id = uploadId;
       if (id !== null) {
-        navigate(`/mukerrer-kayitlar?upload_id=${id}`);
+        navigate(`/mukerrer-kayitlar?upload_id=${id}&decision=pending`);
       }
     }
   }, [detectionJob, navigate, uploadId]);
@@ -240,16 +196,6 @@ export default function MukerrerTespit() {
               </span>
             )}
             <button
-              type="button"
-              onClick={() => void handleMergeDetailCsv()}
-              disabled={csvExporting}
-              title="Onaylanmış farklı muhatap kodlu gruplar: son golden kayıt + birleşmeden önceki eşleşen kayıtların tüm alanları"
-              className="ui-focus-ring flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm hover:bg-slate-50 disabled:opacity-60"
-            >
-              <i className={csvExporting ? "ri-loader-4-line animate-spin" : "ri-file-download-line"} />
-              Birleştirme detay raporu (CSV)
-            </button>
-            <button
               onClick={handleStart}
               disabled={running}
               className="ui-btn-primary disabled:opacity-60"
@@ -266,25 +212,6 @@ export default function MukerrerTespit() {
           step="detect"
           uploadId={uploadId}
         />
-
-        {csvExportBanner && (
-          <div
-            className={`flex items-start gap-3 rounded-2xl border p-4 text-sm ${
-              csvExportBanner.type === "ok"
-                ? "border-emerald-200 bg-emerald-50 text-emerald-900"
-                : "border-danger-200 bg-danger-50 text-danger-800"
-            }`}
-          >
-            <i
-              className={
-                csvExportBanner.type === "ok"
-                  ? "ri-checkbox-circle-line text-lg text-emerald-600"
-                  : "ri-error-warning-fill text-lg text-danger-600"
-              }
-            />
-            <p className="font-medium leading-relaxed">{csvExportBanner.text}</p>
-          </div>
-        )}
 
         <JobStatusBanner job={detectionJob} />
 
@@ -382,45 +309,15 @@ export default function MukerrerTespit() {
           </div>
         )}
 
-        {/* Algorithm + threshold */}
-        <div className="grid grid-cols-1 gap-5 lg:grid-cols-3">
-          <div className="ui-card p-6 shadow-card lg:col-span-2">
-            <h3 className="mb-4 text-sm font-semibold tracking-tight text-slate-900">Algoritma Seçimi</h3>
-            <div className="grid grid-cols-3 gap-3">
-              {algorithms.map((algorithm) => {
-                const active = selectedAlgo.includes(algorithm.id);
-                return (
-                  <button
-                    key={algorithm.id}
-                    onClick={() => toggleAlgo(algorithm.id)}
-                    className={`cursor-pointer rounded-2xl border-2 p-4 text-left transition-all duration-200 ${
-                      active
-                        ? "border-primary-400 bg-primary-50 shadow-sm ring-1 ring-primary-200/60"
-                        : "border-slate-100 hover:border-slate-200 hover:bg-slate-50/80"
-                    }`}
-                  >
-                    <div
-                      className={`mb-2 flex h-8 w-8 items-center justify-center rounded-lg ${active ? "bg-primary-100" : "bg-slate-100"}`}
-                    >
-                      <i className={`ri-cpu-line text-base ${active ? "text-primary-700" : "text-slate-400"}`} />
-                    </div>
-                    <p className={`text-sm font-semibold ${active ? "text-primary-900" : "text-slate-700"}`}>
-                      {algorithm.label}
-                    </p>
-                    <p className="mt-0.5 text-xs text-gray-400">{algorithm.desc}</p>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          <div className="ui-card p-6 shadow-card">
-            <h3 className="mb-4 text-sm font-semibold tracking-tight text-slate-900">Benzerlik Eşiği</h3>
+        <div className="max-w-md ui-card p-6 shadow-card">
+            <h3 className="mb-4 text-sm font-semibold tracking-tight text-slate-900">Benzerlik eşiği</h3>
+            <p className="mb-3 text-xs text-slate-500">
+              Tüm aday çiftler inceleme bekliyor olarak kaydedilir; karar Mükerrer Kayıtlar adımında verilir.
+            </p>
             <div className="mb-4 text-center">
               <span className="bg-gradient-to-r from-primary-600 to-indigo-600 bg-clip-text text-4xl font-bold tabular-nums text-transparent">
                 %{threshold}
               </span>
-              <p className="mt-1 text-xs text-slate-500">ve üzeri olasılıklar öne çıkarılacak</p>
             </div>
             <input
               type="range"
@@ -430,12 +327,7 @@ export default function MukerrerTespit() {
               onChange={(event) => setThreshold(Number(event.target.value))}
               className="w-full cursor-pointer accent-primary-600"
             />
-            <div className="mt-1 flex justify-between text-[10px] text-gray-400">
-              <span>%50 Geniş</span>
-              <span>%100 Tam</span>
-            </div>
           </div>
-        </div>
 
         {/* Progress */}
         {(running || done) && (
@@ -517,98 +409,11 @@ export default function MukerrerTespit() {
         {done && (
           <div className="flex flex-wrap gap-3">
             <button
-              onClick={() => navigate(`/yonetici-onayi?upload_id=${uploadId}`)}
+              onClick={() => navigate(`/mukerrer-kayitlar?upload_id=${uploadId}&decision=pending`)}
               className="ui-btn-primary cursor-pointer whitespace-nowrap"
             >
-              <i className="ri-checkbox-circle-line"></i> Yönetici Onayına Git
+              <i className="ri-file-copy-2-line"></i> İncele ve birleştir
             </button>
-            <button
-              onClick={() => navigate(`/mukerrer-kayitlar?upload_id=${uploadId}`)}
-              className="ui-btn-secondary cursor-pointer whitespace-nowrap"
-            >
-              <i className="ri-file-copy-2-line"></i> Mükerrer Kayıtları Gör
-            </button>
-          </div>
-        )}
-
-        {/* Results */}
-        {done && results.length > 0 && (
-          <div className="overflow-hidden rounded-2xl border border-slate-200/90 bg-white shadow-card">
-            <div className="flex items-center justify-between border-b border-slate-100 bg-slate-50/50 px-5 py-4">
-              <div>
-                <h3 className="text-sm font-semibold text-gray-900">Tespit Sonuçları</h3>
-                <p className="mt-0.5 text-xs text-gray-400">{results.length} aday çift</p>
-              </div>
-            </div>
-
-            <div className="overflow-x-auto">
-              <table className="w-full text-xs">
-                <thead>
-                  <tr className="bg-gray-50/70">
-                    <th className="px-5 py-3 text-left font-medium text-gray-400">Grup</th>
-                    <th className="px-4 py-3 text-left font-medium text-gray-400">Kayıt 1</th>
-                    <th className="px-4 py-3 text-left font-medium text-gray-400">Kayıt 2</th>
-                    <th className="px-4 py-3 text-center font-medium text-gray-400">Skor</th>
-                    <th className="px-4 py-3 text-left font-medium text-gray-400">Karar</th>
-                    <th className="px-4 py-3 text-left font-medium text-gray-400">Kaynak</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-50">
-                  {results.map((pair) => {
-                    const scoreColor =
-                      pair.score >= 90
-                        ? "border border-primary-200 bg-primary-50 text-primary-900"
-                        : pair.score >= 80
-                          ? "border border-amber-200 bg-amber-50 text-amber-900"
-                          : "border border-slate-200 bg-slate-100 text-slate-800";
-                    const decisionTypeLabel =
-                      pair.finalDecision === "approved"
-                        ? "Otomatik Onaylandı"
-                        : pair.finalDecision === "rejected"
-                          ? "Otomatik Reddedildi"
-                          : "Manuel İnceleme";
-                    return (
-                      <tr key={pair.id} className="transition-colors hover:bg-gray-50/50">
-                        <td className="px-5 py-3.5 font-medium text-gray-700">{pair.id}</td>
-                        <td className="px-4 py-3.5">
-                          <p className="font-medium text-gray-800">{pair.records[0].adSoyad}</p>
-                          <p className="text-gray-400">
-                            {pair.records[0].telefon || "-"} · {pair.records[0].email || "-"}
-                          </p>
-                        </td>
-                        <td className="px-4 py-3.5">
-                          <p className="font-medium text-gray-800">{pair.records[1].adSoyad}</p>
-                          <p className="text-gray-400">
-                            {pair.records[1].telefon || "-"} · {pair.records[1].email || "-"}
-                          </p>
-                        </td>
-                        <td className="px-4 py-3.5 text-center">
-                          <span className={`inline-block rounded-full px-2.5 py-1 text-sm font-bold ${scoreColor}`}>
-                            %{pair.score.toFixed(1)}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3.5">
-                          <span className={`inline-block rounded-full px-2.5 py-1 text-[11px] font-medium ${finalDecisionTone(pair.finalDecision)}`}>
-                            {decisionTypeLabel}
-                          </span>
-                          <p className="mt-1 text-[11px] text-gray-400">
-                            {pair.decisionReason || pair.ruleReasons[0] || "Ek açıklama yok"}
-                          </p>
-                        </td>
-                        <td className="px-4 py-3.5 text-gray-500">
-                          {pair.decisionSource === "splink_plus_rules" ? "Splink + kurallar" : pair.decisionSource}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-              {results.length === 0 && (
-                <div className="py-10 text-center text-sm text-gray-400">
-                  Bu filtreyle eşleşen kayıt bulunamadı.
-                </div>
-              )}
-            </div>
           </div>
         )}
 

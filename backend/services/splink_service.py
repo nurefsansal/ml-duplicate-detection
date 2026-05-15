@@ -1210,18 +1210,9 @@ def _build_payload(
     )
     score_breakdown = compute_weighted_score_breakdown(features, sw)
     risk_flags = _build_risk_flags(features)
-    decision_type = "auto"
-    review_required = final_decision == "pending"
-    if final_decision == "rejected" and "tc_conflict" in risk_flags and splink_match_probability >= 0.80:
-        decision_reason = (
-            "Benzerlik skoru yuksek ancak TC Kimlik No cakismasi nedeniyle otomatik birlestirme engellendi."
-        )
-    elif final_decision == "approved":
-        decision_reason = "Guclu kimlik sinyalleri nedeniyle otomatik onaylandi."
-    elif final_decision == "pending":
-        decision_reason = "Skor ve kimlik sinyalleri manuel inceleme gerektiriyor."
-    else:
-        decision_reason = "Guven skoru ve kimlik sinyalleri yetersiz oldugu icin otomatik reddedildi."
+    decision_type = "manual"
+    review_required = True
+    decision_reason = "Manuel inceleme bekliyor (otomatik onay/red kapalı)."
     rule_reasons = _build_rule_reasons(
         features=features,
         field_comparisons=field_comparisons,
