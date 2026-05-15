@@ -298,13 +298,13 @@ function fallbackEmailSimilarity(leftEmail: string, rightEmail: string): number 
 
 export function finalDecisionLabel(value: string): string {
   if (value === "approved" || value === "same_person") {
-    return "Onaylandı";
+    return "Onaylandı (manuel)";
   }
   if (value === "rejected" || value === "different_person") {
     return "Reddedildi";
   }
   if (value === "pending" || value === "review") {
-    return "Bekliyor";
+    return "İnceleme bekliyor";
   }
   return "Bilinmiyor";
 }

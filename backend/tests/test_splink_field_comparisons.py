@@ -266,7 +266,7 @@ def test_same_surname_and_city_with_different_phone_does_not_auto_merge() -> Non
     assert pair["finalDecision"] != "approved"
 
 
-def test_tc_and_phone_match_can_auto_approve() -> None:
+def test_tc_and_phone_match_stays_pending_for_manual_review() -> None:
     pair = first_pair(
         [
             make_record(
@@ -285,8 +285,8 @@ def test_tc_and_phone_match_can_auto_approve() -> None:
             ),
         ]
     )
-    assert pair["finalDecision"] == "approved"
-    assert pair["decision"] == "approved"
+    assert pair["finalDecision"] == "pending"
+    assert pair["decision"] == "pending"
 
 
 def test_tc_conflict_blocks_auto_approval_even_at_high_similarity() -> None:

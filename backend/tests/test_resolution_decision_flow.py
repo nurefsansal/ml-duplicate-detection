@@ -8,7 +8,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from backend.services.resolution_service import resolve_match_decision
 
 
-def test_mid_score_name_only_not_approved() -> None:
+def test_all_candidates_pending_regardless_of_score() -> None:
     decision = resolve_match_decision(
         0.65,
         {
@@ -18,11 +18,10 @@ def test_mid_score_name_only_not_approved() -> None:
             "email_similarity": 0.70,
         },
     )
-    # TC yokken sadece isim/email benzerliği (exact sinyal olmadan) onay için yeterli değildir.
-    assert decision in {"pending", "rejected"}
+    assert decision == "pending"
 
 
-def test_low_score_rejected() -> None:
+def test_low_score_still_pending() -> None:
     decision = resolve_match_decision(
         0.30,
         {
@@ -33,10 +32,10 @@ def test_low_score_rejected() -> None:
             "city_exact_match": 0,
         },
     )
-    assert decision == "rejected"
+    assert decision == "pending"
 
 
-def test_tc_conflict_high_score_not_approved() -> None:
+def test_tc_conflict_high_score_still_pending() -> None:
     decision = resolve_match_decision(
         0.99,
         {
@@ -45,4 +44,4 @@ def test_tc_conflict_high_score_not_approved() -> None:
             "phone_exact_match": 1,
         },
     )
-    assert decision in {"pending", "rejected"}
+    assert decision == "pending"

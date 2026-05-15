@@ -620,16 +620,7 @@ def _build_legacy_payload(
         thresholds=dt,
     )
     score_breakdown = compute_weighted_score_breakdown(features, sw)
-    if final_decision == "rejected" and features.get("tc_conflict", 0) and ml_probability >= 0.80:
-        decision_reason = (
-            "Benzerlik skoru yuksek ancak TC Kimlik No cakismasi nedeniyle otomatik birlestirme engellendi."
-        )
-    elif final_decision == "approved":
-        decision_reason = "Guclu kimlik sinyalleri nedeniyle otomatik onaylandi."
-    elif final_decision == "pending":
-        decision_reason = "Skor ve kimlik sinyalleri manuel inceleme gerektiriyor."
-    else:
-        decision_reason = "Guven skoru ve kimlik sinyalleri yetersiz oldugu icin otomatik reddedildi."
+    decision_reason = "Manuel inceleme bekliyor (otomatik onay/red kapalı)."
     field_comparisons = _build_legacy_field_comparisons(
         left_record,
         right_record,

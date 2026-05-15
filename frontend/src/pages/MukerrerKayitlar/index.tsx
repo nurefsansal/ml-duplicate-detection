@@ -1,20 +1,18 @@
 import axios from "axios";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 
 import DashboardLayout from "../../components/feature/DashboardLayout";
 import Header from "../../components/feature/Header";
 import {
+  downloadMuhatapMergeDetailCsv,
   getDuplicateGroups,
-  getMatches,
   listUploads,
   partialApproveGroup,
   type DuplicateGroup,
   type DuplicateGroupRecord,
-  type AdminPendingMatch,
   type UploadItem,
 } from "../../services/api";
-import { MatchReviewModal } from "../../components/feature/MatchReviewModal";
 import { DuplicateGroupReviewModal } from "../../components/feature/DuplicateGroupReviewModal";
 import { FlowNav } from "../../components/feature/FlowNav";
 import { useRequireUploadId } from "../../hooks/useRequireUploadId";
@@ -115,35 +113,23 @@ export default function MukerrerKayitlar() {
   const [searchParams, setSearchParams] = useSearchParams();
   const uploadId = useRequireUploadId();
   const decisionParam = searchParams.get("decision");
-  const viewParam = searchParams.get("view");
+  const navigate = useNavigate();
   const pageParam = searchParams.get("page");
   const pageSizeParam = searchParams.get("page_size");
   const page = Number(pageParam ?? "1");
   const parsedPageSize = pageSizeParam ? Number(pageSizeParam) : 50;
   const pageSize = [25, 50, 100].includes(parsedPageSize) ? parsedPageSize : 50;
-  const viewMode: "groups" | "candidates" =
-    viewParam === "candidates" ? "candidates" : "groups";
 
-  const [decisionFilter, setDecisionFilter] = useState<
-    "pending" | "approved" | "rejected"
-  >(
-    decisionParam === "pending" || decisionParam === "rejected" || decisionParam === "approved"
-      ? decisionParam
-      : "approved",
+  const [decisionFilter, setDecisionFilter] = useState<"pending" | "approved">(
+    decisionParam === "approved" ? "approved" : "pending",
   );
+  const [selectedRecordIds, setSelectedRecordIds] = useState<Set<number>>(new Set());
   const [search, setSearch] = useState("");
   const [detailGroup, setDetailGroup] = useState<DuplicateGroup | null>(null);
   const [loading, setLoading] = useState(false);
   const [groups, setGroups] = useState<DuplicateGroup[]>([]);
   const [total, setTotal] = useState(0);
   const [totalPages, setTotalPages] = useState(1);
-  const [matches, setMatches] = useState<AdminPendingMatch[]>([]);
-  const [matchesTotal, setMatchesTotal] = useState(0);
-  const [matchesTotalPages, setMatchesTotalPages] = useState(1);
-  const [reviewOpen, setReviewOpen] = useState(false);
-  const [reviewIndex, setReviewIndex] = useState(0);
-  const [reviewBusy, setReviewBusy] = useState(false);
-  const [reviewError, setReviewError] = useState<string | null>(null);
   const [uploads, setUploads] = useState<UploadItem[]>([]);
   const [apiError, setApiError] = useState("");
   const [goldenDraft, setGoldenDraft] = useState<Record<GoldenField, string>>({
@@ -157,10 +143,11 @@ export default function MukerrerKayitlar() {
   });
   const [editingGoldenField, setEditingGoldenField] = useState<GoldenField | null>(null);
   const [savingGroupFinalize, setSavingGroupFinalize] = useState(false);
+  const [mergeCsvBusy, setMergeCsvBusy] = useState(false);
   const isMountedRef = useRef(true);
 
   useEffect(() => {
-    if (decisionParam === "pending" || decisionParam === "approved" || decisionParam === "rejected") {
+    if (decisionParam === "pending" || decisionParam === "approved") {
       setDecisionFilter(decisionParam);
     }
   }, [decisionParam]);
@@ -184,7 +171,24 @@ export default function MukerrerKayitlar() {
       clean_muhatap_no: detailGroup.golden_record.clean_muhatap_no ?? "",
     });
     setEditingGoldenField(null);
+    setSelectedRecordIds(new Set());
   }, [detailGroup]);
+
+  const toggleRecordSelection = (recordId: number) => {
+    setSelectedRecordIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(recordId)) next.delete(recordId);
+      else next.add(recordId);
+      return next;
+    });
+  };
+
+  const selectAllInGroup = () => {
+    if (!detailGroup) return;
+    setSelectedRecordIds(new Set(detailGroup.record_ids));
+  };
+
+  const clearRecordSelection = () => setSelectedRecordIds(new Set());
 
   const fetchGroups = useCallback(
     async (overrides?: { decision?: typeof decisionFilter; page?: number }) => {
@@ -199,7 +203,7 @@ export default function MukerrerKayitlar() {
           limit: 5000,
           page: p,
           pageSize,
-          differentMuhatapCode: true,
+          differentMuhatapCode: d === "pending",
         });
         if (!isMountedRef.current) return;
         setGroups(response.groups || []);
@@ -217,31 +221,6 @@ export default function MukerrerKayitlar() {
     [decisionFilter, uploadId, page, pageSize],
   );
 
-  const fetchMatches = useCallback(async () => {
-    setLoading(true);
-    setApiError("");
-    try {
-      const response = await getMatches({
-        decision: decisionFilter,
-        uploadId: uploadId ?? undefined,
-        limit: pageSize,
-        page,
-        pageSize,
-      });
-      if (!isMountedRef.current) return;
-      setMatches(response.matches || []);
-      setMatchesTotal(Number(response.total ?? 0));
-      setMatchesTotalPages(Number(response.total_pages ?? 1));
-    } catch (error) {
-      if (!isMountedRef.current) return;
-      setApiError(
-        error instanceof Error ? error.message : "Aday eşleşmeler alınamadı.",
-      );
-    } finally {
-      if (isMountedRef.current) setLoading(false);
-    }
-  }, [decisionFilter, uploadId, page, pageSize]);
-
   useEffect(() => {
     isMountedRef.current = true;
     if (uploadId === null) {
@@ -249,42 +228,17 @@ export default function MukerrerKayitlar() {
         isMountedRef.current = false;
       };
     }
-    if (viewMode === "candidates") fetchMatches();
-    else fetchGroups();
+    fetchGroups();
     return () => {
       isMountedRef.current = false;
     };
-  }, [fetchGroups, fetchMatches, viewMode, uploadId]);
+  }, [fetchGroups, uploadId]);
 
   const goPage = (p: number) => {
     setSearchParams((prev) => {
       prev.set("page", String(p));
       return prev;
     });
-  };
-
-  const setViewMode = (mode: "groups" | "candidates") => {
-    setSearchParams((prev) => {
-      prev.set("page", "1");
-      prev.set("view", mode);
-      return prev;
-    });
-  };
-
-  const openReviewAt = (idx: number) => {
-    setReviewError(null);
-    setReviewIndex(Math.max(0, Math.min(matches.length - 1, idx)));
-    setReviewOpen(true);
-  };
-
-  const closeReview = () => setReviewOpen(false);
-
-  const reviewPrev = () => {
-    setReviewIndex((i) => Math.max(0, i - 1));
-  };
-
-  const reviewNext = () => {
-    setReviewIndex((i) => Math.min(matches.length - 1, i + 1));
   };
 
   const filtered = useMemo(() => {
@@ -319,6 +273,11 @@ export default function MukerrerKayitlar() {
 
   const saveGroupGoldenFinalize = async () => {
     if (!detailGroup) return;
+    const approvedRecordIds = [...selectedRecordIds];
+    if (approvedRecordIds.length === 0) {
+      setApiError("Kaydetmek için en az bir eşleşen kayıt seçin.");
+      return;
+    }
     setSavingGroupFinalize(true);
     setApiError("");
     try {
@@ -332,10 +291,9 @@ export default function MukerrerKayitlar() {
       await partialApproveGroup({
         groupId: detailGroup.group_id,
         recordIds: detailGroup.record_ids,
-        approvedRecordIds: [...detailGroup.record_ids],
+        approvedRecordIds,
         rejectedRecordIds: [],
         uploadId: uploadId ?? detailGroup.records[0]?.upload_id,
-        decision: decisionFilter,
         goldenRecordOverride,
       });
       setDetailGroup(null);
@@ -358,7 +316,7 @@ export default function MukerrerKayitlar() {
       <DashboardLayout>
         <Header
           title="Mükerrer Kayıtlar"
-          subtitle="Pair yerine duplicate group ve golden record görünümü"
+          subtitle="Grupları inceleyin, seçerek birleştirin; kalan kayıtlar bekleyen grupta kalır"
         />
         <div className="flex-1 p-6 text-sm text-gray-600">
           Yükleme seçilmedi; Veri Yükleme sayfasına yönlendiriliyorsunuz…
@@ -371,7 +329,7 @@ export default function MukerrerKayitlar() {
     <DashboardLayout>
       <Header
         title="Mükerrer Kayıtlar"
-        subtitle="Pair yerine duplicate group ve golden record görünümü"
+        subtitle="Grupları inceleyin, seçerek birleştirin; kalan kayıtlar bekleyen grupta kalır"
         actions={
           <button
             onClick={() => fetchGroups()}
@@ -385,24 +343,61 @@ export default function MukerrerKayitlar() {
       />
 
       <div className="flex-1 space-y-4 overflow-y-auto p-6">
-        <FlowNav step="detect" uploadId={uploadId} />
+        <FlowNav step="review" uploadId={uploadId} />
+
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-gray-100 bg-white p-4">
+          <div className="text-sm text-gray-700">
+            <span className="font-semibold text-gray-900">Birleştirme özeti</span>
+            <span className="ml-2 text-xs text-gray-500">
+              Bekleyen: {decisionFilter === "pending" ? total : "—"} · Onaylı kayıtlar raporda
+            </span>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => navigate(`/raporlar?upload_id=${uploadId}&tab=muhatap-merge`)}
+              className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+            >
+              <i className="ri-bar-chart-box-line" />
+              Tam rapor
+            </button>
+            <button
+              type="button"
+              disabled={mergeCsvBusy}
+              onClick={async () => {
+                if (uploadId === null) return;
+                setMergeCsvBusy(true);
+                try {
+                  await downloadMuhatapMergeDetailCsv({
+                    uploadId,
+                    decision: "approved",
+                    filename: `muhatap_birlestirme_upload_${uploadId}.csv`,
+                  });
+                } finally {
+                  setMergeCsvBusy(false);
+                }
+              }}
+              className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg bg-gray-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-gray-900 disabled:opacity-60"
+            >
+              <i className={mergeCsvBusy ? "ri-loader-4-line animate-spin" : "ri-download-line"} />
+              CSV indir
+            </button>
+          </div>
+        </div>
 
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
           <div className="rounded-xl border border-gray-100 bg-white p-4">
             <p className="text-xs text-gray-400">
-              {viewMode === "candidates" ? "Toplam Aday" : "Toplam Grup"}
+              Toplam Grup
             </p>
             <p className="mt-1 text-lg font-bold text-gray-900">
-              {(viewMode === "candidates" ? matchesTotal : total).toLocaleString(
-                "tr-TR",
-              )}
+              {total.toLocaleString("tr-TR")}
             </p>
           </div>
           <div className="rounded-xl border border-gray-100 bg-white p-4">
             <p className="text-xs text-gray-400">Sayfa</p>
             <p className="mt-1 text-lg font-bold text-gray-900">
-              {page} /{" "}
-              {viewMode === "candidates" ? matchesTotalPages : totalPages}
+              {page} / {totalPages}
             </p>
           </div>
           <div className="rounded-xl border border-gray-100 bg-white p-4">
@@ -445,35 +440,6 @@ export default function MukerrerKayitlar() {
             </select>
           </div>
 
-          <div>
-            <label className="mb-1 block text-xs font-medium text-gray-600">
-              Görünüm
-            </label>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => setViewMode("groups")}
-                className={`cursor-pointer rounded-lg px-3 py-2 text-xs font-medium transition-colors ${
-                  viewMode === "groups"
-                    ? "bg-red-600 text-white"
-                    : "border border-gray-200 text-gray-600 hover:bg-gray-50"
-                }`}
-              >
-                Gruplar
-              </button>
-              <button
-                type="button"
-                onClick={() => setViewMode("candidates")}
-                className={`cursor-pointer rounded-lg px-3 py-2 text-xs font-medium transition-colors ${
-                  viewMode === "candidates"
-                    ? "bg-red-600 text-white"
-                    : "border border-gray-200 text-gray-600 hover:bg-gray-50"
-                }`}
-              >
-                Aday Eşleşmeler
-              </button>
-            </div>
-          </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
@@ -507,24 +473,9 @@ export default function MukerrerKayitlar() {
           >
             Onaylandı
           </button>
-          <button
-            onClick={() => {
-              setDecisionFilter("rejected");
-              setSearchParams((p) => {
-                p.set("page", "1");
-                p.set("decision", "rejected");
-                return p;
-              });
-            }}
-            className={`cursor-pointer rounded-lg px-3 py-2 text-xs font-medium transition-colors ${filterClass(
-              decisionFilter === "rejected",
-            )}`}
-          >
-            Reddedildi
-          </button>
         </div>
         <p className="text-[11px] text-gray-500">
-          Gruplar ve aday eşleşmeler yalnızca <strong>farklı muhatap kodlu</strong> kayıtları kapsar.
+          Gruplar yalnızca <strong>farklı muhatap kodlu</strong> kayıtları kapsar.
         </p>
 
         <div className="relative w-full">
@@ -547,17 +498,8 @@ export default function MukerrerKayitlar() {
             Önceki
           </button>
           <button
-            disabled={
-              page >= (viewMode === "candidates" ? matchesTotalPages : totalPages)
-            }
-            onClick={() =>
-              goPage(
-                Math.min(
-                  viewMode === "candidates" ? matchesTotalPages : totalPages,
-                  page + 1,
-                ),
-              )
-            }
+            disabled={page >= totalPages}
+            onClick={() => goPage(Math.min(totalPages, page + 1))}
             className="rounded-lg border border-gray-200 px-4 py-2 text-sm text-gray-700 disabled:opacity-50"
           >
             Sonraki
@@ -573,86 +515,14 @@ export default function MukerrerKayitlar() {
         <div className="overflow-hidden rounded-xl border border-gray-100 bg-white">
           <div className="border-b border-gray-50 px-5 py-4">
             <h3 className="text-sm font-semibold text-gray-900">
-              {viewMode === "candidates"
-                ? `Aday Eşleşmeler (${decisionFilter})`
-                : `Duplicate Groups (${decisionFilter})`}
+              Mükerrer gruplar ({decisionFilter === "pending" ? "bekliyor" : "onaylandı"})
             </h3>
           </div>
           <div className="overflow-x-auto">
-            {viewMode === "candidates" ? (
-              <table className="w-full min-w-[1040px] text-xs">
-                <thead>
-                  <tr className="border-b border-gray-100 bg-gray-50/70">
-                    <th className="px-4 py-3 text-left font-medium text-gray-400">
-                      ID
-                    </th>
-                    <th className="px-4 py-3 text-left font-medium text-gray-400">
-                      Skor
-                    </th>
-                    <th className="px-4 py-3 text-left font-medium text-gray-400">
-                      Sol
-                    </th>
-                    <th className="px-4 py-3 text-left font-medium text-gray-400">
-                      Sağ
-                    </th>
-                    <th className="px-4 py-3 text-left font-medium text-gray-400">
-                      Kaynak
-                    </th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-50">
-                  {matches.map((m, idx) => (
-                    <tr
-                      key={m.id}
-                      className="transition-colors hover:bg-gray-50/50"
-                    >
-                      <td className="px-4 py-3.5 font-medium text-gray-800">
-                        <div className="flex items-center gap-2">
-                          <button
-                            type="button"
-                            onClick={() => openReviewAt(idx)}
-                            className="cursor-pointer text-xs font-semibold text-red-600 hover:underline"
-                            title="Bu adayı incele"
-                          >
-                            İncele
-                          </button>
-                          <span>#{m.id}</span>
-                        </div>
-                      </td>
-                      <td className="px-4 py-3.5 text-gray-600">
-                        {typeof m.final_score === "number"
-                          ? `${m.final_score.toFixed(1)}%`
-                          : pct(m.ml_score)}
-                      </td>
-                      <td className="px-4 py-3.5 text-gray-700">
-                        <div className="font-medium text-gray-800">
-                          {m.donor1_name}
-                        </div>
-                        <div className="text-gray-500">
-                          {m.donor1_tc ||
-                            m.donor1_phone ||
-                            m.donor1_email ||
-                            "—"}
-                        </div>
-                      </td>
-                      <td className="px-4 py-3.5 text-gray-700">
-                        <div className="font-medium text-gray-800">
-                          {m.donor2_name}
-                        </div>
-                        <div className="text-gray-500">
-                          {m.donor2_tc ||
-                            m.donor2_phone ||
-                            m.donor2_email ||
-                            "—"}
-                        </div>
-                      </td>
-                      <td className="px-4 py-3.5 text-gray-500">
-                        {m.decisionSource || m.match_type || "—"}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+            {filtered.length === 0 && !loading ? (
+              <div className="py-10 text-center text-sm text-gray-400">
+                Bu filtre için mükerrer grup bulunmuyor.
+              </div>
             ) : (
               <table className="w-full min-w-[1040px] text-xs">
               <thead>
@@ -720,57 +590,25 @@ export default function MukerrerKayitlar() {
               </tbody>
             </table>
             )}
-            {viewMode === "candidates" ? (
-              matches.length === 0 &&
-              !loading && (
-                <div className="py-10 text-center text-sm text-gray-400">
-                  Bu filtre için aday eşleşme bulunmuyor.
-                </div>
-              )
-            ) : (
-              filtered.length === 0 &&
-              !loading && (
-                <div className="py-10 text-center text-sm text-gray-400">
-                  Bu filtre için duplicate group bulunmuyor.
-                </div>
-              )
-            )}
           </div>
         </div>
       </div>
 
       <DuplicateGroupReviewModal
-        open={viewMode !== "candidates" && Boolean(detailGroup)}
+        open={Boolean(detailGroup)}
         group={detailGroup}
         goldenPreview={goldenDraft}
+        selectedRecordIds={selectedRecordIds}
+        onToggleRecord={toggleRecordSelection}
+        onSelectAllRecords={selectAllInGroup}
+        onClearAllRecords={clearRecordSelection}
         getRecordMuhatapNoDisplay={getRecordMuhatapNoDisplay}
         onClose={() => setDetailGroup(null)}
+        onSave={() => void saveGroupGoldenFinalize()}
+        saving={savingGroupFinalize}
         leftExtra={
           <div>
-            <p className="mb-2 text-[10px] leading-snug text-gray-500">
-              Kaydet: golden record değerleri kaydedilir, gruptaki tüm kayıtlar onaylanır ve
-              farklı muhatap kodları rapor için birleşim özeti metninde saklanır.
-            </p>
-            <div className="mb-3 flex items-center justify-between gap-3">
-              <div className="text-xs font-semibold text-gray-700">
-                Golden Record düzenle
-              </div>
-              <button
-                type="button"
-                onClick={saveGroupGoldenFinalize}
-                disabled={savingGroupFinalize}
-                className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg bg-green-700 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-green-800 disabled:cursor-not-allowed disabled:bg-gray-300"
-              >
-                <i
-                  className={
-                    savingGroupFinalize
-                      ? "ri-loader-4-line animate-spin"
-                      : "ri-save-line"
-                  }
-                />
-                Kaydet
-              </button>
-            </div>
+            <div className="mb-3 text-xs font-semibold text-gray-700">Golden Record düzenle</div>
             <div className="grid grid-cols-1 gap-2 text-[11px] md:grid-cols-2">
               {goldenFields.map(({ key, label }) => {
                 const changed =
@@ -823,24 +661,6 @@ export default function MukerrerKayitlar() {
         }
       />
 
-      <MatchReviewModal
-        open={viewMode === "candidates" && reviewOpen}
-        match={viewMode === "candidates" ? matches[reviewIndex] ?? null : null}
-        index={reviewIndex}
-        total={matches.length}
-        canReset={decisionFilter !== "pending"}
-        busy={reviewBusy}
-        error={reviewError}
-        onClose={closeReview}
-        onPrev={reviewPrev}
-        onNext={reviewNext}
-        onBusyChange={setReviewBusy}
-        onError={setReviewError}
-        onAfterAction={() => {
-          // refresh current page after approve/reject/reset so list stays in sync
-          void fetchMatches();
-        }}
-      />
     </DashboardLayout>
   );
 }

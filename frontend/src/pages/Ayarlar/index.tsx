@@ -388,7 +388,8 @@ export default function Ayarlar() {
               </div>
             </div>
 
-            {/* Eşik Değerleri */}
+            {/* Eşik değerleri kaldırıldı: tespit sonrası kararlar yalnızca manuel incelemede verilir */}
+            {false && (
             <div className="bg-white rounded-xl p-5 border border-gray-100">
               <div className="flex items-center justify-between mb-4">
                 <div>
@@ -468,8 +469,10 @@ export default function Ayarlar() {
                 ))}
               </div>
             </div>
+            )}
 
             {/* Algoritma */}
+            {false && (
             <div className="bg-white rounded-xl p-5 border border-gray-100">
               <h3 className="text-sm font-semibold text-gray-900 mb-4">
                 Aktif Algoritmalar
@@ -523,6 +526,7 @@ export default function Ayarlar() {
                 })}
               </div>
             </div>
+            )}
 
             {/* Sistem */}
             <div className="bg-white rounded-xl p-5 border border-gray-100">

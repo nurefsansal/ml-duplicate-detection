@@ -1159,28 +1159,64 @@ def _overlay_entity_canonical_on_golden(
         "merged_muhatap_sources",
         "merged_muhatap_report_line",
         "merged_member_snapshots",
+        "excluded_member_snapshots",
     ):
         if meta_key in canonical_data and canonical_data[meta_key] is not None:
             merged[meta_key] = canonical_data[meta_key]
     return merged
 
 
+def _group_qualifies_for_entity_golden_hydrate(
+    group: dict[str, Any],
+    membership_by_record: dict[int, dict[str, Any]],
+) -> bool:
+    """
+    Onaylı entity canonical_data yalnızca gruptaki TÜM kayıtlar aynı entity'de
+    confirmed ise golden üzerine yazılır. Kısmi birleşim sonrası bekleyen gruplar
+    kayıt bazlı _build_golden_record önizlemesini korur.
+    """
+    record_ids = [int(rid) for rid in (group.get("record_ids") or [])]
+    if len(record_ids) < 1:
+        return False
+    entity_ids: set[int] = set()
+    for record_id in record_ids:
+        membership = membership_by_record.get(record_id)
+        if membership is None:
+            return False
+        if _safe_str(membership.get("status")).lower() != "confirmed":
+            return False
+        eid = membership.get("entity_id")
+        if eid is None:
+            return False
+        entity_ids.add(int(eid))
+    return len(entity_ids) == 1
+
+
 def _hydrate_golden_records_from_entities(
     session: Session,
     groups: list[dict[str, Any]],
 ) -> None:
-    """groups üzerinde yerinde: entity varsa golden_record entity kaydıyla hizalanır."""
-    entity_ids = sorted(
-        {int(g["entity_id"]) for g in groups if g.get("entity_id") is not None},
-    )
-    if not entity_ids:
+    """groups üzerinde yerinde: tam onaylı gruplar entity canonical ile hizalanır."""
+    eligible: list[tuple[dict[str, Any], int]] = []
+    for group in groups:
+        record_ids = [int(rid) for rid in (group.get("record_ids") or [])]
+        if not record_ids:
+            continue
+        membership_by_record = _membership_snapshots_by_record(session, record_ids)
+        if not _group_qualifies_for_entity_golden_hydrate(group, membership_by_record):
+            group["entity_id"] = None
+            continue
+        eid = next(iter({int(m["entity_id"]) for m in membership_by_record.values()}))
+        group["entity_id"] = eid
+        eligible.append((group, eid))
+
+    if not eligible:
         return
+
+    entity_ids = sorted({eid for _, eid in eligible})
     rows = session.query(Entity).filter(Entity.id.in_(entity_ids)).all()
     entity_by_id = {int(e.id): e for e in rows}
-    for group in groups:
-        eid = group.get("entity_id")
-        if eid is None:
-            continue
+    for group, eid in eligible:
         entity = entity_by_id.get(int(eid))
         if entity is None:
             continue
@@ -1229,6 +1265,51 @@ def _membership_snapshots_by_record(
             "status": _safe_str(row.get("status")) or "pending",
         }
     return snapshots
+
+
+def _is_confirmed_membership(membership: dict[str, Any] | None) -> bool:
+    if membership is None:
+        return False
+    return _safe_str(membership.get("status")).lower() == "confirmed"
+
+
+def _record_ids_for_pending_group_display(
+    session: Session,
+    record_ids: list[int],
+    *,
+    decision: str,
+) -> list[int] | None:
+    """Bekleyen gruplardan entity'ye onaylanmış kayıtları çıkarır; <2 kayıt kalırsa None."""
+    if _normalize_decision(decision) != "pending":
+        return sorted({int(rid) for rid in record_ids})
+    if not record_ids:
+        return None
+    membership_by_record = _membership_snapshots_by_record(session, record_ids)
+    active = [
+        int(rid)
+        for rid in record_ids
+        if not _is_confirmed_membership(membership_by_record.get(int(rid)))
+    ]
+    if len(active) < 2:
+        return None
+    return sorted(active)
+
+
+def _partial_approval_pair_decision(
+    left_id: int,
+    right_id: int,
+    *,
+    approved_set: set[int],
+    rejected_set: set[int],
+) -> str:
+    """Kısmi birleştirmede çift kararı: onaylı–bekleyen kenarlar pending'de kalmamalı."""
+    if left_id in approved_set and right_id in approved_set:
+        return "approved"
+    if left_id in rejected_set or right_id in rejected_set:
+        return "rejected"
+    if left_id in approved_set or right_id in approved_set:
+        return "rejected"
+    return "pending"
 
 
 def get_duplicate_groups(
@@ -1290,12 +1371,22 @@ def get_duplicate_groups(
         if len(component) < 2:
             continue
 
-        component_index += 1
         component_ids = sorted(component)
+        pruned_ids = _record_ids_for_pending_group_display(
+            session,
+            component_ids,
+            decision=decision,
+        )
+        if pruned_ids is None:
+            continue
+        component_ids = pruned_ids
+        active_component = set(component_ids)
+
+        component_index += 1
         match_candidates_in_group = [
             candidate
             for (left_id, right_id), candidate in edge_by_pair.items()
-            if left_id in component and right_id in component
+            if left_id in active_component and right_id in active_component
         ]
         group_score, score_max = _group_display_scores(
             match_candidates_in_group,
@@ -1317,11 +1408,6 @@ def get_duplicate_groups(
             continue
 
         membership_by_record = _membership_snapshots_by_record(session, component_ids)
-        entity_ids = [
-            int(membership["entity_id"])
-            for membership in membership_by_record.values()
-            if membership.get("entity_id") is not None
-        ]
         serialized_records = []
         for record in group_records:
             serialized_record = _serialize_group_record(record)
@@ -1338,7 +1424,7 @@ def get_duplicate_groups(
         groups.append(
             {
                 "group_id": group_id,
-                "entity_id": entity_ids[0] if entity_ids else None,
+                "entity_id": None,
                 "record_ids": component_ids,
                 "pair_count": len(match_candidates_in_group),
                 "avg_score": group_score,
@@ -1361,6 +1447,156 @@ def get_duplicate_groups(
         reverse=True,
     )
     _hydrate_golden_records_from_entities(session, groups)
+    if _normalize_decision(decision) == "approved":
+        entity_groups = _entity_merge_groups_for_upload(
+            session,
+            upload_id=upload_id,
+            limit=limit,
+        )
+        groups = _merge_duplicate_group_lists(groups, entity_groups)
+    return groups
+
+
+def _merge_duplicate_group_lists(
+    match_groups: list[dict[str, Any]],
+    entity_groups: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Entity birleştirmeleri (doğru golden) öncelikli; aynı kayıt kümesinde çift satır olmasın."""
+    by_records: dict[frozenset[int], dict[str, Any]] = {}
+    for group in match_groups:
+        key = frozenset(int(rid) for rid in (group.get("record_ids") or []))
+        if len(key) >= 2:
+            by_records[key] = group
+    for group in entity_groups:
+        key = frozenset(int(rid) for rid in (group.get("record_ids") or []))
+        if len(key) >= 2:
+            by_records[key] = group
+    merged = list(by_records.values())
+    merged.sort(
+        key=lambda group: (group.get("group_score", 0), group.get("match_count", 0)),
+        reverse=True,
+    )
+    return merged
+
+
+def _entity_merge_groups_for_upload(
+    session: Session,
+    *,
+    upload_id: int | None,
+    limit: int = 5000,
+) -> list[dict[str, Any]]:
+    """Onaylı entity birleştirmeleri — her Kaydet ayrı satır, entity canonical golden."""
+    membership_query = (
+        session.query(EntityMembership)
+        .join(
+            NormalizedRecord,
+            EntityMembership.normalized_record_id == NormalizedRecord.id,
+        )
+        .filter(EntityMembership.status == "confirmed")
+    )
+    if upload_id is not None:
+        membership_query = membership_query.filter(NormalizedRecord.upload_id == upload_id)
+
+    memberships = membership_query.all()
+    by_entity: dict[int, list[EntityMembership]] = {}
+    for membership in memberships:
+        by_entity.setdefault(int(membership.entity_id), []).append(membership)
+
+    if not by_entity:
+        return []
+
+    entity_rows = (
+        session.query(Entity)
+        .filter(Entity.id.in_(sorted(by_entity.keys())))
+        .all()
+    )
+    entity_by_id = {int(row.id): row for row in entity_rows}
+    weights, _thresholds = load_scoring_app_settings(session)
+    groups: list[dict[str, Any]] = []
+
+    for entity_id in sorted(by_entity.keys()):
+        entity = entity_by_id.get(entity_id)
+        if entity is None:
+            continue
+        record_ids = sorted(
+            {int(m.normalized_record_id) for m in by_entity[entity_id]},
+        )
+        canonical = entity.canonical_data if isinstance(entity.canonical_data, dict) else {}
+        has_merge_detail = bool(
+            canonical.get("merged_muhatap_report_line")
+            or canonical.get("merged_member_snapshots")
+        )
+        if len(record_ids) < 2 and not has_merge_detail:
+            continue
+
+        records = (
+            session.query(NormalizedRecord)
+            .options(joinedload(NormalizedRecord.raw_record))
+            .filter(NormalizedRecord.id.in_(record_ids))
+            .all()
+        )
+        record_by_id = {int(r.id): r for r in records}
+        group_records = [record_by_id[rid] for rid in record_ids if rid in record_by_id]
+        if not group_records:
+            continue
+
+        membership_by_record = _membership_snapshots_by_record(session, record_ids)
+        serialized_records = []
+        for record in group_records:
+            serialized_record = _serialize_group_record(record)
+            membership = membership_by_record.get(int(record.id))
+            serialized_record["membership_status"] = (
+                membership.get("status", "confirmed") if membership else "confirmed"
+            )
+            serialized_record["entity_id"] = entity_id
+            serialized_records.append(serialized_record)
+
+        muhatap_codes = sorted(
+            {
+                code
+                for code in (_record_group_muhatap_code(record) for record in group_records)
+                if code
+            }
+        )
+        group_candidates = (
+            session.query(MatchCandidate)
+            .filter(MatchCandidate.decision == "approved")
+            .filter(MatchCandidate.left_id.in_(record_ids))
+            .filter(MatchCandidate.right_id.in_(record_ids))
+            .all()
+        )
+        group_score, score_max = _group_display_scores(
+            group_candidates,
+            weights=weights,
+        )
+        golden_record = _overlay_entity_canonical_on_golden(
+            _build_golden_record(group_records),
+            canonical,
+        )
+
+        groups.append(
+            {
+                "group_id": f"entity_{entity_id}",
+                "entity_id": entity_id,
+                "record_ids": record_ids,
+                "pair_count": len(group_candidates),
+                "avg_score": group_score,
+                "max_score": score_max,
+                "group_score": group_score,
+                "group_score_max": score_max,
+                "match_count": len(group_candidates),
+                "match_candidate_ids": sorted({int(c.id) for c in group_candidates}),
+                "muhatap_codes": muhatap_codes,
+                "different_muhatap_code": len(muhatap_codes) > 1,
+                "records": serialized_records,
+                "golden_record": golden_record,
+            }
+        )
+
+    groups.sort(
+        key=lambda group: (group.get("group_score", 0), group.get("match_count", 0)),
+        reverse=True,
+    )
     return groups
 
 
@@ -1395,7 +1631,7 @@ def get_duplicate_groups_page(
     page = max(1, int(page))
     page_size = max(1, min(200, int(page_size)))
 
-    if not has_tables:
+    if not has_tables or _normalize_decision(decision) == "approved":
         groups_all = get_duplicate_groups(
             session,
             upload_id=upload_id,
@@ -1467,10 +1703,17 @@ def get_duplicate_groups_page(
     groups: list[dict[str, Any]] = []
     for g in group_rows:
         member_ids = record_ids_by_group.get(int(g.id), [])
+        pruned_ids = _record_ids_for_pending_group_display(
+            session,
+            member_ids,
+            decision=decision,
+        )
+        if pruned_ids is None:
+            continue
+        member_ids = pruned_ids
         group_records = [record_by_id[rid] for rid in member_ids if rid in record_by_id]
 
         serialized_records = []
-        entity_ids: list[int] = []
         for record in group_records:
             serialized_record = _serialize_group_record(record)
             membership = membership_by_record.get(int(record.id))
@@ -1482,8 +1725,6 @@ def get_duplicate_groups_page(
                 if membership is not None and membership.get("entity_id") is not None
                 else None
             )
-            if serialized_record["entity_id"] is not None:
-                entity_ids.append(int(serialized_record["entity_id"]))
             serialized_records.append(serialized_record)
 
         group_candidates = (
@@ -1511,7 +1752,7 @@ def get_duplicate_groups_page(
         groups.append(
             {
                 "group_id": f"dg_{int(g.id)}",
-                "entity_id": entity_ids[0] if entity_ids else None,
+                "entity_id": None,
                 "record_ids": member_ids,
                 "pair_count": int(g.match_count or 0),
                 "avg_score": display_score,
@@ -1542,41 +1783,54 @@ def _find_duplicate_group(
     return None
 
 
-def _get_or_create_entity_for_group(
+def _resolve_entity_for_partial_approval(
     session: Session,
-    records: list[NormalizedRecord],
+    confirmed_records: list[NormalizedRecord],
 ) -> Entity:
-    record_ids = [int(record.id) for record in records]
-    existing_memberships = (
+    """
+    Her kısmi Kaydet için yeni entity (ikinci/üçüncü birleştirme ayrı görünsün).
+    Yalnızca aynı entity'deki tam onaylı kayıtlar yeniden kaydediliyorsa entity güncellenir.
+    """
+    approved_ids = sorted(int(record.id) for record in confirmed_records)
+    memberships = (
         session.query(EntityMembership)
-        .filter(EntityMembership.normalized_record_id.in_(record_ids))
+        .filter(EntityMembership.normalized_record_id.in_(approved_ids))
         .all()
     )
-    if existing_memberships:
-        entity_id_counts: dict[int, int] = {}
-        for membership in existing_memberships:
-            entity_id_counts[int(membership.entity_id)] = (
-                entity_id_counts.get(int(membership.entity_id), 0) + 1
-            )
-        entity_id = sorted(
-            entity_id_counts,
-            key=lambda current_id: entity_id_counts[current_id],
-            reverse=True,
-        )[0]
-        entity = session.query(Entity).filter(Entity.id == entity_id).first()
+    confirmed_memberships = [
+        membership
+        for membership in memberships
+        if _safe_str(membership.status).lower() == "confirmed"
+    ]
+    entity_ids = {int(membership.entity_id) for membership in confirmed_memberships}
+
+    if (
+        len(entity_ids) == 1
+        and len(confirmed_memberships) == len(approved_ids)
+        and len(memberships) == len(approved_ids)
+    ):
+        entity = (
+            session.query(Entity)
+            .filter(Entity.id == next(iter(entity_ids)))
+            .first()
+        )
         if entity is not None:
             return entity
 
-    golden_record = _build_golden_record(records)
+    for membership in memberships:
+        session.delete(membership)
+    session.flush()
+
+    golden_record = _build_golden_record(confirmed_records)
     entity = Entity(
-        canonical_name=_safe_str(golden_record.get("clean_name")) or f"Entity {record_ids[0]}",
+        canonical_name=_safe_str(golden_record.get("clean_name")) or f"Entity {approved_ids[0]}",
         canonical_phone=_safe_str(golden_record.get("clean_phone")) or None,
         canonical_email=_safe_str(golden_record.get("clean_email")) or None,
         canonical_city=_safe_str(golden_record.get("clean_city")) or None,
         canonical_tc=_safe_str(golden_record.get("clean_tc")) or None,
         canonical_muhatap_no=_safe_str(golden_record.get("clean_muhatap_no")) or None,
         canonical_data=golden_record,
-        donor_count=len(records),
+        donor_count=len(confirmed_records),
         confidence_score=1.0,
         confidence=1.0,
         merged_at=datetime.utcnow(),
@@ -1584,6 +1838,21 @@ def _get_or_create_entity_for_group(
     session.add(entity)
     session.flush()
     return entity
+
+
+def _sync_entity_donor_count(session: Session, entity_id: int) -> None:
+    entity = session.query(Entity).filter(Entity.id == entity_id).first()
+    if entity is None:
+        return
+    entity.donor_count = int(
+        session.query(EntityMembership)
+        .filter(
+            EntityMembership.entity_id == entity_id,
+            EntityMembership.status == "confirmed",
+        )
+        .count()
+    )
+    entity.updated_at = datetime.utcnow()
 
 
 def _refresh_materialized_duplicate_groups_for_runs(
@@ -1689,8 +1958,6 @@ def approve_group_partial(
     if upload_id is not None:
         pair_query = pair_query.join(DetectionRun).filter(DetectionRun.upload_id == upload_id)
     normalized_decision = _safe_str(decision).lower()
-    if normalized_decision in {"pending", "approved", "rejected"}:
-        pair_query = pair_query.filter(MatchCandidate.decision == normalized_decision)
 
     pair_candidates = pair_query.all()
     if not pair_candidates:
@@ -1710,13 +1977,27 @@ def approve_group_partial(
         missing_ids = sorted(set(record_ids) - set(record_by_id))
         raise ValueError(f"Normalized kayıt bulunamadı: {missing_ids}")
 
-    entity = _get_or_create_entity_for_group(session, ordered_records)
+    confirmed_records = [
+        record_by_id[record_id]
+        for record_id in sorted(approved_set)
+        if record_id in record_by_id
+    ]
+    if not confirmed_records:
+        raise ValueError("Kaydetmek için en az bir kayıt onaylanmalıdır.")
+
+    unselected_ids = sorted(set(record_ids) - approved_set - rejected_set)
+    if unselected_ids:
+        session.query(EntityMembership).filter(
+            EntityMembership.normalized_record_id.in_(unselected_ids),
+        ).delete(synchronize_session=False)
+
+    entity = _resolve_entity_for_partial_approval(session, confirmed_records)
 
     memberships = (
         session.query(EntityMembership)
         .filter(
             EntityMembership.entity_id == entity.id,
-            EntityMembership.normalized_record_id.in_(record_ids),
+            EntityMembership.normalized_record_id.in_(list(approved_set)),
         )
         .all()
     )
@@ -1725,13 +2006,10 @@ def approve_group_partial(
         for membership in memberships
     }
 
-    for record in ordered_records:
+    for record in confirmed_records:
         record_id = int(record.id)
         membership = membership_by_record.get(record_id)
         if record_id in rejected_set:
-            if membership is not None:
-                session.delete(membership)
-                membership_by_record.pop(record_id, None)
             continue
 
         if membership is None:
@@ -1743,14 +2021,21 @@ def approve_group_partial(
             session.add(membership)
             membership_by_record[record_id] = membership
 
-        if record_id in approved_set:
-            membership.status = "confirmed"
-        else:
-            membership.status = "pending"
+        membership.status = "confirmed"
+
+    for record_id in rejected_set:
+        rejected_memberships = (
+            session.query(EntityMembership)
+            .filter(EntityMembership.normalized_record_id == int(record_id))
+            .all()
+        )
+        for membership in rejected_memberships:
+            session.delete(membership)
 
     approved_pair_ids: list[int] = []
     rejected_pair_ids: list[int] = []
     pending_pair_ids: list[int] = []
+    split_pair_ids: list[int] = []
     affected_detection_run_ids: set[int] = set()
     now = datetime.utcnow()
     for candidate in pair_candidates:
@@ -1758,33 +2043,36 @@ def approve_group_partial(
             affected_detection_run_ids.add(int(candidate.detection_run_id))
         left_id = int(candidate.left_id)
         right_id = int(candidate.right_id)
-        if left_id in approved_set and right_id in approved_set:
-            next_decision = "approved"
+        next_decision = _partial_approval_pair_decision(
+            left_id,
+            right_id,
+            approved_set=approved_set,
+            rejected_set=rejected_set,
+        )
+        if next_decision == "approved":
             approved_pair_ids.append(int(candidate.id))
-        elif left_id in rejected_set or right_id in rejected_set:
-            next_decision = "rejected"
+        elif next_decision == "rejected":
             rejected_pair_ids.append(int(candidate.id))
+            if left_id in approved_set or right_id in approved_set:
+                split_pair_ids.append(int(candidate.id))
         else:
-            next_decision = "pending"
             pending_pair_ids.append(int(candidate.id))
 
         if candidate.decision != next_decision:
             candidate.decision = next_decision
+            reason = note or f"Partial approval via {group_id}"
+            if int(candidate.id) in split_pair_ids and not note:
+                reason = f"Partial split boundary via {group_id}"
             session.add(
                 ReviewAction(
                     match_id=candidate.id,
                     decision=next_decision,
                     decided_by=reviewed_by,
                     decided_at=now,
-                    reason=note or f"Partial approval via {group_id}",
+                    reason=reason,
                 )
             )
 
-    confirmed_records = [
-        record
-        for record in ordered_records
-        if int(record.id) in approved_set
-    ]
     golden_source = None
     if confirmed_records:
         golden_source = sorted(
@@ -1833,6 +2121,39 @@ def approve_group_partial(
                     snap["raw_payload"] = raw_pl
                 snapshots.append(snap)
             canonical["merged_member_snapshots"] = snapshots
+
+        unselected_ids = sorted(set(record_ids) - approved_set - rejected_set)
+        if unselected_ids:
+            excluded_records = [
+                record_by_id[record_id]
+                for record_id in unselected_ids
+                if record_id in record_by_id
+            ]
+            excluded_snapshots: list[dict[str, Any]] = []
+            for record in sorted(excluded_records, key=lambda r: int(r.id)):
+                snap = _serialize_group_record(record)
+                snap["muhatap_no_effective"] = (
+                    _record_group_muhatap_code(record) or _safe_str(record.clean_muhatap_no)
+                )
+                raw_pl = _raw_payload(record)
+                if raw_pl:
+                    snap["raw_payload"] = raw_pl
+                excluded_snapshots.append(snap)
+            canonical["excluded_member_snapshots"] = excluded_snapshots
+            excluded_parts: list[str] = []
+            for snap in excluded_snapshots:
+                nm = _safe_str(snap.get("clean_name")) or "—"
+                mc = _safe_str(snap.get("muhatap_no_effective")) or "—"
+                excluded_parts.append(f"{nm} {mc}".strip())
+            if excluded_parts:
+                line = canonical.get("merged_muhatap_report_line") or ""
+                suffix = (
+                    " Birleşime dahil edilmeyen kayıtlar: "
+                    + " / ".join(excluded_parts)
+                    + " (bekleyen grupta yeniden incelenebilir)."
+                )
+                canonical["merged_muhatap_report_line"] = (line + suffix).strip()
+
         entity.canonical_data = canonical
     else:
         entity.golden_record_id = None
@@ -1848,8 +2169,7 @@ def approve_group_partial(
     entity.canonical_city = _safe_str(canonical_data.get("clean_city")) or None
     entity.canonical_tc = _safe_str(canonical_data.get("clean_tc")) or None
     entity.canonical_muhatap_no = _safe_str(canonical_data.get("clean_muhatap_no")) or None
-    entity.donor_count = len(approved_set)
-    entity.updated_at = datetime.utcnow()
+    _sync_entity_donor_count(session, int(entity.id))
 
     session.add(
         AuditLog(
@@ -1867,6 +2187,7 @@ def approve_group_partial(
                 "approved_pair_ids": approved_pair_ids,
                 "rejected_pair_ids": rejected_pair_ids,
                 "pending_pair_ids": pending_pair_ids,
+                "split_pair_ids": split_pair_ids,
                 "golden_record_id": int(golden_source.id) if golden_source else None,
                 "note": note,
             },
@@ -1879,7 +2200,8 @@ def approve_group_partial(
     return {
         "entity_id": entity.id,
         "confirmed_count": len(approved_set),
-        "excluded_count": len(rejected_set),
+        "excluded_count": len(set(record_ids) - approved_set - rejected_set),
+        "excluded_record_ids": sorted(set(record_ids) - approved_set - rejected_set),
         "golden_record_id": entity.golden_record_id,
         "approved_pair_count": len(approved_pair_ids),
         "rejected_pair_count": len(rejected_pair_ids),
