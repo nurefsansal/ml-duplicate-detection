@@ -12,7 +12,7 @@ from typing import Optional
 
 import json
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from sqlalchemy import create_engine, func
 from sqlalchemy.orm import Session, joinedload, sessionmaker
@@ -26,6 +26,11 @@ from backend.models.database import (
     Upload,
 )
 from backend.api.routes.normalized_records_route import build_clean_dataset_rows
+from backend.services.muhatap_merge_report import (
+    collect_muhatap_merge_groups,
+    generate_muhatap_merge_pdf,
+    list_uploads_with_muhatap_merge,
+)
 from backend.services.review_service import get_duplicate_groups, get_duplicate_groups_page
 
 DATABASE_URL = os.getenv(
@@ -511,13 +516,48 @@ def get_upload_history(
         return {"success": False, "error": str(exc)}
 
 
+CLEAN_DATASET_EXPORT_FIELDS = [
+    "clean_muhatap_no",
+    "clean_name",
+    "clean_tc",
+    "clean_phone",
+    "clean_email",
+    "clean_city",
+    "clean_address",
+    "entity_id",
+    "record_id",
+    "upload_id",
+]
+
+
+@router.get("/reports/uploads-with-merge")
+def get_uploads_with_muhatap_merge(
+    limit: int = 100,
+    db: Session = Depends(get_db),
+):
+    """Yalnızca onaylı muhatap birleştirmesi yapılmış yüklemeler."""
+    try:
+        uploads = list_uploads_with_muhatap_merge(db, limit=limit)
+        return {"success": True, "count": len(uploads), "uploads": uploads}
+    except Exception as exc:
+        return {"success": False, "error": str(exc), "uploads": []}
+
+
 @router.get("/reports/export/clean_dataset.csv")
 def export_clean_dataset_csv(
     upload_id: Optional[int] = None,
     db: Session = Depends(get_db),
 ):
     rows = build_clean_dataset_rows(db, upload_id=upload_id)
-    return _csv_response(rows, filename="clean_dataset.csv")
+    flat_rows = [
+        {key: row.get(key, "") for key in CLEAN_DATASET_EXPORT_FIELDS}
+        for row in rows
+    ]
+    return _csv_response(
+        flat_rows,
+        filename="clean_dataset.csv",
+        fieldnames=CLEAN_DATASET_EXPORT_FIELDS,
+    )
 
 
 @router.get("/reports/export/approved_matches.csv")
@@ -622,44 +662,74 @@ def get_muhatap_merge_report(
     """
     try:
         page = max(1, int(page))
-        page_size = max(1, min(200, int(page_size)))
-        groups, total = get_duplicate_groups_page(
+        page_size = max(1, min(5000, int(page_size)))
+        all_groups = collect_muhatap_merge_groups(
             db,
             upload_id=upload_id,
             decision=decision,
-            limit=5000,
-            page=page,
-            page_size=page_size,
-            different_muhatap_code=True,
+            limit=50_000,
         )
-        out_groups: list[dict] = []
-        for g in groups:
-            gr = g.get("golden_record") or {}
-            if not gr.get("merged_member_snapshots") and not gr.get("merged_muhatap_report_line"):
-                continue
-            out_groups.append(
-                {
-                    "group_id": g.get("group_id"),
-                    "entity_id": g.get("entity_id"),
-                    "muhatap_codes": g.get("muhatap_codes"),
-                    "record_ids": g.get("record_ids"),
-                    "group_score": g.get("group_score"),
-                    "golden_record": gr,
-                    "records": g.get("records"),
-                }
-            )
+        total = len(all_groups)
+        offset = (page - 1) * page_size
+        out_groups = all_groups[offset : offset + page_size]
         return {
             "success": True,
             "decision": decision,
             "upload_id": upload_id,
             "total_all_groups": total,
-            "count_with_merge_detail": len(out_groups),
+            "count_with_merge_detail": total,
             "page": page,
             "page_size": page_size,
             "groups": out_groups,
         }
     except Exception as exc:
         return {"success": False, "error": str(exc)}
+
+
+@router.get("/reports/export/muhatap_merge.pdf")
+def export_muhatap_merge_pdf(
+    upload_id: Optional[int] = None,
+    decision: str = Query("approved", pattern="^(pending|approved|rejected)$"),
+    db: Session = Depends(get_db),
+):
+    if upload_id is None:
+        raise HTTPException(status_code=400, detail="upload_id gerekli")
+
+    upload = db.query(Upload).filter(Upload.id == upload_id).first()
+    if upload is None:
+        raise HTTPException(status_code=404, detail="Upload bulunamadı")
+
+    try:
+        groups = collect_muhatap_merge_groups(
+            db,
+            upload_id=upload_id,
+            decision=decision,
+            limit=50_000,
+        )
+        pdf_bytes = generate_muhatap_merge_pdf(upload=upload, groups=groups)
+    except ImportError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "PDF üretimi için reportlab kurulu değil. "
+                "Sunucuda: pip install reportlab"
+            ),
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"PDF oluşturulamadı: {exc}",
+        ) from exc
+
+    if not pdf_bytes or not pdf_bytes.startswith(b"%PDF"):
+        raise HTTPException(status_code=500, detail="Geçersiz PDF çıktısı üretildi")
+
+    filename = f"muhatap_birlestirme_{upload_id}.pdf"
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/reports/export/muhatap_merge_detail.csv")

@@ -1197,12 +1197,25 @@ def _hydrate_golden_records_from_entities(
     groups: list[dict[str, Any]],
 ) -> None:
     """groups üzerinde yerinde: tam onaylı gruplar entity canonical ile hizalanır."""
+    all_record_ids = sorted(
+        {
+            int(rid)
+            for group in groups
+            for rid in (group.get("record_ids") or [])
+        }
+    )
+    membership_global = _membership_snapshots_by_record(session, all_record_ids)
+
     eligible: list[tuple[dict[str, Any], int]] = []
     for group in groups:
         record_ids = [int(rid) for rid in (group.get("record_ids") or [])]
         if not record_ids:
             continue
-        membership_by_record = _membership_snapshots_by_record(session, record_ids)
+        membership_by_record = {
+            int(rid): membership_global[int(rid)]
+            for rid in record_ids
+            if int(rid) in membership_global
+        }
         if not _group_qualifies_for_entity_golden_hydrate(group, membership_by_record):
             group["entity_id"] = None
             continue
@@ -1278,13 +1291,15 @@ def _record_ids_for_pending_group_display(
     record_ids: list[int],
     *,
     decision: str,
+    membership_by_record: dict[int, dict[str, Any]] | None = None,
 ) -> list[int] | None:
     """Bekleyen gruplardan entity'ye onaylanmış kayıtları çıkarır; <2 kayıt kalırsa None."""
     if _normalize_decision(decision) != "pending":
         return sorted({int(rid) for rid in record_ids})
     if not record_ids:
         return None
-    membership_by_record = _membership_snapshots_by_record(session, record_ids)
+    if membership_by_record is None:
+        membership_by_record = _membership_snapshots_by_record(session, record_ids)
     active = [
         int(rid)
         for rid in record_ids
@@ -1320,6 +1335,14 @@ def get_duplicate_groups(
     limit: int = 5000,
     different_muhatap_code: bool = True,
 ) -> list[dict[str, Any]]:
+    if _normalize_decision(decision) == "approved" and upload_id is not None:
+        return _entity_merge_groups_for_upload(
+            session,
+            upload_id=upload_id,
+            limit=limit,
+            different_muhatap_code=different_muhatap_code,
+        )
+
     candidates = get_match_candidates(
         session,
         upload_id=upload_id,
@@ -1452,6 +1475,7 @@ def get_duplicate_groups(
             session,
             upload_id=upload_id,
             limit=limit,
+            different_muhatap_code=different_muhatap_code,
         )
         groups = _merge_duplicate_group_lists(groups, entity_groups)
     return groups
@@ -1484,6 +1508,7 @@ def _entity_merge_groups_for_upload(
     *,
     upload_id: int | None,
     limit: int = 5000,
+    different_muhatap_code: bool = False,
 ) -> list[dict[str, Any]]:
     """Onaylı entity birleştirmeleri — her Kaydet ayrı satır, entity canonical golden."""
     membership_query = (
@@ -1505,16 +1530,51 @@ def _entity_merge_groups_for_upload(
     if not by_entity:
         return []
 
-    entity_rows = (
-        session.query(Entity)
-        .filter(Entity.id.in_(sorted(by_entity.keys())))
-        .all()
-    )
+    entity_ids = sorted(by_entity.keys())
+    entity_rows = session.query(Entity).filter(Entity.id.in_(entity_ids)).all()
     entity_by_id = {int(row.id): row for row in entity_rows}
+
+    all_record_ids = sorted(
+        {int(m.normalized_record_id) for ms in by_entity.values() for m in ms}
+    )
+    record_by_id: dict[int, NormalizedRecord] = {}
+    if all_record_ids:
+        rows = (
+            session.query(NormalizedRecord)
+            .options(joinedload(NormalizedRecord.raw_record))
+            .filter(NormalizedRecord.id.in_(all_record_ids))
+            .all()
+        )
+        record_by_id = {int(r.id): r for r in rows}
+
+    membership_global = _membership_snapshots_by_record(session, all_record_ids)
+    group_candidates_pool: list[MatchCandidate] = []
+    if all_record_ids:
+        group_candidates_pool = (
+            session.query(MatchCandidate)
+            .filter(MatchCandidate.decision == "approved")
+            .filter(MatchCandidate.left_id.in_(all_record_ids))
+            .filter(MatchCandidate.right_id.in_(all_record_ids))
+            .all()
+        )
+    record_to_entity: dict[int, int] = {}
+    for entity_id, entity_memberships in by_entity.items():
+        for membership in entity_memberships:
+            record_to_entity[int(membership.normalized_record_id)] = int(entity_id)
+
+    candidates_by_entity: dict[int, list[MatchCandidate]] = {eid: [] for eid in entity_ids}
+    for candidate in group_candidates_pool:
+        left_id = int(candidate.left_id)
+        right_id = int(candidate.right_id)
+        entity_id = record_to_entity.get(left_id)
+        if entity_id is None or record_to_entity.get(right_id) != entity_id:
+            continue
+        candidates_by_entity.setdefault(entity_id, []).append(candidate)
+
     weights, _thresholds = load_scoring_app_settings(session)
     groups: list[dict[str, Any]] = []
 
-    for entity_id in sorted(by_entity.keys()):
+    for entity_id in entity_ids:
         entity = entity_by_id.get(entity_id)
         if entity is None:
             continue
@@ -1529,22 +1589,14 @@ def _entity_merge_groups_for_upload(
         if len(record_ids) < 2 and not has_merge_detail:
             continue
 
-        records = (
-            session.query(NormalizedRecord)
-            .options(joinedload(NormalizedRecord.raw_record))
-            .filter(NormalizedRecord.id.in_(record_ids))
-            .all()
-        )
-        record_by_id = {int(r.id): r for r in records}
         group_records = [record_by_id[rid] for rid in record_ids if rid in record_by_id]
         if not group_records:
             continue
 
-        membership_by_record = _membership_snapshots_by_record(session, record_ids)
         serialized_records = []
         for record in group_records:
             serialized_record = _serialize_group_record(record)
-            membership = membership_by_record.get(int(record.id))
+            membership = membership_global.get(int(record.id))
             serialized_record["membership_status"] = (
                 membership.get("status", "confirmed") if membership else "confirmed"
             )
@@ -1558,13 +1610,11 @@ def _entity_merge_groups_for_upload(
                 if code
             }
         )
-        group_candidates = (
-            session.query(MatchCandidate)
-            .filter(MatchCandidate.decision == "approved")
-            .filter(MatchCandidate.left_id.in_(record_ids))
-            .filter(MatchCandidate.right_id.in_(record_ids))
-            .all()
-        )
+        has_different_muhatap = len(muhatap_codes) > 1
+        if different_muhatap_code and not has_different_muhatap and not has_merge_detail:
+            continue
+
+        group_candidates = candidates_by_entity.get(entity_id, [])
         group_score, score_max = _group_display_scores(
             group_candidates,
             weights=weights,
@@ -1587,7 +1637,7 @@ def _entity_merge_groups_for_upload(
                 "match_count": len(group_candidates),
                 "match_candidate_ids": sorted({int(c.id) for c in group_candidates}),
                 "muhatap_codes": muhatap_codes,
-                "different_muhatap_code": len(muhatap_codes) > 1,
+                "different_muhatap_code": has_different_muhatap,
                 "records": serialized_records,
                 "golden_record": golden_record,
             }
@@ -1597,6 +1647,8 @@ def _entity_merge_groups_for_upload(
         key=lambda group: (group.get("group_score", 0), group.get("match_count", 0)),
         reverse=True,
     )
+    if limit > 0:
+        return groups[: int(limit)]
     return groups
 
 
@@ -1631,7 +1683,18 @@ def get_duplicate_groups_page(
     page = max(1, int(page))
     page_size = max(1, min(200, int(page_size)))
 
-    if not has_tables or _normalize_decision(decision) == "approved":
+    if _normalize_decision(decision) == "approved":
+        groups_all = _entity_merge_groups_for_upload(
+            session,
+            upload_id=upload_id,
+            limit=limit,
+            different_muhatap_code=different_muhatap_code,
+        )
+        total = len(groups_all)
+        offset = (page - 1) * page_size
+        return groups_all[offset : offset + page_size], total
+
+    if not has_tables:
         groups_all = get_duplicate_groups(
             session,
             upload_id=upload_id,
@@ -1707,6 +1770,7 @@ def get_duplicate_groups_page(
             session,
             member_ids,
             decision=decision,
+            membership_by_record=membership_by_record,
         )
         if pruned_ids is None:
             continue
@@ -2098,18 +2162,6 @@ def approve_group_partial(
                     }
                 )
             canonical["merged_muhatap_sources"] = sources
-            parts: list[str] = []
-            for item in sources:
-                nm = _safe_str(item.get("clean_name")) or "—"
-                mc = _safe_str(item.get("clean_muhatap_no")) or "—"
-                parts.append(f"{nm} {mc}".strip())
-            detail = " / ".join(parts)
-            chosen_code = _safe_str(canonical.get("clean_muhatap_no"))
-            chosen_name = _safe_str(canonical.get("clean_name"))
-            canonical["merged_muhatap_report_line"] = (
-                f"{chosen_code} muhatap kodlu {chosen_name} —> eski muhatap kodları ve bilgileri: "
-                f"{detail} (tek muhatap kodunda birleştirildi)"
-            )
             snapshots: list[dict[str, Any]] = []
             for record in sorted(confirmed_records, key=lambda r: int(r.id)):
                 snap = _serialize_group_record(record)
@@ -2140,19 +2192,14 @@ def approve_group_partial(
                     snap["raw_payload"] = raw_pl
                 excluded_snapshots.append(snap)
             canonical["excluded_member_snapshots"] = excluded_snapshots
-            excluded_parts: list[str] = []
-            for snap in excluded_snapshots:
-                nm = _safe_str(snap.get("clean_name")) or "—"
-                mc = _safe_str(snap.get("muhatap_no_effective")) or "—"
-                excluded_parts.append(f"{nm} {mc}".strip())
-            if excluded_parts:
-                line = canonical.get("merged_muhatap_report_line") or ""
-                suffix = (
-                    " Birleşime dahil edilmeyen kayıtlar: "
-                    + " / ".join(excluded_parts)
-                    + " (bekleyen grupta yeniden incelenebilir)."
-                )
-                canonical["merged_muhatap_report_line"] = (line + suffix).strip()
+
+        if len(confirmed_records) >= 2:
+            from backend.services.muhatap_merge_report import build_merge_summary
+
+            merge_summary = build_merge_summary(canonical)
+            canonical["target_muhatap_code"] = merge_summary["target_muhatap_code"]
+            canonical["prior_muhatap_codes"] = merge_summary["prior_muhatap_codes"]
+            canonical["merged_muhatap_report_line"] = merge_summary["merged_muhatap_report_line"]
 
         entity.canonical_data = canonical
     else:

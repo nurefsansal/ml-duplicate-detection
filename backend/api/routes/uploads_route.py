@@ -21,7 +21,15 @@ from sqlalchemy import create_engine
 from sqlalchemy import create_engine, func, text
 from sqlalchemy.orm import Session, sessionmaker
 
-from backend.models.database import ColumnMapping, NormalizationRun, NormalizedRecord, RawRecord, Upload
+from backend.models.database import (
+    ColumnMapping,
+    DetectionRun,
+    MatchCandidate,
+    NormalizationRun,
+    NormalizedRecord,
+    RawRecord,
+    Upload,
+)
 from backend.services.normalization_service import infer_target_field_name
 from backend.api.routes.hanna_connector import ConnectorConnectionInput
 from backend.services.database_connector_service import DatabaseConnectorService
@@ -586,6 +594,52 @@ def list_uploads(
         raise HTTPException(
             status_code=500, detail=f"Error listing uploads: {exc}"
         ) from exc
+
+
+@router.get("/uploads/{upload_id}/pipeline-status")
+def get_upload_pipeline_status(upload_id: int, db: Session = Depends(get_db)):
+    """Yükleme pipeline durumu: normalizasyon ve mükerrer tespit tamamlandı mı."""
+    upload = db.query(Upload).filter(Upload.id == upload_id).first()
+    if upload is None:
+        raise HTTPException(status_code=404, detail="Upload bulunamadı")
+
+    normalized_count = (
+        db.query(func.count(NormalizedRecord.id))
+        .filter(NormalizedRecord.upload_id == upload_id)
+        .scalar()
+        or 0
+    )
+
+    latest_detection = (
+        db.query(DetectionRun)
+        .filter(DetectionRun.upload_id == upload_id)
+        .order_by(DetectionRun.id.desc())
+        .first()
+    )
+
+    match_candidate_count = 0
+    if latest_detection is not None:
+        match_candidate_count = int(
+            db.query(func.count(MatchCandidate.id))
+            .filter(MatchCandidate.detection_run_id == latest_detection.id)
+            .scalar()
+            or 0
+        )
+
+    has_detection = latest_detection is not None
+
+    return {
+        "success": True,
+        "upload_id": upload_id,
+        "has_normalized_records": normalized_count > 0,
+        "normalized_record_count": int(normalized_count),
+        "has_detection_run": has_detection,
+        "latest_detection_run_id": (
+            int(latest_detection.id) if latest_detection is not None else None
+        ),
+        "match_candidate_count": match_candidate_count,
+        "can_review": has_detection,
+    }
 
 
 class FromInstitutionUploadRequest(BaseModel):

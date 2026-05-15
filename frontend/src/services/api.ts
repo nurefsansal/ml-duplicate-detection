@@ -960,13 +960,35 @@ export async function downloadGoldenRecordsCsv(options?: {
   );
 }
 
+export type MuhatapMergeSummary = {
+  target_muhatap_code?: string;
+  target_name?: string;
+  prior_muhatap_codes?: string[];
+  merged_muhatap_report_line?: string;
+};
+
+export type UploadWithMergeItem = {
+  id: number;
+  file_name: string;
+  source_type?: string;
+  total_records?: number;
+  status?: string;
+  created_at?: string | null;
+  merge_group_count?: number;
+};
+
 export type MuhatapMergeReportGroup = {
   group_id: string;
   entity_id?: number | null;
   muhatap_codes?: string[];
   record_ids: number[];
   group_score: number;
-  golden_record: DuplicateGroup["golden_record"];
+  golden_record: DuplicateGroup["golden_record"] & {
+    target_muhatap_code?: string;
+    prior_muhatap_codes?: string[];
+    merged_muhatap_report_line?: string;
+  };
+  merge_summary?: MuhatapMergeSummary;
   records: DuplicateGroup["records"];
 };
 
@@ -1013,6 +1035,97 @@ export async function downloadMuhatapMergeDetailCsv(options?: {
       decision: options?.decision ?? "approved",
     },
   );
+}
+
+export async function listUploadsWithMuhatapMerge(
+  limit = 100,
+): Promise<{ success: boolean; count: number; uploads: UploadWithMergeItem[] }> {
+  const response = await apiClient.get("/api/v1/reports/uploads-with-merge", {
+    params: { limit },
+  });
+  return response.data;
+}
+
+function triggerBlobDownload(blob: Blob, filename: string): void {
+  const url = window.URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.URL.revokeObjectURL(url);
+}
+
+export type UploadPipelineStatus = {
+  success: boolean;
+  upload_id: number;
+  has_normalized_records: boolean;
+  normalized_record_count: number;
+  has_detection_run: boolean;
+  latest_detection_run_id: number | null;
+  match_candidate_count: number;
+  can_review: boolean;
+};
+
+export async function getUploadPipelineStatus(
+  uploadId: number,
+): Promise<UploadPipelineStatus> {
+  const response = await apiClient.get(`/api/v1/uploads/${uploadId}/pipeline-status`);
+  return response.data as UploadPipelineStatus;
+}
+
+function asciiDownloadFilename(name: string, fallback: string): string {
+  const base = name
+    .normalize("NFKD")
+    .replace(/[^\w.-]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_|_$/g, "");
+  return base.endsWith(".pdf") ? base : `${base || fallback}.pdf`;
+}
+
+export async function downloadMuhatapMergePdf(options: {
+  uploadId: number;
+  decision?: "pending" | "approved" | "rejected";
+  filename?: string;
+}): Promise<void> {
+  const response = await apiClient.get("/api/v1/reports/export/muhatap_merge.pdf", {
+    params: {
+      upload_id: options.uploadId,
+      decision: options.decision ?? "approved",
+    },
+    responseType: "blob",
+    validateStatus: () => true,
+  });
+
+  const blob = response.data instanceof Blob ? response.data : new Blob([response.data]);
+  const contentType = String(response.headers["content-type"] || "").toLowerCase();
+
+  if (response.status < 200 || response.status >= 300) {
+    const text = await blob.text();
+    let message = "PDF raporu indirilemedi.";
+    try {
+      const json = JSON.parse(text) as { detail?: string; error?: string };
+      message = json.detail || json.error || message;
+    } catch {
+      if (text.trim()) message = text.trim().slice(0, 300);
+    }
+    throw new Error(message);
+  }
+
+  if (!contentType.includes("application/pdf")) {
+    const text = await blob.text();
+    throw new Error(text.trim().slice(0, 300) || "Sunucu PDF yerine beklenmeyen yanıt döndürdü.");
+  }
+
+  const header = await blob.slice(0, 4).text();
+  if (!header.startsWith("%PDF")) {
+    throw new Error("İndirilen dosya geçerli bir PDF değil. Backend loglarını kontrol edin.");
+  }
+
+  const fallback = `muhatap_birlestirme_${options.uploadId}`;
+  const filename = asciiDownloadFilename(options.filename ?? fallback, fallback);
+  triggerBlobDownload(blob, filename);
 }
 
 // ─── Admin ─────────────────────────────────────────────────────────────────────

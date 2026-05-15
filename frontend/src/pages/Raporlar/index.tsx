@@ -1,26 +1,14 @@
-import { useState, useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import DashboardLayout from "../../components/feature/DashboardLayout";
 import Header from "../../components/feature/Header";
 import {
-  downloadApprovedMatchesCsv,
   downloadCleanDatasetCsv,
-  downloadDuplicateGroupsCsv,
-  downloadGoldenRecordsCsv,
-  downloadMuhatapMergeDetailCsv,
-  getMatches,
+  downloadMuhatapMergePdf,
   getMuhatapMergeReport,
-  getReportOverview,
-  getReportDataQuality,
-  getReportDetectionSummary,
-  getReportReviewSummary,
-  getReportUploadHistory,
+  listUploadsWithMuhatapMerge,
   type MuhatapMergeReportGroup,
-  type ReportOverview,
-  type ReportDataQuality,
-  type ReportDetectionSummary,
-  type ReportReviewSummary,
-  type ReportUploadHistoryItem,
+  type UploadWithMergeItem,
   type DuplicateGroupRecord,
 } from "../../services/api";
 
@@ -30,171 +18,204 @@ const reportTabs = [
     icon: "ri-git-merge-line",
     label: "Muhatap Birleştirme",
     desc: "Onaylı birleştirmeler, golden kayıt ve dahil edilmeyen kayıtlar",
-    badge: null,
   },
 ];
 
-function formatDate(iso: string | null): string {
-  if (!iso) return "-";
+function formatUploadDate(iso: string | null | undefined): string {
+  if (!iso) return "—";
   try {
     return new Date(iso).toLocaleString("tr-TR", {
-      day: "2-digit", month: "2-digit", year: "numeric",
-      hour: "2-digit", minute: "2-digit",
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
     });
-  } catch { return iso; }
+  } catch {
+    return iso;
+  }
 }
 
-function StatCard({ label, value, color = "text-gray-900", bg = "bg-gray-50" }: { label: string; value: string | number; color?: string; bg?: string }) {
+function MergeTransitionBanner({ group }: { group: MuhatapMergeReportGroup }) {
+  const gr = group.golden_record;
+  const summary = group.merge_summary;
+  const prior =
+    summary?.prior_muhatap_codes ??
+    gr.prior_muhatap_codes ??
+    (group.muhatap_codes || []).filter((c) => c && c !== gr.clean_muhatap_no);
+  const target =
+    summary?.target_muhatap_code ?? gr.target_muhatap_code ?? gr.clean_muhatap_no ?? "—";
+  const targetName = summary?.target_name ?? gr.clean_name ?? "—";
+  const line =
+    summary?.merged_muhatap_report_line ?? gr.merged_muhatap_report_line;
+
   return (
-    <div className={`${bg} rounded-lg p-3 text-center`}>
-      <p className={`text-lg font-bold ${color}`}>{value}</p>
-      <p className="text-[10px] text-gray-400 mt-0.5">{label}</p>
+    <div className="mb-3 space-y-2">
+      <div className="grid grid-cols-1 sm:grid-cols-[1fr_auto_1fr] gap-2 items-stretch">
+        <div className="rounded-lg border border-gray-200 bg-white px-3 py-2.5">
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">
+            Önceki kodlar
+          </p>
+          <p className="text-sm font-semibold text-gray-800 mt-0.5">
+            {prior.length > 0 ? prior.join(", ") : "—"}
+          </p>
+        </div>
+        <div className="hidden sm:flex items-center justify-center text-red-500">
+          <i className="ri-arrow-right-line text-xl" />
+        </div>
+        <div className="rounded-lg border-2 border-red-200 bg-red-50/50 px-3 py-2.5">
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-red-600">
+            Hedef muhatap
+          </p>
+          <p className="text-sm font-bold text-red-800 mt-0.5">
+            {target}
+            <span className="font-normal text-gray-600"> · {targetName}</span>
+          </p>
+        </div>
+      </div>
+      {line ? (
+        <p className="text-xs text-gray-600 leading-relaxed">{line}</p>
+      ) : null}
     </div>
   );
 }
 
 export default function Raporlar() {
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const tabFromUrl = searchParams.get("tab");
   const initialTab =
     tabFromUrl && reportTabs.some((t) => t.id === tabFromUrl)
       ? tabFromUrl
       : "muhatap-merge";
-  const [selectedTab, setSelectedTab] = useState(initialTab);
-  const [dateFrom, setDateFrom] = useState("");
-  const [dateTo, setDateTo] = useState("");
+  const [selectedTab] = useState(initialTab);
 
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
+  const [mergeUploads, setMergeUploads] = useState<UploadWithMergeItem[]>([]);
+  const [uploadsLoading, setUploadsLoading] = useState(true);
+  const [selectedUploadId, setSelectedUploadId] = useState<number | null>(null);
 
-  const [overview, setOverview] = useState<ReportOverview | null>(null);
-  const [quality, setQuality] = useState<ReportDataQuality | null>(null);
-  const [detection, setDetection] = useState<ReportDetectionSummary | null>(null);
-  const [review, setReview] = useState<ReportReviewSummary | null>(null);
-  const [uploadHistory, setUploadHistory] = useState<ReportUploadHistoryItem[]>([]);
-  const [decisionCounts, setDecisionCounts] = useState({
-    pending: 0,
-    approved: 0,
-    rejected: 0,
-  });
   const [mergeReportGroups, setMergeReportGroups] = useState<MuhatapMergeReportGroup[]>([]);
   const [mergeReportMeta, setMergeReportMeta] = useState<{
     totalAll: number;
-    withDetail: number;
   } | null>(null);
   const [mergeReportLoading, setMergeReportLoading] = useState(false);
   const [mergeReportError, setMergeReportError] = useState("");
-  const [exporting, setExporting] = useState(false);
+  const [exporting, setExporting] = useState<"clean" | "pdf" | null>(null);
+  const [error, setError] = useState("");
 
-  const dateParams = {
-    date_from: dateFrom || undefined,
-    date_to: dateTo || undefined,
-  };
+  const loadUploads = useCallback(async () => {
+    setUploadsLoading(true);
+    try {
+      const res = await listUploadsWithMuhatapMerge(100);
+      const uploads = res.uploads ?? [];
+      setMergeUploads(uploads);
 
-  const fetchAll = async () => {
-    setLoading(false);
-    setError("");
-  };
+      const fromUrl = searchParams.get("upload_id");
+      const parsedUrl = fromUrl ? Number(fromUrl) : NaN;
+      const fromStorage = localStorage.getItem("lastDetectUploadId");
+      const parsedStorage = fromStorage ? Number(fromStorage) : NaN;
 
-  useEffect(() => {
-    if (tabFromUrl && reportTabs.some((t) => t.id === tabFromUrl)) {
-      setSelectedTab(tabFromUrl);
-    }
-  }, [tabFromUrl]);
-
-  useEffect(() => {
-    if (selectedTab !== "muhatap-merge") return;
-    let cancelled = false;
-    const load = async () => {
-      setMergeReportLoading(true);
-      setMergeReportError("");
-      try {
-        const uploadParam = searchParams.get("upload_id");
-        const fromUrl = uploadParam ? Number(uploadParam) : NaN;
-        const raw = localStorage.getItem("lastDetectUploadId");
-        const parsed = raw ? Number(raw) : NaN;
-        const uploadId = Number.isFinite(fromUrl)
-          ? fromUrl
-          : Number.isFinite(parsed)
-            ? parsed
-            : undefined;
-        const res = await getMuhatapMergeReport({
-          uploadId,
-          decision: "approved",
-          page: 1,
-          pageSize: 100,
-        });
-        if (cancelled) return;
-        if (!res.success) {
-          setMergeReportError(res.error || "Rapor alınamadı.");
-          setMergeReportGroups([]);
-          setMergeReportMeta(null);
-          return;
-        }
-        setMergeReportGroups(res.groups || []);
-        setMergeReportMeta({
-          totalAll: res.total_all_groups ?? 0,
-          withDetail: res.count_with_merge_detail ?? 0,
-        });
-      } catch {
-        if (!cancelled) {
-          setMergeReportError("Muhatap birleştirme raporu yüklenemedi.");
-          setMergeReportGroups([]);
-          setMergeReportMeta(null);
-        }
-      } finally {
-        if (!cancelled) setMergeReportLoading(false);
+      let nextId: number | null = null;
+      if (Number.isFinite(parsedUrl) && uploads.some((u) => u.id === parsedUrl)) {
+        nextId = parsedUrl;
+      } else if (
+        Number.isFinite(parsedStorage) &&
+        uploads.some((u) => u.id === parsedStorage)
+      ) {
+        nextId = parsedStorage;
+      } else if (uploads.length > 0) {
+        nextId = uploads[0].id;
       }
-    };
-    void load();
-    return () => {
-      cancelled = true;
-    };
-  }, [selectedTab, searchParams]);
-
-  const handleQuickDate = (range: string) => {
-    const today = new Date();
-    let from = new Date();
-    switch (range) {
-      case "Bu Hafta": from = new Date(today); from.setDate(today.getDate() - 7); break;
-      case "Bu Ay": from = new Date(today); from.setMonth(today.getMonth() - 1); break;
-      case "Son 3 Ay": from = new Date(today); from.setMonth(today.getMonth() - 3); break;
-      case "Bu Yıl": from = new Date(today); from.setFullYear(today.getFullYear() - 1); break;
+      setSelectedUploadId(nextId);
+    } catch {
+      setMergeUploads([]);
+      setSelectedUploadId(null);
+    } finally {
+      setUploadsLoading(false);
     }
-    setDateFrom(from.toISOString().split("T")[0]);
-    setDateTo(new Date().toISOString().split("T")[0]);
+  }, [searchParams]);
+
+  const loadMergeReport = useCallback(async (uploadId: number | null) => {
+    if (uploadId === null) {
+      setMergeReportGroups([]);
+      setMergeReportMeta(null);
+      return;
+    }
+    setMergeReportLoading(true);
+    setMergeReportError("");
+    try {
+      const res = await getMuhatapMergeReport({
+        uploadId,
+        decision: "approved",
+        page: 1,
+        pageSize: 500,
+      });
+      if (!res.success) {
+        setMergeReportError(res.error || "Rapor alınamadı.");
+        setMergeReportGroups([]);
+        setMergeReportMeta(null);
+        return;
+      }
+      setMergeReportGroups(res.groups || []);
+      setMergeReportMeta({
+        totalAll: res.count_with_merge_detail ?? res.total_all_groups ?? 0,
+      });
+    } catch {
+      setMergeReportError("Muhatap birleştirme raporu yüklenemedi.");
+      setMergeReportGroups([]);
+      setMergeReportMeta(null);
+    } finally {
+      setMergeReportLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadUploads();
+  }, [loadUploads]);
+
+  useEffect(() => {
+    void loadMergeReport(selectedUploadId);
+  }, [selectedUploadId, loadMergeReport]);
+
+  const selectUpload = (raw: string) => {
+    const id = Number(raw);
+    if (!Number.isFinite(id) || id <= 0) return;
+    setSelectedUploadId(id);
+    localStorage.setItem("lastDetectUploadId", String(id));
+    setSearchParams((p) => {
+      p.set("upload_id", String(id));
+      p.set("tab", "muhatap-merge");
+      return p;
+    });
   };
 
-  const handleExport = async (
-    exportType:
-      | "clean"
-      | "duplicate_groups"
-      | "approved_matches"
-      | "golden_records"
-      | "muhatap_merge",
-  ) => {
-    setExporting(true);
+  const selectedUpload = mergeUploads.find((u) => u.id === selectedUploadId);
+
+  const handleExportClean = async () => {
+    if (selectedUploadId === null) return;
+    setExporting("clean");
     setError("");
     try {
-      const lastUploadIdRaw = localStorage.getItem("lastDetectUploadId");
-      const parsedUploadId = lastUploadIdRaw ? Number(lastUploadIdRaw) : Number.NaN;
-      const uploadId = Number.isFinite(parsedUploadId) ? parsedUploadId : undefined;
-
-      if (exportType === "clean") {
-        await downloadCleanDatasetCsv({ uploadId });
-      } else if (exportType === "duplicate_groups") {
-        await downloadDuplicateGroupsCsv({ uploadId, decision: "approved" });
-      } else if (exportType === "approved_matches") {
-        await downloadApprovedMatchesCsv({ uploadId });
-      } else if (exportType === "golden_records") {
-        await downloadGoldenRecordsCsv({ uploadId, decision: "approved" });
-      } else {
-        await downloadMuhatapMergeDetailCsv({ uploadId, decision: "approved" });
-      }
+      await downloadCleanDatasetCsv({ uploadId: selectedUploadId });
     } catch {
-      setError("Export dosyasi indirilemedi. Lütfen tekrar deneyin.");
+      setError("Temiz veri seti indirilemedi.");
     } finally {
-      setExporting(false);
+      setExporting(null);
+    }
+  };
+
+  const handleExportPdf = async () => {
+    if (selectedUploadId === null) return;
+    setExporting("pdf");
+    setError("");
+    try {
+      await downloadMuhatapMergePdf({
+        uploadId: selectedUploadId,
+        filename: `muhatap_birlestirme_${selectedUploadId}.pdf`,
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "PDF raporu indirilemedi.");
+    } finally {
+      setExporting(null);
     }
   };
 
@@ -202,14 +223,24 @@ export default function Raporlar() {
     <DashboardLayout>
       <Header
         title="Raporlar"
-        subtitle="Gerçek veritabanı verilerinden sistem istatistikleri"
+        subtitle="Muhatap birleştirme ve temiz veri seti çıktıları"
         actions={
           <button
-            onClick={fetchAll}
-            disabled={loading}
+            type="button"
+            onClick={() => {
+              void loadUploads();
+              void loadMergeReport(selectedUploadId);
+            }}
+            disabled={mergeReportLoading || uploadsLoading}
             className="flex items-center gap-2 border border-gray-200 text-gray-600 text-sm px-4 py-2 rounded-lg hover:bg-gray-50 cursor-pointer transition-colors whitespace-nowrap disabled:opacity-60"
           >
-            <i className={loading ? "ri-loader-4-line animate-spin" : "ri-refresh-line"}></i>
+            <i
+              className={
+                mergeReportLoading || uploadsLoading
+                  ? "ri-loader-4-line animate-spin"
+                  : "ri-refresh-line"
+              }
+            />
             Yenile
           </button>
         }
@@ -224,443 +255,221 @@ export default function Raporlar() {
         )}
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-          {/* Left: Tabs + Date + Content */}
           <div className="lg:col-span-2 space-y-5">
-            {/* Report tabs */}
             <div className="bg-white rounded-xl p-5 border border-gray-100">
-              <h3 className="text-sm font-semibold text-gray-900 mb-4">Rapor Türü</h3>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                {reportTabs.map((r) => {
-                  const active = selectedTab === r.id;
-                  return (
-                    <button
-                      key={r.id}
-                      onClick={() => setSelectedTab(r.id)}
-                      className={`relative text-left p-4 rounded-xl border-2 cursor-pointer transition-all ${active ? "border-red-500 bg-red-50/40" : "border-gray-100 hover:border-gray-200"}`}
-                    >
-                      {r.badge && (
-                        <span className="absolute top-3 right-3 text-[10px] font-bold px-2 py-0.5 rounded-full bg-red-100 text-red-600">
-                          {r.badge}
-                        </span>
-                      )}
-                      <div className={`w-8 h-8 rounded-lg flex items-center justify-center mb-2 ${active ? "bg-red-100" : "bg-gray-100"}`}>
-                        <i className={`${r.icon} text-base ${active ? "text-red-600" : "text-gray-400"}`}></i>
-                      </div>
-                      <p className={`text-sm font-semibold ${active ? "text-red-700" : "text-gray-700"}`}>{r.label}</p>
-                      <p className="text-xs text-gray-400 mt-0.5">{r.desc}</p>
-                    </button>
-                  );
-                })}
-              </div>
+              <h3 className="text-sm font-semibold text-gray-900 mb-4">Dosya Seçimi</h3>
+              {uploadsLoading ? (
+                <p className="text-sm text-gray-500">
+                  <i className="ri-loader-4-line animate-spin mr-2" />
+                  Birleştirme yapılmış dosyalar yükleniyor…
+                </p>
+              ) : mergeUploads.length === 0 ? (
+                <p className="text-sm text-gray-500">
+                  Henüz muhatap birleştirmesi yapılmış dosya yok. Mükerrer kayıtlarda farklı
+                  muhatap kodlu bir grubu onaylayıp Kaydet ile birleştirdikten sonra burada
+                  görünür.
+                </p>
+              ) : (
+                <div>
+                  <label className="mb-1.5 block text-xs font-medium text-gray-600">
+                    İncelenip birleştirilmiş yükleme
+                  </label>
+                  <select
+                    value={selectedUploadId ?? ""}
+                    onChange={(e) => selectUpload(e.target.value)}
+                    className="w-full min-w-[280px] cursor-pointer rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-sm focus:border-red-400 focus:outline-none focus:ring-1 focus:ring-red-100"
+                  >
+                    {mergeUploads.map((u) => (
+                      <option key={u.id} value={u.id}>
+                        #{u.id} — {u.file_name} ({u.merge_group_count ?? 0} birleşim,{" "}
+                        {formatUploadDate(u.created_at)})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
             </div>
 
-            {/* Date Range */}
             <div className="bg-white rounded-xl p-5 border border-gray-100">
-              <h3 className="text-sm font-semibold text-gray-900 mb-4">Tarih Aralığı</h3>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-medium text-gray-700 mb-1.5">Başlangıç</label>
-                  <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)}
-                    className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-red-400 cursor-pointer" />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-gray-700 mb-1.5">Bitiş</label>
-                  <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)}
-                    className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-red-400 cursor-pointer" />
-                </div>
-              </div>
-              <div className="flex gap-2 mt-3 flex-wrap">
-                {["Bu Hafta", "Bu Ay", "Son 3 Ay", "Bu Yıl"].map((p) => (
-                  <button key={p} onClick={() => handleQuickDate(p)}
-                    className="text-xs px-3 py-1.5 border border-gray-200 rounded-lg hover:bg-gray-50 cursor-pointer text-gray-600 whitespace-nowrap transition-colors">
-                    {p}
-                  </button>
-                ))}
-                <button onClick={fetchAll} disabled={loading}
-                  className="text-xs px-3 py-1.5 bg-red-600 text-white rounded-lg hover:bg-red-700 cursor-pointer whitespace-nowrap transition-colors disabled:opacity-60">
-                  Filtrele
-                </button>
-              </div>
-            </div>
-
-            {/* Content area */}
-            <div className="bg-white rounded-xl p-5 border border-gray-100">
-              <h3 className="text-sm font-semibold text-gray-900 mb-4">
-                {reportTabs.find((r) => r.id === selectedTab)?.label ?? "Rapor"}
+              <h3 className="text-sm font-semibold text-gray-900 mb-1">
+                {reportTabs[0].label}
               </h3>
+              <p className="text-xs text-gray-500 mb-4">
+                Seçilen dosyadaki onaylı muhatap birleştirmeleri. Her satır tek hedef muhatap
+                koduna indirgenmiş kişiyi temsil eder.
+              </p>
 
-              {loading ? (
-                <div className="py-10 text-center text-gray-400">
-                  <i className="ri-loader-4-line animate-spin text-2xl block mb-2" />
-                  Veriler yükleniyor…
-                </div>
+              {mergeReportLoading ? (
+                <p className="text-sm text-gray-500 py-6 text-center">
+                  <i className="ri-loader-4-line animate-spin mr-2" />
+                  Rapor yükleniyor…
+                </p>
+              ) : mergeReportError ? (
+                <p className="text-sm text-red-600">{mergeReportError}</p>
+              ) : selectedUploadId === null ? (
+                <p className="text-sm text-gray-500 py-6">Dosya seçin.</p>
               ) : (
                 <>
-                  {/* Overview */}
-                  {selectedTab === "overview" && overview && (
-                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
-                      <StatCard label="Toplam Yükleme" value={overview.total_uploads} />
-                      <StatCard label="Normalize Kayıt" value={overview.total_normalized_records.toLocaleString("tr-TR")} />
-                      <StatCard label="Aday Çift" value={overview.total_match_candidates} />
-                      <StatCard label="Onaylanan" value={decisionCounts.approved} color="text-green-600" bg="bg-green-50" />
-                      <StatCard label="Bekleyen" value={decisionCounts.pending} color="text-yellow-600" bg="bg-yellow-50" />
-                      <StatCard label="Reddedilen" value={decisionCounts.rejected} color="text-red-600" bg="bg-red-50" />
-                    </div>
-                  )}
-
-                  {/* Data Quality */}
-                  {selectedTab === "data-quality" && quality && (
-                    <div className="space-y-4">
-                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-                        <StatCard label="Toplam Normalize" value={quality.total_normalized_records.toLocaleString("tr-TR")} />
-                        <StatCard label="Geçerli" value={quality.valid_records.toLocaleString("tr-TR")} color="text-green-600" bg="bg-green-50" />
-                        <StatCard label="Geçersiz" value={quality.invalid_records} color="text-red-600" bg="bg-red-50" />
-                        <StatCard label="Geçerlilik Oranı" value={`%${quality.validity_rate}`} color="text-blue-600" bg="bg-blue-50" />
-                      </div>
-                      <div className="pt-4 border-t border-gray-100 grid grid-cols-2 sm:grid-cols-4 gap-4">
-                        <StatCard label="Standardizasyon Çalışması" value={quality.normalization_runs} />
-                        <StatCard label="İşlenen" value={quality.total_processed.toLocaleString("tr-TR")} />
-                        <StatCard label="Başarılı" value={quality.total_success.toLocaleString("tr-TR")} color="text-green-600" bg="bg-green-50" />
-                        <StatCard label="Hatalı" value={quality.total_failed} color="text-orange-600" bg="bg-orange-50" />
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Detection */}
-                  {selectedTab === "detection" && detection && (
-                    <div className="space-y-4">
-                      {/* Group-level metrics (primary — the meaningful numbers) */}
-                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
-                        <StatCard
-                          label="Mükerrer Grup"
-                          value={(detection.total_duplicate_groups ?? 0).toLocaleString("tr-TR")}
-                          color="text-red-600"
-                          bg="bg-red-50"
-                        />
-                        <StatCard
-                          label="Mükerrer Çift"
-                          value={(detection.total_duplicate_pairs ?? detection.total_match_candidates ?? 0).toLocaleString("tr-TR")}
-                          color="text-orange-600"
-                          bg="bg-orange-50"
-                        />
-                        <StatCard
-                          label="Etkilenen Kayıt"
-                          value={(detection.total_affected_records ?? 0).toLocaleString("tr-TR")}
-                          color="text-amber-600"
-                          bg="bg-amber-50"
-                        />
-                      </div>
-                      {/* Run-level & decision stats */}
-                      <div className="pt-4 border-t border-gray-100 grid grid-cols-2 sm:grid-cols-3 gap-4">
-                        <StatCard label="Tespit Çalışması" value={detection.total_detection_runs} />
-                        <StatCard label="Ort. Skor" value={`%${detection.avg_score_pct}`} color="text-blue-600" bg="bg-blue-50" />
-                        <StatCard label="Onaylanan" value={decisionCounts.approved} color="text-green-600" bg="bg-green-50" />
-                        <StatCard label="Bekleyen" value={decisionCounts.pending} color="text-yellow-600" bg="bg-yellow-50" />
-                        <StatCard label="Reddedilen" value={decisionCounts.rejected} color="text-red-600" bg="bg-red-50" />
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Review */}
-                  {selectedTab === "review" && review && (
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                      <StatCard
-                        label="Toplam İnceleme"
-                        value={decisionCounts.pending + decisionCounts.approved + decisionCounts.rejected}
-                      />
-                      <StatCard label="Onay" value={decisionCounts.approved} color="text-green-600" bg="bg-green-50" />
-                      <StatCard label="Red" value={decisionCounts.rejected} color="text-red-600" bg="bg-red-50" />
-                    </div>
-                  )}
-
-                  {selectedTab === "muhatap-merge" && (
-                    <div className="space-y-4">
-                      <p className="text-xs text-gray-500 leading-relaxed">
-                        Son tespit yükleme ID&apos;si <code className="rounded bg-gray-100 px-1">localStorage.lastDetectUploadId</code> ile
-                        filtrelenir. Liste: yalnızca <strong>farklı muhatap kodlu</strong> ve kayıt sırasında birleşim özeti oluşturulmuş
-                        <strong> onaylı</strong> gruplar. CSV export: her grup için{" "}
-                        <code className="rounded bg-gray-100 px-1">GOLDEN_RECORD</code> satırı, ardından her önceki üye için{" "}
-                        <code className="rounded bg-gray-100 px-1">PRIOR_MATCHED_MEMBER</code> satırı (normalize ve ham JSON sütunlarıyla).
-                      </p>
-                      {mergeReportLoading ? (
-                        <p className="text-sm text-gray-500 py-6 text-center">
-                          <i className="ri-loader-4-line animate-spin mr-2" />
-                          Rapor yükleniyor…
-                        </p>
-                      ) : mergeReportError ? (
-                        <p className="text-sm text-red-600">{mergeReportError}</p>
-                      ) : (
+                  {mergeReportMeta && (
+                    <p className="text-xs text-gray-600 mb-4">
+                      Birleştirilmiş grup: <strong>{mergeReportMeta.totalAll}</strong>
+                      {selectedUpload ? (
                         <>
-                          {mergeReportMeta && (
-                            <p className="text-xs text-gray-600">
-                              Bu sayfada birleşim detayı olan grup:{" "}
-                              <strong>{mergeReportMeta.withDetail}</strong>
-                              {" · "}
-                              Aynı filtrede toplam farklı-muhatap grup (sayfa başına):{" "}
-                              <strong>{mergeReportMeta.totalAll}</strong>
-                            </p>
-                          )}
-                          {mergeReportGroups.length === 0 ? (
-                            <p className="text-sm text-gray-500 py-6">
-                              Henüz kayıtlı birleşim detayı yok. Mükerrer kayıtlarda farklı muhatap kodlu bir grupta
-                              golden kaydı &quot;Kaydet&quot; ile onayladığınızda burada ve CSV exportta görünür.
-                            </p>
-                          ) : (
-                            <div className="space-y-8 max-h-[560px] overflow-y-auto pr-1">
-                              {mergeReportGroups.map((g) => {
-                                const gr = g.golden_record as {
-                                  merged_muhatap_report_line?: string;
-                                  merged_member_snapshots?: Array<
-                                    DuplicateGroupRecord & { muhatap_no_effective?: string }
-                                  >;
-                                  clean_name?: string;
-                                  clean_muhatap_no?: string;
-                                };
-                                const snaps = gr.merged_member_snapshots || [];
-                                const excluded =
-                                  (gr as { excluded_member_snapshots?: typeof snaps })
-                                    .excluded_member_snapshots || [];
-                                return (
-                                  <div
-                                    key={g.group_id}
-                                    className="rounded-xl border border-gray-100 bg-slate-50/60 p-4"
-                                  >
-                                    <div className="flex flex-wrap items-start justify-between gap-2 border-b border-gray-100 pb-2 mb-3">
-                                      <div>
-                                        <p className="text-sm font-semibold text-gray-900">{g.group_id}</p>
-                                        <p className="text-[11px] text-gray-500 mt-0.5">
-                                          Entity #{g.entity_id ?? "—"} · Skor %{(Number(g.group_score || 0) * 100).toFixed(1)}
-                                          {g.muhatap_codes?.length ? (
-                                            <span> · Muhatap kodları: {g.muhatap_codes.join(", ")}</span>
-                                          ) : null}
-                                        </p>
-                                      </div>
-                                      <div className="text-right text-[11px] text-gray-500">
-                                        Golden: {gr.clean_name || "—"} / {gr.clean_muhatap_no || "—"}
-                                      </div>
-                                    </div>
-                                    {gr.merged_muhatap_report_line ? (
-                                      <p className="text-xs text-gray-800 leading-relaxed mb-3">
-                                        {gr.merged_muhatap_report_line}
-                                      </p>
-                                    ) : null}
-                                    <p className="text-[11px] font-semibold text-gray-600 mb-2">
-                                      Birleşime dahil edilen kayıtlar
-                                    </p>
-                                    <div className="overflow-x-auto rounded-lg border border-gray-100 bg-white">
-                                      <table className="w-full min-w-[720px] text-[10px]">
-                                        <thead>
-                                          <tr className="bg-gray-50 text-left text-gray-500">
-                                            <th className="px-2 py-2">Kayıt</th>
-                                            <th className="px-2 py-2">Muhatap</th>
-                                            <th className="px-2 py-2">Ad</th>
-                                            <th className="px-2 py-2">TC</th>
-                                            <th className="px-2 py-2">Tel</th>
-                                            <th className="px-2 py-2">E-posta</th>
-                                            <th className="px-2 py-2">Şehir</th>
-                                            <th className="px-2 py-2">Adres</th>
-                                          </tr>
-                                        </thead>
-                                        <tbody className="divide-y divide-gray-50">
-                                          {snaps.map((row) => (
-                                            <tr key={row.record_id} className="text-gray-800">
-                                              <td className="px-2 py-1.5 font-mono">{row.record_id}</td>
-                                              <td className="px-2 py-1.5 font-medium">
-                                                {row.muhatap_no_effective || row.clean_muhatap_no || "—"}
-                                              </td>
-                                              <td className="px-2 py-1.5">{row.clean_name || "—"}</td>
-                                              <td className="px-2 py-1.5">{row.clean_tc || "—"}</td>
-                                              <td className="px-2 py-1.5">{row.clean_phone || "—"}</td>
-                                              <td className="px-2 py-1.5 break-all">{row.clean_email || "—"}</td>
-                                              <td className="px-2 py-1.5">{row.clean_city || "—"}</td>
-                                              <td className="px-2 py-1.5 max-w-[140px] truncate" title={row.clean_address}>
-                                                {row.clean_address || "—"}
-                                              </td>
-                                            </tr>
-                                          ))}
-                                        </tbody>
-                                      </table>
-                                    </div>
-                                    {excluded.length > 0 ? (
-                                      <>
-                                        <p className="text-[11px] font-semibold text-amber-800 mb-2 mt-4">
-                                          Birleşime dahil edilmeyen kayıtlar (bekleyen grupta)
-                                        </p>
-                                        <div className="overflow-x-auto rounded-lg border border-amber-100 bg-amber-50/40">
-                                          <table className="w-full min-w-[720px] text-[10px]">
-                                            <thead>
-                                              <tr className="bg-amber-50/80 text-left text-amber-900">
-                                                <th className="px-2 py-2">Kayıt</th>
-                                                <th className="px-2 py-2">Muhatap</th>
-                                                <th className="px-2 py-2">Ad</th>
-                                                <th className="px-2 py-2">TC</th>
-                                                <th className="px-2 py-2">Tel</th>
-                                                <th className="px-2 py-2">E-posta</th>
-                                              </tr>
-                                            </thead>
-                                            <tbody className="divide-y divide-amber-100/80">
-                                              {excluded.map((row) => (
-                                                <tr key={`ex-${row.record_id}`} className="text-gray-800">
-                                                  <td className="px-2 py-1.5 font-mono">{row.record_id}</td>
-                                                  <td className="px-2 py-1.5 font-medium">
-                                                    {row.muhatap_no_effective || row.clean_muhatap_no || "—"}
-                                                  </td>
-                                                  <td className="px-2 py-1.5">{row.clean_name || "—"}</td>
-                                                  <td className="px-2 py-1.5">{row.clean_tc || "—"}</td>
-                                                  <td className="px-2 py-1.5">{row.clean_phone || "—"}</td>
-                                                  <td className="px-2 py-1.5 break-all">{row.clean_email || "—"}</td>
-                                                </tr>
-                                              ))}
-                                            </tbody>
-                                          </table>
-                                        </div>
-                                      </>
-                                    ) : null}
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          )}
+                          {" "}
+                          · <span className="text-gray-500">{selectedUpload.file_name}</span>
                         </>
-                      )}
-                    </div>
-                  )}
-
-                  {/* Upload History */}
-                  {selectedTab === "upload-history" && (
-                    <div className="overflow-x-auto">
-                      <table className="w-full text-xs">
-                        <thead>
-                          <tr className="bg-gray-50/70">
-                            <th className="px-4 py-3 text-left font-medium text-gray-400">ID</th>
-                            <th className="px-4 py-3 text-left font-medium text-gray-400">Dosya</th>
-                            <th className="px-4 py-3 text-left font-medium text-gray-400">Kaynak</th>
-                            <th className="px-4 py-3 text-right font-medium text-gray-400">Kayıt</th>
-                            <th className="px-4 py-3 text-left font-medium text-gray-400">Durum</th>
-                            <th className="px-4 py-3 text-left font-medium text-gray-400">Tarih</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-gray-50">
-                          {uploadHistory.length === 0 ? (
-                            <tr>
-                              <td colSpan={6} className="px-4 py-8 text-center text-gray-400">
-                                Yükleme geçmişi bulunamadı.
-                              </td>
-                            </tr>
-                          ) : (
-                            uploadHistory.map((u) => (
-                              <tr key={u.id} className="hover:bg-gray-50/50">
-                                <td className="px-4 py-3 text-gray-500">#{u.id}</td>
-                                <td className="px-4 py-3 text-gray-800 font-medium max-w-[180px] truncate">{u.file_name}</td>
-                                <td className="px-4 py-3 text-gray-500 capitalize">{u.source_type}</td>
-                                <td className="px-4 py-3 text-right text-gray-700 font-medium">{(u.total_records ?? 0).toLocaleString("tr-TR")}</td>
-                                <td className="px-4 py-3">
-                                  <span className={`px-2 py-0.5 rounded-full text-[11px] font-medium ${
-                                    u.status === "completed" ? "bg-green-50 text-green-700" : "bg-yellow-50 text-yellow-700"
-                                  }`}>
-                                    {u.status}
-                                  </span>
-                                </td>
-                                <td className="px-4 py-3 text-gray-400">{formatDate(u.created_at)}</td>
-                              </tr>
-                            ))
-                          )}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-
-                  {/* No data fallback */}
-                  {!loading && !error &&
-                    ((selectedTab === "overview" && !overview) ||
-                      (selectedTab === "data-quality" && !quality) ||
-                      (selectedTab === "detection" && !detection) ||
-                      (selectedTab === "review" && !review)) && (
-                    <p className="text-sm text-gray-400 text-center py-8">
-                      Backend bağlantısı yok veya veri bulunamadı.
+                      ) : null}
                     </p>
+                  )}
+                  {mergeReportGroups.length === 0 ? (
+                    <p className="text-sm text-gray-500 py-6">
+                      Bu dosya için kayıtlı birleşim detayı yok.
+                    </p>
+                  ) : (
+                    <div className="space-y-8 max-h-[640px] overflow-y-auto pr-1">
+                      {mergeReportGroups.map((g) => {
+                        const gr = g.golden_record as {
+                          merged_member_snapshots?: Array<
+                            DuplicateGroupRecord & { muhatap_no_effective?: string }
+                          >;
+                          excluded_member_snapshots?: Array<
+                            DuplicateGroupRecord & { muhatap_no_effective?: string }
+                          >;
+                        };
+                        const snaps = gr.merged_member_snapshots || [];
+                        const excluded = gr.excluded_member_snapshots || [];
+                        return (
+                          <div
+                            key={g.group_id}
+                            className="rounded-xl border border-gray-100 bg-slate-50/60 p-4"
+                          >
+                            <div className="flex flex-wrap items-start justify-between gap-2 border-b border-gray-100 pb-2 mb-3">
+                              <div>
+                                <p className="text-sm font-semibold text-gray-900">
+                                  {g.group_id}
+                                </p>
+                                <p className="text-[11px] text-gray-500 mt-0.5">
+                                  Entity #{g.entity_id ?? "—"} · Skor %
+                                  {(Number(g.group_score || 0) * 100).toFixed(1)}
+                                </p>
+                              </div>
+                            </div>
+                            <MergeTransitionBanner group={g} />
+                            <p className="text-[11px] font-semibold text-gray-600 mb-2">
+                              Birleşime dahil edilen kayıtlar
+                            </p>
+                            <div className="overflow-x-auto rounded-lg border border-gray-100 bg-white">
+                              <table className="w-full min-w-[720px] text-[10px]">
+                                <thead>
+                                  <tr className="bg-gray-50 text-left text-gray-500">
+                                    <th className="px-2 py-2">Kayıt</th>
+                                    <th className="px-2 py-2">Muhatap</th>
+                                    <th className="px-2 py-2">Ad</th>
+                                    <th className="px-2 py-2">TC</th>
+                                    <th className="px-2 py-2">Tel</th>
+                                    <th className="px-2 py-2">E-posta</th>
+                                    <th className="px-2 py-2">Şehir</th>
+                                  </tr>
+                                </thead>
+                                <tbody className="divide-y divide-gray-50">
+                                  {snaps.map((row) => (
+                                    <tr key={row.record_id} className="text-gray-800">
+                                      <td className="px-2 py-1.5 font-mono">{row.record_id}</td>
+                                      <td className="px-2 py-1.5 font-medium">
+                                        {row.muhatap_no_effective || row.clean_muhatap_no || "—"}
+                                      </td>
+                                      <td className="px-2 py-1.5">{row.clean_name || "—"}</td>
+                                      <td className="px-2 py-1.5">{row.clean_tc || "—"}</td>
+                                      <td className="px-2 py-1.5">{row.clean_phone || "—"}</td>
+                                      <td className="px-2 py-1.5 break-all">
+                                        {row.clean_email || "—"}
+                                      </td>
+                                      <td className="px-2 py-1.5">{row.clean_city || "—"}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                            {excluded.length > 0 ? (
+                              <>
+                                <p className="text-[11px] font-semibold text-amber-800 mb-2 mt-4">
+                                  Birleşime dahil edilmeyen kayıtlar
+                                </p>
+                                <div className="overflow-x-auto rounded-lg border border-amber-100 bg-amber-50/40">
+                                  <table className="w-full min-w-[520px] text-[10px]">
+                                    <thead>
+                                      <tr className="bg-amber-50/80 text-left text-amber-900">
+                                        <th className="px-2 py-2">Kayıt</th>
+                                        <th className="px-2 py-2">Muhatap</th>
+                                        <th className="px-2 py-2">Ad</th>
+                                        <th className="px-2 py-2">TC</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-amber-100/80">
+                                      {excluded.map((row) => (
+                                        <tr key={`ex-${row.record_id}`} className="text-gray-800">
+                                          <td className="px-2 py-1.5 font-mono">
+                                            {row.record_id}
+                                          </td>
+                                          <td className="px-2 py-1.5 font-medium">
+                                            {row.muhatap_no_effective ||
+                                              row.clean_muhatap_no ||
+                                              "—"}
+                                          </td>
+                                          <td className="px-2 py-1.5">
+                                            {row.clean_name || "—"}
+                                          </td>
+                                          <td className="px-2 py-1.5">{row.clean_tc || "—"}</td>
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              </>
+                            ) : null}
+                          </div>
+                        );
+                      })}
+                    </div>
                   )}
                 </>
               )}
             </div>
           </div>
 
-          {/* Right: Info panel */}
           <div className="space-y-4">
-            {/* Quick stats from overview */}
             <div className="bg-white rounded-xl p-5 border border-gray-100">
-              <h3 className="text-sm font-semibold text-gray-900 mb-4">Hızlı Özet</h3>
-              {overview ? (
-                <div className="space-y-3 text-sm">
-                  {[
-                    { label: "Yüklemeler", value: overview.total_uploads, icon: "ri-upload-cloud-2-line", color: "text-blue-600" },
-                    { label: "Normalize Kayıt", value: overview.total_normalized_records.toLocaleString("tr-TR"), icon: "ri-database-2-line", color: "text-gray-600" },
-                    { label: "Bekleyen Onay", value: decisionCounts.pending, icon: "ri-time-line", color: "text-yellow-600" },
-                    { label: "Onaylanan", value: decisionCounts.approved, icon: "ri-checkbox-circle-line", color: "text-green-600" },
-                  ].map((s) => (
-                    <div key={s.label} className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <i className={`${s.icon} ${s.color} text-base`}></i>
-                        <span className="text-gray-600">{s.label}</span>
-                      </div>
-                      <span className={`font-semibold ${s.color}`}>{s.value}</span>
-                    </div>
-                  ))}
-                  <p className="text-[10px] text-gray-400 pt-2 border-t border-gray-100">
-                    Bekleyen / onaylanan sayıları yalnızca <strong>farklı muhatap kodlu</strong> eşleşme çiftlerini içerir.
-                  </p>
-                </div>
-              ) : (
-                <p className="text-xs text-gray-400">Backend verisi bekleniyor…</p>
-              )}
-            </div>
-
-            {/* Export info */}
-            <div className="bg-gray-50 rounded-xl p-4 border border-gray-100">
-              <p className="text-xs font-semibold text-gray-700 mb-2">Dışa Aktarma</p>
-              <p className="text-xs text-gray-500 mb-3">
-                Export dosyalari gerçek DB verilerinden üretilir.
+              <h3 className="text-sm font-semibold text-gray-900 mb-3">Dışa Aktarma</h3>
+              <p className="text-xs text-gray-500 mb-4">
+                Seçili dosya için operasyonel çıktılar. Temiz veri seti birleştirilmiş tek
+                muhatap kodlu satırları içerir.
               </p>
               <div className="space-y-2">
                 <button
-                  onClick={() => handleExport("clean")}
-                  disabled={exporting}
-                  className="w-full flex items-center justify-center gap-2 bg-white text-gray-700 text-sm font-semibold py-2.5 rounded-xl border border-gray-200 hover:bg-gray-50 disabled:opacity-60"
+                  type="button"
+                  onClick={() => void handleExportClean()}
+                  disabled={exporting !== null || selectedUploadId === null}
+                  className="w-full flex items-center justify-center gap-2 bg-white text-gray-700 text-sm font-semibold py-2.5 rounded-xl border border-gray-200 hover:bg-gray-50 disabled:opacity-60 cursor-pointer"
                 >
-                  <i className="ri-download-2-line"></i>
-                  clean_dataset.csv
+                  <i
+                    className={
+                      exporting === "clean" ? "ri-loader-4-line animate-spin" : "ri-file-excel-2-line"
+                    }
+                  />
+                  Temiz veri seti (CSV)
                 </button>
                 <button
-                  onClick={() => handleExport("duplicate_groups")}
-                  disabled={exporting}
-                  className="w-full flex items-center justify-center gap-2 bg-white text-gray-700 text-sm font-semibold py-2.5 rounded-xl border border-gray-200 hover:bg-gray-50 disabled:opacity-60"
+                  type="button"
+                  onClick={() => void handleExportPdf()}
+                  disabled={exporting !== null || selectedUploadId === null}
+                  className="w-full flex items-center justify-center gap-2 bg-red-600 text-white text-sm font-semibold py-2.5 rounded-xl hover:bg-red-700 disabled:opacity-60 cursor-pointer"
                 >
-                  <i className="ri-download-2-line"></i>
-                  duplicate_groups.csv
-                </button>
-                <button
-                  onClick={() => handleExport("approved_matches")}
-                  disabled={exporting}
-                  className="w-full flex items-center justify-center gap-2 bg-white text-gray-700 text-sm font-semibold py-2.5 rounded-xl border border-gray-200 hover:bg-gray-50 disabled:opacity-60"
-                >
-                  <i className="ri-download-2-line"></i>
-                  approved_matches.csv
-                </button>
-                <button
-                  onClick={() => handleExport("golden_records")}
-                  disabled={exporting}
-                  className="w-full flex items-center justify-center gap-2 bg-white text-gray-700 text-sm font-semibold py-2.5 rounded-xl border border-gray-200 hover:bg-gray-50 disabled:opacity-60"
-                >
-                  <i className="ri-download-2-line"></i>
-                  golden_records.csv
-                </button>
-                <button
-                  onClick={() => handleExport("muhatap_merge")}
-                  disabled={exporting}
-                  className="w-full flex items-center justify-center gap-2 bg-white text-gray-700 text-sm font-semibold py-2.5 rounded-xl border border-gray-200 hover:bg-gray-50 disabled:opacity-60"
-                >
-                  <i className="ri-download-2-line"></i>
-                  muhatap_merge_detail.csv
+                  <i
+                    className={
+                      exporting === "pdf" ? "ri-loader-4-line animate-spin" : "ri-file-pdf-2-line"
+                    }
+                  />
+                  Muhatap birleştirme (PDF)
                 </button>
               </div>
             </div>

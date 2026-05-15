@@ -211,6 +211,7 @@ export default function MukerrerTespit() {
         <FlowNav
           step="detect"
           uploadId={uploadId}
+          canGoNext={done}
         />
 
         <JobStatusBanner job={detectionJob} />
