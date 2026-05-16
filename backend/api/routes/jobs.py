@@ -4,6 +4,7 @@ import os
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import create_engine
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.orm import Session, sessionmaker
 
 from backend.services.auth_service import get_current_user
@@ -35,20 +36,26 @@ def get_job_status(job_id: int, db: Session = Depends(get_db)):
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job {job_id} bulunamadı")
 
-    run = (
-        db.query(PipelineRun)
-        .filter(PipelineRun.job_id == int(job_id))
-        .order_by(PipelineRun.created_at.desc(), PipelineRun.id.desc())
-        .first()
-    )
+    run = None
     last_event = None
-    if run is not None:
-        last_event = (
-            db.query(PipelineEvent)
-            .filter(PipelineEvent.run_id == int(run.id))
-            .order_by(PipelineEvent.created_at.desc(), PipelineEvent.id.desc())
+    try:
+        run = (
+            db.query(PipelineRun)
+            .filter(PipelineRun.job_id == int(job_id))
+            .order_by(PipelineRun.created_at.desc(), PipelineRun.id.desc())
             .first()
         )
+        if run is not None:
+            last_event = (
+                db.query(PipelineEvent)
+                .filter(PipelineEvent.run_id == int(run.id))
+                .order_by(PipelineEvent.created_at.desc(), PipelineEvent.id.desc())
+                .first()
+            )
+    except ProgrammingError:
+        # Local databases can be missing optional observability tables.
+        # Keep the polling endpoint usable by returning the core job payload.
+        db.rollback()
     return {
         "success": True,
         "job": {

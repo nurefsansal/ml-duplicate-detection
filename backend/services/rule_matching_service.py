@@ -18,6 +18,7 @@ from backend.services.feature_service import (
     build_pair_features,
     email_similarity_score,
     phone_similarity_score,
+    should_suppress_tc_conflict_pair,
 )
 from backend.services.ml_service import predict_match_probability
 from backend.services.normalization_service import (
@@ -696,7 +697,11 @@ def _legacy_detection(
             scoring_weights=scoring_weights,
             decision_thresholds=decision_thresholds,
         )
-        rules_matched = _legacy_rules_matched(payload["features"])
+        features = payload.get("features") or {}
+        if should_suppress_tc_conflict_pair(features):
+            continue
+
+        rules_matched = _legacy_rules_matched(features)
 
         if rules_matched >= min_rules_to_match or float(payload["ml_probability"]) >= 0.30:
             duplicates.append(payload)

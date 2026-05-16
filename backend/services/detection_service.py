@@ -24,6 +24,7 @@ from backend.models.database import (
 )
 from backend.services.job_service import update_job_progress
 from backend.schemas.requests import RecordIn
+from backend.services.feature_service import should_suppress_tc_conflict_pair
 from backend.services.matching_service import (
     DEFAULT_MODEL_VERSION,
     extract_confidence,
@@ -867,6 +868,9 @@ def _persist_match_candidates(
     inserted = 0
 
     for payload in duplicates:
+        if should_suppress_tc_conflict_pair(payload.get("features") or {}):
+            continue
+
         left_index = int(payload.get("left_index", -1))
         right_index = int(payload.get("right_index", -1))
         left_id = index_to_normalized_id.get(left_index)

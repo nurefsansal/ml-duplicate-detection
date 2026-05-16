@@ -16,6 +16,7 @@ from backend.services.advanced_matching_service import (
 )
 from backend.services.feature_service import email_similarity_score, phone_similarity_score
 from backend.services.blocking_service import generate_candidate_pairs
+from backend.services.feature_service import should_suppress_tc_conflict_pair
 from backend.services.resolution_service import resolve_match_decision_with_trace
 from backend.services.decision_thresholds import DecisionThresholdsProb
 from backend.services.scoring_app_settings import (
@@ -1401,15 +1402,18 @@ def run_splink_detection(
         predictions_df = predictions_df.head(effective_max_pairs).copy()
         candidate_pairs_limited = True
 
-    payloads = [
-        _build_payload(
+    payloads: list[dict[str, Any]] = []
+    for row in predictions_df.to_dict(orient="records"):
+        payload = _build_payload(
             df_clean,
             row,
             scoring_weights=scoring_weights,
             decision_thresholds=decision_thresholds,
         )
-        for row in predictions_df.to_dict(orient="records")
-    ]
+        features = payload.get("features") or {}
+        if should_suppress_tc_conflict_pair(features):
+            continue
+        payloads.append(payload)
 
     return DetectionResults(
         payloads,

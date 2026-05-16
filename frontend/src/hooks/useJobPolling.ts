@@ -19,6 +19,7 @@ export function useJobPolling(jobId: number | null | undefined, options?: { inte
         const resp = await getJobStatus(jobId);
         if (!mounted) return;
         setJob(resp.job);
+        setError(null);
         setLoading(false);
         if (resp.job.status === "completed" || resp.job.status === "failed") {
           if (timerRef.current) window.clearInterval(timerRef.current);
@@ -28,6 +29,8 @@ export function useJobPolling(jobId: number | null | undefined, options?: { inte
         if (!mounted) return;
         setError(e instanceof Error ? e.message : String(e));
         setLoading(false);
+        if (timerRef.current) window.clearInterval(timerRef.current);
+        timerRef.current = null;
       }
     };
 

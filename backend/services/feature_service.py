@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 from difflib import SequenceMatcher
 import re
+from typing import Any
 
 from backend.services.advanced_matching_service import (
     hybrid_name_similarity,
@@ -261,3 +264,14 @@ def build_pair_features(left: dict, right: dict) -> dict:
             ]
         ),
     }
+
+
+def should_suppress_tc_conflict_pair(features: dict[str, Any]) -> bool:
+    """TC çakışıyorsa ve telefon/e-posta tam eşleşmiyorsa aday üretilmez."""
+    if int(features.get("tc_conflict", 0) or 0) != 1:
+        return False
+    if int(features.get("phone_exact_match", 0) or 0) == 1:
+        return False
+    if int(features.get("email_exact_match", 0) or 0) == 1:
+        return False
+    return True

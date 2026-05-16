@@ -40,10 +40,6 @@ def _migration_files() -> list[Path]:
     return sorted(Path(__file__).parent.glob("[0-9][0-9][0-9]_*.sql"))
 
 
-def _split_statements(sql_content: str) -> list[str]:
-    return [statement.strip() for statement in sql_content.split(";") if statement.strip()]
-
-
 def _ensure_tracking_table(connection) -> None:
     connection.execute(
         text(
@@ -106,13 +102,25 @@ def run_migration(*, dry_run: bool = False) -> int:
     for migration_file in pending:
         print(f"Applying migration: {migration_file.name}")
         sql_content = migration_file.read_text(encoding="utf-8")
-        statements = _split_statements(sql_content)
 
         try:
-            with engine.begin() as connection:
-                for statement in statements:
-                    connection.execute(text(statement))
-                _mark_applied(connection, migration_file.name)
+            raw_connection = engine.raw_connection()
+            try:
+                cursor = raw_connection.cursor()
+                try:
+                    cursor.execute(sql_content)
+                    cursor.execute(
+                        "INSERT INTO schema_migrations (filename) VALUES (%s)",
+                        (migration_file.name,),
+                    )
+                    raw_connection.commit()
+                finally:
+                    cursor.close()
+            except Exception:
+                raw_connection.rollback()
+                raise
+            finally:
+                raw_connection.close()
         except Exception as exc:  # noqa: BLE001
             try:
                 print(f"ERROR in {migration_file.name}: {exc}", file=sys.stderr)
