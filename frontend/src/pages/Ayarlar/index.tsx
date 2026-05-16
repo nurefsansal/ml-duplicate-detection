@@ -33,6 +33,8 @@ type Settings = {
   maxFileSize: number;
   approvalLimitDays: number;
   emailNotification: string;
+  /** 1 = tek onay (varsayılan); 2+ = Mükerrer Kayıtlar’da ek onay kutusu */
+  mukerrer_merge_min_reviewers: number;
 };
 
 type SavedConnectorProfile = Omit<ConnectorConnectionInput, "password">;
@@ -58,6 +60,7 @@ export default function Ayarlar() {
   const [maxFileSize, setMaxFileSize] = useState(50);
   const [approvalLimitDays, setApprovalLimitDays] = useState(7);
   const [emailNotification, setEmailNotification] = useState("Sadece kritik");
+  const [mergeMinReviewers, setMergeMinReviewers] = useState(1);
   const [loading, setLoading] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);
   const [saveError, setSaveError] = useState(false);
@@ -91,6 +94,12 @@ export default function Ayarlar() {
         setMaxFileSize(Number(parsed.maxFileSize || 50));
         setApprovalLimitDays(Number(parsed.approvalLimitDays || 7));
         setEmailNotification(parsed.emailNotification || "Sadece kritik");
+        setMergeMinReviewers(
+          Math.max(
+            1,
+            Math.min(10, Number(parsed.mukerrer_merge_min_reviewers ?? 1)),
+          ),
+        );
       })
       .catch((e) => {
         console.error("Error loading settings:", e);
@@ -138,6 +147,7 @@ export default function Ayarlar() {
       maxFileSize,
       approvalLimitDays,
       emailNotification,
+      mukerrer_merge_min_reviewers: mergeMinReviewers,
     };
 
     try {
@@ -576,6 +586,31 @@ export default function Ayarlar() {
                     max={90}
                     className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-red-400"
                   />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1.5">
+                    Mükerrer birleştirme — minimum inceleme onayı
+                  </label>
+                  <input
+                    type="number"
+                    value={mergeMinReviewers}
+                    onChange={(e) =>
+                      setMergeMinReviewers(
+                        Math.max(
+                          1,
+                          Math.min(10, Number(e.target.value) || 1),
+                        ),
+                      )
+                    }
+                    min={1}
+                    max={10}
+                    className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-red-400"
+                  />
+                  <p className="mt-1 text-[11px] text-gray-500">
+                    1: tek kullanıcı kaydedebilir. 2 ve üzeri: Mükerrer Kayıtlar’da ek
+                    onay kutusu ve{" "}
+                    <code className="text-[10px]">co_review_acknowledged</code> zorunluluğu.
+                  </p>
                 </div>
                 <div>
                   <label className="block text-xs font-medium text-gray-700 mb-1.5">

@@ -529,6 +529,26 @@ export type PartialApproveGroupResponse = {
   golden_record_id: number | null;
 };
 
+export type MuhatapConflictDetail = {
+  code: "MUHATAP_CONFLICT";
+  proposed_muhatap: string;
+  conflicts: Array<{
+    entity_id: number;
+    canonical_name?: string | null;
+    canonical_muhatap_no?: string | null;
+    upload_id?: number;
+  }>;
+};
+
+export function isMuhatapConflictDetail(v: unknown): v is MuhatapConflictDetail {
+  return (
+    typeof v === "object" &&
+    v !== null &&
+    (v as MuhatapConflictDetail).code === "MUHATAP_CONFLICT" &&
+    Array.isArray((v as MuhatapConflictDetail).conflicts)
+  );
+}
+
 export type GoldenRecordUpdateResponse = {
   success: boolean;
   entity_id: number;
@@ -1205,6 +1225,7 @@ export async function partialApproveGroup(payload: {
   decision?: "pending" | "approved" | "rejected";
   note?: string;
   goldenRecordOverride?: DuplicateGroup["golden_record"];
+  coReviewAcknowledged?: boolean;
 }): Promise<PartialApproveGroupResponse> {
   const body: Record<string, unknown> = {
     record_ids: payload.recordIds,
@@ -1217,9 +1238,58 @@ export async function partialApproveGroup(payload: {
   if (payload.goldenRecordOverride) {
     body.golden_record_override = payload.goldenRecordOverride;
   }
+  if (payload.coReviewAcknowledged) {
+    body.co_review_acknowledged = true;
+  }
   const response = await apiClient.post(
     `/api/v1/matches/group/${encodeURIComponent(payload.groupId)}/partial-approve`,
     body,
+  );
+  return response.data;
+}
+
+export async function mergePendingIntoEntity(payload: {
+  groupId: string;
+  entityId: number;
+  recordIds: number[];
+  approvedRecordIds: number[];
+  uploadId: number;
+  goldenRecordOverride?: DuplicateGroup["golden_record"];
+  note?: string;
+  coReviewAcknowledged?: boolean;
+}): Promise<PartialApproveGroupResponse & Record<string, unknown>> {
+  const body: Record<string, unknown> = {
+    entity_id: payload.entityId,
+    record_ids: payload.recordIds,
+    approved_record_ids: payload.approvedRecordIds,
+    upload_id: payload.uploadId,
+  };
+  if (payload.note) body.note = payload.note;
+  if (payload.goldenRecordOverride) body.golden_record_override = payload.goldenRecordOverride;
+  if (payload.coReviewAcknowledged) body.co_review_acknowledged = true;
+  const response = await apiClient.post(
+    `/api/v1/matches/group/${encodeURIComponent(payload.groupId)}/merge-into-entity`,
+    body,
+  );
+  return response.data;
+}
+
+export async function removeMergeMember(payload: {
+  entityId: number;
+  recordId: number;
+  uploadId: number;
+}): Promise<{
+  success: boolean;
+  entity_id: number;
+  removed_record_id: number;
+  remaining_confirmed_count: number;
+  pending_edge_count?: number;
+  pending_neighbor_record_ids?: number[];
+  likely_visible_in_pending_heuristic?: boolean;
+}> {
+  const response = await apiClient.post(
+    `/api/v1/entities/${payload.entityId}/merge-members/${payload.recordId}/remove`,
+    { upload_id: payload.uploadId },
   );
   return response.data;
 }

@@ -37,6 +37,15 @@ export function DuplicateGroupReviewModal(props: {
   onSave: () => void;
   saving: boolean;
   leftExtra?: ReactNode;
+  /** pending_merge: en az 2 seçim; approved_entity: Golden kaydet + Kaldır */
+  reviewMode?: "pending_merge" | "approved_entity";
+  onRemoveMember?: (recordId: number) => void;
+  primaryActionLabel?: string;
+  /** Tanımlıysa Kaydet düğmesi için doğrudan kullanılır */
+  primaryActionEnabled?: boolean;
+  footerHint?: string;
+  footerStartExtra?: ReactNode;
+  blockingRecordActionId?: number | null;
 }) {
   const { open, group, onClose, onSave, saving } = props;
   const [idx, setIdx] = useState(0);
@@ -47,6 +56,8 @@ export function DuplicateGroupReviewModal(props: {
   const totalRecords = records.length;
   const currentSelected =
     current != null && props.selectedRecordIds.has(current.record_id);
+  const mode = props.reviewMode ?? "pending_merge";
+  const isApprovedEntity = mode === "approved_entity";
 
   useEffect(() => {
     if (!open) return;
@@ -73,7 +84,10 @@ export function DuplicateGroupReviewModal(props: {
     (props.goldenPreview ?? group.golden_record)?.merged_muhatap_report_line,
   );
 
-  const canSave = !saving && selectedCount > 0;
+  const canSave =
+    props.primaryActionEnabled !== undefined
+      ? props.primaryActionEnabled
+      : !saving && selectedCount >= 2;
 
   return (
     <div
@@ -94,14 +108,24 @@ export function DuplicateGroupReviewModal(props: {
               id="duplicate-group-review-title"
               className="text-base font-semibold text-gray-900"
             >
-              Duplicate grup inceleme
+              {isApprovedEntity ? "Onaylı golden grup" : "Duplicate grup inceleme"}
             </h2>
             <p className="mt-1 text-xs text-gray-500">
               Grup {group.group_id}
+              {group.entity_id != null ? (
+                <>
+                  <span className="mx-1.5 text-gray-300">·</span>
+                  entity #{group.entity_id}
+                </>
+              ) : null}
               <span className="mx-1.5 text-gray-300">·</span>
               {totalRecords} kayıt
-              <span className="mx-1.5 text-gray-300">·</span>
-              {selectedCount} seçili
+              {!isApprovedEntity ? (
+                <>
+                  <span className="mx-1.5 text-gray-300">·</span>
+                  {selectedCount} seçili (en az 2 gerekli)
+                </>
+              ) : null}
             </p>
             <p className="mt-1 text-[11px] text-gray-400">
               ← / → kayıt gez, Esc kapat
@@ -160,7 +184,7 @@ export function DuplicateGroupReviewModal(props: {
                 Grup kayıtları
               </div>
               <div className="flex flex-wrap items-center justify-end gap-2">
-                {props.onSelectAllRecords ? (
+                {!isApprovedEntity && props.onSelectAllRecords ? (
                   <button
                     type="button"
                     onClick={props.onSelectAllRecords}
@@ -169,7 +193,7 @@ export function DuplicateGroupReviewModal(props: {
                     Hepsini seç
                   </button>
                 ) : null}
-                {props.onClearAllRecords ? (
+                {!isApprovedEntity && props.onClearAllRecords ? (
                   <button
                     type="button"
                     onClick={props.onClearAllRecords}
@@ -216,22 +240,40 @@ export function DuplicateGroupReviewModal(props: {
                       ) : null}
                     </p>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => props.onToggleRecord(current.record_id)}
-                    className={`inline-flex cursor-pointer items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition-colors ${
-                      currentSelected
-                        ? "border-emerald-600 bg-emerald-600 text-white hover:bg-emerald-700"
-                        : "border-gray-300 bg-white text-gray-700 hover:bg-gray-50"
-                    }`}
-                  >
-                    <i
-                      className={
-                        currentSelected ? "ri-checkbox-circle-fill" : "ri-checkbox-blank-circle-line"
-                      }
-                    />
-                    Seç
-                  </button>
+                  {isApprovedEntity && props.onRemoveMember ? (
+                    <button
+                      type="button"
+                      disabled={props.blockingRecordActionId === current.record_id}
+                      onClick={() => props.onRemoveMember!(current.record_id)}
+                      className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-red-200 bg-white px-3 py-1.5 text-xs font-semibold text-red-700 transition-colors hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {props.blockingRecordActionId === current.record_id ? (
+                        <i className="ri-loader-4-line animate-spin" />
+                      ) : (
+                        <i className="ri-user-unfollow-line" />
+                      )}
+                      Gruptan kaldır
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => props.onToggleRecord(current.record_id)}
+                      className={`inline-flex cursor-pointer items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition-colors ${
+                        currentSelected
+                          ? "border-emerald-600 bg-emerald-600 text-white hover:bg-emerald-700"
+                          : "border-gray-300 bg-white text-gray-700 hover:bg-gray-50"
+                      }`}
+                    >
+                      <i
+                        className={
+                          currentSelected
+                            ? "ri-checkbox-circle-fill"
+                            : "ri-checkbox-blank-circle-line"
+                        }
+                      />
+                      Seç
+                    </button>
+                  )}
                 </div>
                 <dl className="space-y-2 text-sm text-gray-700">
                   <div className="flex gap-2">
@@ -277,10 +319,17 @@ export function DuplicateGroupReviewModal(props: {
         </div>
 
         <div className="flex flex-col gap-3 border-t border-gray-100 bg-gray-50/80 px-6 py-4 sm:flex-row sm:items-center sm:justify-between">
-          <p className="text-xs leading-relaxed text-gray-600">
-            Seçilmeyen kayıtlar birleştirilmeyecek; bekleyen grupta kalır ve yeniden
-            inceleme için kullanılabilir.
-          </p>
+          <div className="min-w-0 space-y-2">
+            {props.footerStartExtra ? (
+              <div className="flex flex-wrap gap-2">{props.footerStartExtra}</div>
+            ) : null}
+            <p className="text-xs leading-relaxed text-gray-600">
+              {props.footerHint ??
+                (isApprovedEntity
+                  ? "Golden alanlarını soldan düzenleyip kaydedin. Gruptan kaldırılan kayıt mümkünse bekleyen incelemede yeniden görünür; yalnız kaldıysa listede görünmeyebilir."
+                  : "Seçilmeyen kayıtlar birleştirilmeyecek; bekleyen grupta kalır ve yeniden inceleme için kullanılabilir. Kaydetmek için en az iki kayıt seçin.")}
+            </p>
+          </div>
           <button
             type="button"
             disabled={!canSave}
@@ -288,7 +337,8 @@ export function DuplicateGroupReviewModal(props: {
             className="inline-flex cursor-pointer items-center justify-center gap-1.5 rounded-lg bg-green-700 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-green-800 disabled:cursor-not-allowed disabled:bg-gray-300"
           >
             <i className={saving ? "ri-loader-4-line animate-spin" : "ri-save-line"} />
-            Kaydet
+            {props.primaryActionLabel ??
+              (isApprovedEntity ? "Golden'ı kaydet" : "Kaydet")}
           </button>
         </div>
       </div>
