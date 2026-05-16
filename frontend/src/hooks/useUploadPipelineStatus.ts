@@ -39,6 +39,7 @@ export function useUploadPipelineStatus(uploadId: number | null) {
     };
   }, [uploadId]);
 
+  
   return {
     status,
     loading,
