@@ -37,11 +37,9 @@ export function DuplicateGroupReviewModal(props: {
   onSave: () => void;
   saving: boolean;
   leftExtra?: ReactNode;
-  /** pending_merge: en az 2 seçim; approved_entity: Golden kaydet + Kaldır */
   reviewMode?: "pending_merge" | "approved_entity";
   onRemoveMember?: (recordId: number) => void;
   primaryActionLabel?: string;
-  /** Tanımlıysa Kaydet düğmesi için doğrudan kullanılır */
   primaryActionEnabled?: boolean;
   footerHint?: string;
   footerStartExtra?: ReactNode;
@@ -108,14 +106,14 @@ export function DuplicateGroupReviewModal(props: {
               id="duplicate-group-review-title"
               className="text-base font-semibold text-gray-900"
             >
-              {isApprovedEntity ? "Onaylı golden grup" : "Duplicate grup inceleme"}
+              {isApprovedEntity ? "Onaylı kayıt grubu" : "Kayıt grubunu incele"}
             </h2>
             <p className="mt-1 text-xs text-gray-500">
               Grup {group.group_id}
               {group.entity_id != null ? (
                 <>
                   <span className="mx-1.5 text-gray-300">·</span>
-                  entity #{group.entity_id}
+                  kayıt grubu #{group.entity_id}
                 </>
               ) : null}
               <span className="mx-1.5 text-gray-300">·</span>
@@ -123,12 +121,12 @@ export function DuplicateGroupReviewModal(props: {
               {!isApprovedEntity ? (
                 <>
                   <span className="mx-1.5 text-gray-300">·</span>
-                  {selectedCount} seçili (en az 2 gerekli)
+                  {selectedCount} seçili (en az 2 kayıt seçin)
                 </>
               ) : null}
             </p>
             <p className="mt-1 text-[11px] text-gray-400">
-              ← / → kayıt gez, Esc kapat
+              ← / → ile kayıtlar arasında geçiş yapın, Esc ile kapatın
             </p>
           </div>
           <button
@@ -144,7 +142,7 @@ export function DuplicateGroupReviewModal(props: {
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden lg:flex-row">
           <div className="min-h-0 flex-1 overflow-y-auto border-b border-gray-100 p-5 lg:border-b-0 lg:border-r">
             <div className="mb-3 text-xs font-semibold uppercase tracking-wide text-green-800">
-              Golden record
+              Birleştirilmiş kayıt özeti
             </div>
             <div className="rounded-xl border border-green-200 bg-green-50/80 p-4">
               <div className="text-lg font-semibold text-gray-900">
@@ -167,7 +165,7 @@ export function DuplicateGroupReviewModal(props: {
               {mergedReportLine ? (
                 <div className="mt-4 rounded-lg border border-green-200 bg-white/80 px-3 py-2 text-xs text-gray-700">
                   <span className="font-medium text-green-800">
-                    Muhatap birleşim özeti:{" "}
+                    Muhatap özeti:{" "}
                   </span>
                   {mergedReportLine}
                 </div>
@@ -181,7 +179,7 @@ export function DuplicateGroupReviewModal(props: {
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-5">
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
               <div className="text-xs font-semibold uppercase tracking-wide text-gray-600">
-                Grup kayıtları
+                Gruptaki kayıtlar
               </div>
               <div className="flex flex-wrap items-center justify-end gap-2">
                 {!isApprovedEntity && props.onSelectAllRecords ? (
@@ -190,7 +188,7 @@ export function DuplicateGroupReviewModal(props: {
                     onClick={props.onSelectAllRecords}
                     className="inline-flex cursor-pointer items-center rounded-lg border border-gray-200 bg-white px-2.5 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50"
                   >
-                    Hepsini seç
+                    Tümünü seç
                   </button>
                 ) : null}
                 {!isApprovedEntity && props.onClearAllRecords ? (
@@ -199,7 +197,7 @@ export function DuplicateGroupReviewModal(props: {
                     onClick={props.onClearAllRecords}
                     className="inline-flex cursor-pointer items-center rounded-lg border border-gray-200 bg-white px-2.5 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50"
                   >
-                    Seçimi kaldır
+                    Seçimi temizle
                   </button>
                 ) : null}
                 <button
@@ -252,7 +250,7 @@ export function DuplicateGroupReviewModal(props: {
                       ) : (
                         <i className="ri-user-unfollow-line" />
                       )}
-                      Gruptan kaldır
+                      Gruptan çıkar
                     </button>
                   ) : (
                     <button
@@ -312,7 +310,7 @@ export function DuplicateGroupReviewModal(props: {
               </div>
             ) : (
               <div className="flex flex-1 items-center justify-center rounded-xl border border-dashed border-gray-200 py-12 text-sm text-gray-400">
-                Bu grupta kayıt yok.
+                Bu grupta gösterilecek kayıt yok.
               </div>
             )}
           </div>
@@ -326,8 +324,8 @@ export function DuplicateGroupReviewModal(props: {
             <p className="text-xs leading-relaxed text-gray-600">
               {props.footerHint ??
                 (isApprovedEntity
-                  ? "Golden alanlarını soldan düzenleyip kaydedin. Gruptan kaldırılan kayıt mümkünse bekleyen incelemede yeniden görünür; yalnız kaldıysa listede görünmeyebilir."
-                  : "Seçilmeyen kayıtlar birleştirilmeyecek; bekleyen grupta kalır ve yeniden inceleme için kullanılabilir. Kaydetmek için en az iki kayıt seçin.")}
+                  ? "Soldaki birleştirilmiş kayıt alanlarını düzenleyip kaydedebilirsiniz. Gruptan çıkarılan kayıt, uygun bir bağlantı varsa yeniden inceleme listesinde görünebilir."
+                  : "Seçmediğiniz kayıtlar bu birleşime dahil edilmez. Kaydetmek için en az iki kayıt seçin.")}
             </p>
           </div>
           <button
@@ -338,7 +336,7 @@ export function DuplicateGroupReviewModal(props: {
           >
             <i className={saving ? "ri-loader-4-line animate-spin" : "ri-save-line"} />
             {props.primaryActionLabel ??
-              (isApprovedEntity ? "Golden'ı kaydet" : "Kaydet")}
+              (isApprovedEntity ? "Birleştirilmiş kaydı kaydet" : "Seçimi kaydet")}
           </button>
         </div>
       </div>

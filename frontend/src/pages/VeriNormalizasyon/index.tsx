@@ -29,6 +29,19 @@ const TARGET_FIELD_OPTIONS = [
   { value: "other", label: "Diğer (atla)" },
 ];
 
+function formatUploadStageLabel(stage: string | null | undefined, status: string | null | undefined): string {
+  const value = (stage || status || "").toLowerCase();
+  if (!value) return "Beklemede";
+  if (value.includes("normalize")) return "Standardize edildi";
+  if (value.includes("detect")) return "Benzer kayıt tarandı";
+  if (value.includes("review")) return "İnceleme bekliyor";
+  if (value.includes("complete")) return "Yükleme tamamlandı";
+  if (value.includes("process")) return "İşleniyor";
+  if (value.includes("fail") || value.includes("error")) return "Hata oluştu";
+  if (value.includes("upload")) return "Dosya yüklendi";
+  return stage || status || "-";
+}
+
 export default function VeriNormalizasyon() {
   const navigate = useNavigate();
   const [, setSearchParams] = useSearchParams();
@@ -150,14 +163,14 @@ export default function VeriNormalizasyon() {
 
       setStatusMessage(
         result.job_id
-          ? `Standardizasyon başlatıldı (Job ID: ${result.job_id}). Arka planda işleniyor…`
-          : "Standardizasyon başlatıldı. Arka planda işleniyor…",
+          ? `Standardizasyon başlatıldı (İş No: ${result.job_id}). Arka planda sürüyor…`
+          : "Standardizasyon başlatıldı. Arka planda sürüyor…",
       );
     } catch (error) {
       setErrorMessage(
         error instanceof Error
           ? error.message
-          : "Standardizasyon sırasında hata oluştu",
+          : "Standardizasyon sırasında bir hata oluştu",
       );
       setProgress(0);
     } finally {
@@ -179,18 +192,18 @@ export default function VeriNormalizasyon() {
       setRunning(false);
       setDone(true);
       setProgress(100);
-      setStatusMessage(
-        normalizeResult
-          ? `Standardizasyon tamamlandı (Run ID: ${normalizeResult.normalization_run_id})`
+        setStatusMessage(
+          normalizeResult
+          ? `Standardizasyon tamamlandı (Çalışma No: ${normalizeResult.normalization_run_id})`
           : "Standardizasyon tamamlandı",
-      );
+        );
     }
     if (normalizationJob.status === "failed") {
       setRunning(false);
       setDone(false);
       setProgress(0);
       setErrorMessage(
-        normalizationJob.error_message || "Standardizasyon sırasında hata oluştu",
+        normalizationJob.error_message || "Standardizasyon sırasında bir hata oluştu",
       );
     }
     if (normalizationJob.status === "running") {
@@ -202,11 +215,11 @@ export default function VeriNormalizasyon() {
     return (
       <DashboardLayout>
         <Header
-          title="Veri Standardizasyon"
-          subtitle="Yüklenen ham kayıtları standart formata dönüştürün ve temiz veri seti oluşturun"
+          title="Standardize Et"
+          subtitle="Yüklediğiniz veriyi ortak bir formata getirip kullanıma hazır hale getirin"
         />
         <div className="flex-1 p-6 text-sm text-gray-600">
-          Yükleme seçilmedi; Veri Yükleme sayfasına yönlendiriliyorsunuz…
+          Yükleme seçilmedi. Veri Yükleme sayfasına yönlendiriliyorsunuz…
         </div>
       </DashboardLayout>
     );
@@ -215,13 +228,13 @@ export default function VeriNormalizasyon() {
   return (
     <DashboardLayout>
       <Header
-        title="Veri Standardizasyon"
-        subtitle="Yüklenen ham kayıtları standart formata dönüştürün ve temiz veri seti oluşturun"
+        title="Standardize Et"
+        subtitle="Yüklediğiniz veriyi ortak bir formata getirip kullanıma hazır hale getirin"
         actions={
           <div className="flex items-center gap-3">
             {backendHealthy === false && (
               <span className="rounded bg-red-50 px-2 py-1 text-xs text-red-600">
-                Backend: Erişilemiyor
+                Sistem: Erişilemiyor
               </span>
             )}
             <button
@@ -234,7 +247,7 @@ export default function VeriNormalizasyon() {
                   running ? "ri-loader-4-line animate-spin" : "ri-play-line"
                 }
               />
-              {running ? "Çalışıyor..." : "Standardizasyonu Çalıştır"}
+              {running ? "Hazırlanıyor..." : "Standardizasyonu Başlat"}
             </button>
           </div>
         }
@@ -251,11 +264,10 @@ export default function VeriNormalizasyon() {
 
         <div className="rounded-xl border border-gray-100 bg-white p-5">
           <h3 className="mb-1 text-sm font-semibold text-gray-900">
-            Yükleme Seç
+            İşlem Yapılacak Dosya
           </h3>
           <p className="mb-3 text-xs text-gray-400">
-            Standardizasyon yapılacak ham veri yüklemesini seçin. Önce Veri Yükleme
-            adımını tamamlamış olmanız gerekir.
+            Standardize edilecek dosyayı seçin. Önce veri yükleme adımını tamamlamış olmanız gerekir.
           </p>
 
           {loadingUploads ? (
@@ -303,7 +315,7 @@ export default function VeriNormalizasyon() {
               {uploads.map((upload) => (
                 <option key={upload.id} value={upload.id}>
                   #{upload.id} — {upload.file_name} ({upload.total_records} kayıt
-                  · {upload.processing_stage ?? upload.status})
+                  · {formatUploadStageLabel(upload.processing_stage, upload.status)})
                 </option>
               ))}
             </select>
@@ -313,11 +325,10 @@ export default function VeriNormalizasyon() {
         {uploadId > 0 && (
           <div className="rounded-xl border border-gray-100 bg-white p-5">
             <h3 className="mb-1 text-sm font-semibold text-gray-900">
-              Kolon Eşleştirme
+              Alan Eşleştirme
             </h3>
             <p className="mb-3 text-xs text-gray-400">
-              Kaynak kolonlarınızı hedef sistem alanlarıyla eşleştirin. Öneriler
-              otomatik doldurulmuştur.
+              Dosyanızdaki alanları sistemde kullanılacak alanlarla eşleştirin. Uygun öneriler otomatik olarak doldurulmuştur.
             </p>
 
             {loadingColumns ? (
@@ -329,8 +340,8 @@ export default function VeriNormalizasyon() {
             ) : (
               <div className="max-h-64 space-y-2 overflow-y-auto">
                 <div className="grid grid-cols-2 gap-2 border-b border-gray-100 px-1 pb-1 text-xs font-medium text-gray-500">
-                  <span>Kaynak Kolon</span>
-                  <span>Hedef Alan</span>
+                  <span>Dosyadaki Alan</span>
+                  <span>Sistemdeki Alan</span>
                 </div>
                 {sourceColumns.map((column) => (
                   <div
@@ -406,7 +417,7 @@ export default function VeriNormalizasyon() {
               >
                 {done
                   ? statusMessage
-                  : `Standardizasyon çalışıyor... %${progress}`}
+                  : `Standardize ediliyor... %${progress}`}
               </p>
               <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-white/60">
                 <div
@@ -440,7 +451,7 @@ export default function VeriNormalizasyon() {
                   value: String(normalizeResult.failed_count),
                 },
                 {
-                  label: "Run ID",
+                  label: "Çalışma No",
                   value: String(normalizeResult.normalization_run_id),
                 },
               ].map((stat) => (
@@ -466,7 +477,7 @@ export default function VeriNormalizasyon() {
                 }
                 className="flex cursor-pointer items-center gap-2 whitespace-nowrap rounded-lg bg-red-600 px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-red-700"
               >
-                <i className="ri-table-line" /> Temiz Veriyi Görüntüle
+                <i className="ri-table-line" /> Hazır Veriyi Gör
               </button>
               <button
                 onClick={() =>
@@ -474,7 +485,7 @@ export default function VeriNormalizasyon() {
                 }
                 className="flex cursor-pointer items-center gap-2 whitespace-nowrap rounded-lg border border-gray-200 px-5 py-2.5 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50"
               >
-                <i className="ri-radar-line" /> Mükerrer Tespite Git
+                <i className="ri-radar-line" /> Benzer Kayıtları Bul
               </button>
             </div>
           </div>

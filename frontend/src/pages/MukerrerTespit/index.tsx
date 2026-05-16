@@ -22,7 +22,6 @@ export default function MukerrerTespit() {
   const navigate = useNavigate();
   const [, setSearchParams] = useSearchParams();
   const uploadId = useRequireUploadId();
-  const [threshold, setThreshold] = useState(75);
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState(0);
   const [done, setDone] = useState(false);
@@ -89,12 +88,11 @@ export default function MukerrerTespit() {
     try {
       const result = await startDetectionFromUpload(uploadId, {
         normalizationRunId: selectedNormalizationRunId,
-        minRulesToMatch: Math.ceil((threshold / 100) * 4),
       });
 
       if (typeof result.jobId === "number") {
         setJobId(result.jobId);
-        setStatusMessage(`Tespit başlatıldı (Job ID: ${result.jobId}). Arka planda işleniyor…`);
+        setStatusMessage(`Tarama başlatıldı (İş No: ${result.jobId}). Arka planda sürüyor…`);
         setProgress(5);
         return;
       }
@@ -117,14 +115,14 @@ export default function MukerrerTespit() {
       const affected = result.affectedRecordCount ?? 0;
       setStatusMessage(
         groupCount > 0
-          ? `Tespit tamamlandı — ${groupCount} mükerrer grup, ${pairCount} çift, ${affected} etkilenen kayıt${
+          ? `Tarama tamamlandı. ${groupCount} benzer grup, ${pairCount} aday çift ve ${affected} etkilenen kayıt bulundu${
               typeof result.detectionRunId === "number"
-                ? ` (Run #${result.detectionRunId})`
+                ? ` (Çalışma No: ${result.detectionRunId})`
                 : ""
             }`
-          : `Tespit tamamlandı — mükerrer kayıt bulunamadı${
+          : `Tarama tamamlandı. Benzer kayıt bulunamadı${
               typeof result.detectionRunId === "number"
-                ? ` (Run #${result.detectionRunId})`
+                ? ` (Çalışma No: ${result.detectionRunId})`
                 : ""
             }`,
       );
@@ -133,7 +131,7 @@ export default function MukerrerTespit() {
         (error as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
       setErrorMessage(
         axiosDetail ||
-          (error instanceof Error ? error.message : "Tespit sırasında hata oluştu."),
+          (error instanceof Error ? error.message : "Tarama sırasında bir hata oluştu."),
       );
       setProgress(0);
     } finally {
@@ -154,14 +152,14 @@ export default function MukerrerTespit() {
     if (detectionJob.status === "running") setRunning(true);
     if (detectionJob.status === "failed") {
       setRunning(false);
-      setErrorMessage(detectionJob.error_message || "Tespit sırasında hata oluştu.");
+      setErrorMessage(detectionJob.error_message || "Tarama sırasında bir hata oluştu.");
       setProgress(0);
     }
     if (detectionJob.status === "completed") {
       setRunning(false);
       setProgress(100);
       setDone(true);
-      setStatusMessage("Tespit tamamlandı. Sonuçlar listeleniyor…");
+      setStatusMessage("Tarama tamamlandı. Sonuçlar hazırlanıyor…");
       const id = uploadId;
       if (id !== null) {
         navigate(`/mukerrer-kayitlar?upload_id=${id}&decision=pending`);
@@ -173,11 +171,11 @@ export default function MukerrerTespit() {
     return (
       <DashboardLayout>
         <Header
-          title="Mükerrer Tespit"
-          subtitle="Standardize edilmiş kayıtlar üzerinden benzer kayıtları tespit edin"
+          title="Benzer Kayıtları Bul"
+          subtitle="Hazırlanan veriler içinde benzer görünen kayıtları tarayın"
         />
         <div className="flex-1 p-6 text-sm text-gray-600">
-          Yükleme seçilmedi; Veri Yükleme sayfasına yönlendiriliyorsunuz…
+          Yükleme seçilmedi. Veri Yükleme sayfasına yönlendiriliyorsunuz…
         </div>
       </DashboardLayout>
     );
@@ -186,13 +184,13 @@ export default function MukerrerTespit() {
   return (
     <DashboardLayout>
       <Header
-        title="Mükerrer Tespit"
-        subtitle="Standardize edilmiş kayıtlar üzerinden benzer kayıtları tespit edin"
+        title="Benzer Kayıtları Bul"
+        subtitle="Hazırlanan veriler içinde benzer görünen kayıtları tarayın"
         actions={
           <div className="flex flex-wrap items-center justify-end gap-2 sm:gap-3">
             {backendHealthy === false && (
               <span className="rounded-lg border border-danger-200 bg-danger-50 px-2.5 py-1 text-xs font-medium text-danger-800">
-                Backend: Erişilemiyor
+                Sistem: Erişilemiyor
               </span>
             )}
             <button
@@ -201,7 +199,7 @@ export default function MukerrerTespit() {
               className="ui-btn-primary disabled:opacity-60"
             >
               <i className={running ? "ri-loader-4-line animate-spin" : "ri-radar-line"} />
-              {running ? `Taranıyor... %${progress}` : "Tespiti Başlat"}
+              {running ? `Taranıyor... %${progress}` : "Taramayı Başlat"}
             </button>
           </div>
         }
@@ -219,11 +217,10 @@ export default function MukerrerTespit() {
         {/* Upload selector */}
         <div className="ui-card p-6 shadow-card-lg">
           <h3 className="mb-3 text-sm font-semibold tracking-tight text-slate-900">
-            Yükleme Seç (Standardize Edilmiş Veri)
+            İşlem Yapılacak Veri
           </h3>
           <p className="mb-3 text-xs text-gray-400">
-            Tespit yapılacak standardize edilmiş veri setini seçin. Önce Veri Yükleme veya
-            Veri Standardizasyon adımını tamamlamış olmanız gerekir.
+            Tarama yapılacak veri setini seçin. Önce veri yükleme ve standardizasyon adımlarını tamamlamış olmanız gerekir.
           </p>
 
           {loadingUploads ? (
@@ -232,9 +229,9 @@ export default function MukerrerTespit() {
             <div className="flex items-start gap-3 rounded-xl border border-amber-100 bg-amber-50 p-4">
               <i className="ri-alert-line text-lg text-amber-500 mt-0.5 flex-shrink-0" />
               <div>
-                <p className="text-sm text-amber-700 font-medium">Standardize edilmiş yükleme yok</p>
+                <p className="text-sm text-amber-700 font-medium">Hazır veri bulunamadı</p>
                 <p className="text-xs text-amber-600 mt-0.5">
-                  Tespit yapabilmek için önce{" "}
+                  Tarama yapabilmek için önce{" "}
                   <button
                     onClick={() => navigate("/veri-yukleme")}
                     className="underline cursor-pointer"
@@ -248,7 +245,7 @@ export default function MukerrerTespit() {
                     }
                     className="underline cursor-pointer"
                   >
-                    Veri Standardizasyon
+                    Standardize Et
                   </button>{" "}
                   adımlarını tamamlayın.
                 </p>
@@ -276,7 +273,7 @@ export default function MukerrerTespit() {
                 {uploads.map((u) => (
                   <option key={u.id} value={u.id}>
                     #{u.id} — {u.file_name} ({u.total_records} kayıt
-                    {u.latest_normalization_run_id ? `, Run #${u.latest_normalization_run_id}` : ""})
+                    {u.latest_normalization_run_id ? `, Çalışma #${u.latest_normalization_run_id}` : ""})
                   </option>
                 ))}
               </select>
@@ -284,11 +281,11 @@ export default function MukerrerTespit() {
               {uploadId > 0 && (
                 <p className="text-xs text-green-600">
                   <i className="ri-checkbox-circle-fill mr-1"></i>
-                  Upload #{uploadId}
+                  Yükleme #{uploadId}
                   {selectedNormalizationRunId
-                    ? ` · Standardizasyon Run #${selectedNormalizationRunId}`
+                    ? ` · Standardizasyon Çalışması #${selectedNormalizationRunId}`
                     : ""}{" "}
-                  — tespit başlatılabilir.
+                  — taramaya hazır.
                 </p>
               )}
             </div>
@@ -309,26 +306,6 @@ export default function MukerrerTespit() {
             <p className="text-sm text-green-700">{statusMessage}</p>
           </div>
         )}
-
-        <div className="max-w-md ui-card p-6 shadow-card">
-            <h3 className="mb-4 text-sm font-semibold tracking-tight text-slate-900">Benzerlik eşiği</h3>
-            <p className="mb-3 text-xs text-slate-500">
-              Tüm aday çiftler inceleme bekliyor olarak kaydedilir; karar Mükerrer Kayıtlar adımında verilir.
-            </p>
-            <div className="mb-4 text-center">
-              <span className="bg-gradient-to-r from-primary-600 to-indigo-600 bg-clip-text text-4xl font-bold tabular-nums text-transparent">
-                %{threshold}
-              </span>
-            </div>
-            <input
-              type="range"
-              min={50}
-              max={100}
-              value={threshold}
-              onChange={(event) => setThreshold(Number(event.target.value))}
-              className="w-full cursor-pointer accent-primary-600"
-            />
-          </div>
 
         {/* Progress */}
         {(running || done) && (
@@ -374,14 +351,14 @@ export default function MukerrerTespit() {
                 bg: "bg-gray-50",
               },
               {
-                label: "Mükerrer Grup",
+                label: "Benzer Grup",
                 value: realResults.duplicateGroupCount ?? 0,
                 icon: "ri-group-line",
                 color: "text-primary-800",
                 bg: "bg-primary-50",
               },
               {
-                label: "Mükerrer Çift",
+                label: "Aday Çift",
                 value: realResults.duplicatePairs ?? 0,
                 icon: "ri-links-line",
                 color: "text-orange-600",
@@ -413,7 +390,7 @@ export default function MukerrerTespit() {
               onClick={() => navigate(`/mukerrer-kayitlar?upload_id=${uploadId}&decision=pending`)}
               className="ui-btn-primary cursor-pointer whitespace-nowrap"
             >
-              <i className="ri-file-copy-2-line"></i> İncele ve birleştir
+              <i className="ri-file-copy-2-line"></i> İnceleme Ekranına Git
             </button>
           </div>
         )}
@@ -422,7 +399,7 @@ export default function MukerrerTespit() {
           <div className="rounded-xl border border-gray-100 bg-white px-5 py-10 text-center">
             <i className="ri-checkbox-circle-line text-3xl text-green-500 mb-2 block"></i>
             <p className="text-sm font-medium text-gray-700">Mükerrer kayıt bulunamadı.</p>
-            <p className="text-xs text-gray-400 mt-1">Seçili veri seti için eşik değerini düşürmeyi deneyin.</p>
+            <p className="text-xs text-gray-400 mt-1">Farklı bir veri seti seçerek veya standardizasyonu kontrol ederek tekrar deneyin.</p>
           </div>
         )}
       </div>

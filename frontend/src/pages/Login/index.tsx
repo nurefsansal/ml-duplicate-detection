@@ -18,7 +18,7 @@ export default function Login() {
       await login({ username, password });
       navigate("/", { replace: true });
     } catch {
-      setError("Giris basarisiz. Kullanici adi veya sifre hatali.");
+      setError("Giriş başarısız. Kullanıcı adı veya şifre hatalı.");
     } finally {
       setLoading(false);
     }
@@ -30,15 +30,15 @@ export default function Login() {
         onSubmit={onSubmit}
         className="w-full max-w-md rounded-2xl border border-gray-100 bg-white p-6 shadow-sm"
       >
-        <h1 className="text-xl font-semibold text-gray-900">Giris Yap</h1>
+        <h1 className="text-xl font-semibold text-gray-900">Giriş Yap</h1>
         <p className="mt-1 text-sm text-gray-500">
-          Yonetim endpointlerine erisim icin oturum acin.
+          Yönetim ekranlarına erişmek için oturum açın.
         </p>
 
         <div className="mt-4 space-y-3">
           <div>
             <label className="mb-1 block text-xs font-medium text-gray-700">
-              Kullanici Adi
+              Kullanıcı Adı
             </label>
             <input
               value={username}
@@ -48,7 +48,7 @@ export default function Login() {
           </div>
           <div>
             <label className="mb-1 block text-xs font-medium text-gray-700">
-              Sifre
+              Şifre
             </label>
             <input
               type="password"
@@ -70,7 +70,7 @@ export default function Login() {
           disabled={loading}
           className="mt-4 w-full rounded-lg bg-red-600 py-2.5 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-60"
         >
-          {loading ? "Giris yapiliyor..." : "Giris Yap"}
+          {loading ? "Giriş yapılıyor..." : "Giriş Yap"}
         </button>
       </form>
     </div>
