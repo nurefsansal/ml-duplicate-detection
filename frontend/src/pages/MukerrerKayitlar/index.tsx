@@ -23,6 +23,7 @@ import { DuplicateGroupReviewModal } from "../../components/feature/DuplicateGro
 import { FlowNav } from "../../components/feature/FlowNav";
 import { useRequireUploadId } from "../../hooks/useRequireUploadId";
 import { useUploadPipelineStatus } from "../../hooks/useUploadPipelineStatus";
+import { formatUploadOptionLabel } from "../../utils/formatUploadDate";
 
 type GoldenField =
   | "clean_name"
@@ -110,18 +111,6 @@ function getRecordMuhatapNoDisplay(record: DuplicateGroupRecord): string {
   const fromPayload = getRecordMuhatapNoForConflict(record);
   if (fromPayload) return fromPayload;
   return pickMuhatapScalar(record.raw_payload?.muhatap_no);
-}
-
-function formatUploadDate(iso: string | null): string {
-  if (!iso) return "—";
-  try {
-    return new Date(iso).toLocaleString("tr-TR", {
-      dateStyle: "short",
-      timeStyle: "short",
-    });
-  } catch {
-    return iso;
-  }
 }
 
 function groupDistinctMuhatapValues(
@@ -568,17 +557,14 @@ export default function MukerrerKayitlar() {
       <DashboardLayout>
         <Header
           title="İnceleme ve Birleştirme"
-          subtitle="Önce benzer kayıt taramasını tamamlayın"
+          subtitle="Önce mükerrer tespiti tamamlayın"
         />
         <div className="flex-1 space-y-5 overflow-y-auto p-6">
           <FlowNav step="review" uploadId={uploadId} canGoNext={false} />
           <div className="rounded-2xl border border-amber-200 bg-amber-50 p-6 text-center">
             <i className="ri-radar-line mb-3 block text-3xl text-amber-600" />
             <p className="text-sm font-semibold text-amber-900">
-              Bu dosya için henüz benzer kayıt taraması yapılmamış
-            </p>
-            <p className="mt-2 text-xs text-amber-800">
-              İnceleme ekranına geçmeden önce benzer kayıt taramasını başlatın.
+              Bu dosya için henüz mükerrer tespit yapılmamış
             </p>
             <button
               type="button"
@@ -586,7 +572,7 @@ export default function MukerrerKayitlar() {
               className="mt-4 inline-flex cursor-pointer items-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700"
             >
               <i className="ri-play-line" />
-              Benzer Kayıt Tarama Ekranına Git
+              Mükerrer Tespit Ekranına Git
             </button>
           </div>
         </div>
@@ -706,8 +692,7 @@ export default function MukerrerKayitlar() {
             >
               {uploads.map((u) => (
                 <option key={u.id} value={u.id}>
-                  #{u.id} — {u.file_name} ({u.total_records} kayıt,{" "}
-                  {formatUploadDate(u.created_at)})
+                  {formatUploadOptionLabel(u)}
                 </option>
               ))}
             </select>

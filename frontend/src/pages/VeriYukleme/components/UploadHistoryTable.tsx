@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { listUploads, type UploadItem } from "../../../services/api";
+import { formatUploadDate, formatUploadIdWithDate } from "../../../utils/formatUploadDate";
 
 const sourceIcon: Record<string, string> = {
   excel: "ri-file-excel-2-line",
@@ -37,21 +38,6 @@ function statusBadge(status: string) {
     return { label: "Hata", cls: "bg-red-50 text-red-600", icon: "ri-error-warning-fill" };
   }
   return { label: "İşleniyor", cls: "bg-yellow-50 text-yellow-700", icon: "ri-loader-4-line" };
-}
-
-function formatDate(iso: string | null): string {
-  if (!iso) return "-";
-  try {
-    return new Date(iso).toLocaleString("tr-TR", {
-      day: "2-digit",
-      month: "2-digit",
-      year: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-  } catch {
-    return iso;
-  }
 }
 
 export default function UploadHistoryTable() {
@@ -130,14 +116,16 @@ export default function UploadHistoryTable() {
                         <span className="max-w-[180px] truncate font-medium text-gray-800">
                           {item.file_name}
                         </span>
-                        <span className="ml-1 text-gray-400">#{item.id}</span>
+                        <span className="ml-1 text-gray-400">
+                          {formatUploadIdWithDate(item.id, item.created_at)}
+                        </span>
                       </div>
                     </td>
                     <td className="px-4 py-3.5 text-gray-500">{sourceLabel(item.source_type)}</td>
                     <td className="px-4 py-3.5 text-right font-medium text-gray-700">
                       {(item.total_records ?? 0).toLocaleString("tr-TR")}
                     </td>
-                    <td className="px-4 py-3.5 text-gray-500">{formatDate(item.created_at)}</td>
+                    <td className="px-4 py-3.5 text-gray-500">{formatUploadDate(item.created_at)}</td>
                     <td className="px-4 py-3.5 text-gray-400">{stageLabel(item.processing_stage)}</td>
                     <td className="px-4 py-3.5">
                       <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-medium ${badge.cls}`}>

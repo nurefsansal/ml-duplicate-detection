@@ -17,6 +17,10 @@ import {
   mapDetectPairToView,
   type UiDuplicatePair,
 } from "../../utils/duplicatePairView";
+import {
+  formatUploadIdWithDate,
+  formatUploadOptionLabel,
+} from "../../utils/formatUploadDate";
 
 export default function MukerrerTespit() {
   const navigate = useNavigate();
@@ -171,8 +175,8 @@ export default function MukerrerTespit() {
     return (
       <DashboardLayout>
         <Header
-          title="Benzer Kayıtları Bul"
-          subtitle="Hazırlanan veriler içinde benzer görünen kayıtları tarayın"
+          title="Mükerrer Tespit"
+          subtitle="Seçili yükleme için mükerrer tespit işlemini başlatın"
         />
         <div className="flex-1 p-6 text-sm text-gray-600">
           Yükleme seçilmedi. Veri Yükleme sayfasına yönlendiriliyorsunuz…
@@ -184,8 +188,8 @@ export default function MukerrerTespit() {
   return (
     <DashboardLayout>
       <Header
-        title="Benzer Kayıtları Bul"
-        subtitle="Hazırlanan veriler içinde benzer görünen kayıtları tarayın"
+        title="Mükerrer Tespit"
+        subtitle="Seçili yükleme için mükerrer tespit işlemini başlatın"
         actions={
           <div className="flex flex-wrap items-center justify-end gap-2 sm:gap-3">
             {backendHealthy === false && (
@@ -272,8 +276,12 @@ export default function MukerrerTespit() {
               >
                 {uploads.map((u) => (
                   <option key={u.id} value={u.id}>
-                    #{u.id} — {u.file_name} ({u.total_records} kayıt
-                    {u.latest_normalization_run_id ? `, Çalışma #${u.latest_normalization_run_id}` : ""})
+                    {formatUploadOptionLabel(
+                      u,
+                      u.latest_normalization_run_id
+                        ? `, Çalışma #${u.latest_normalization_run_id}`
+                        : undefined,
+                    )}
                   </option>
                 ))}
               </select>
@@ -281,7 +289,11 @@ export default function MukerrerTespit() {
               {uploadId > 0 && (
                 <p className="text-xs text-green-600">
                   <i className="ri-checkbox-circle-fill mr-1"></i>
-                  Yükleme #{uploadId}
+                  Yükleme{" "}
+                  {formatUploadIdWithDate(
+                    uploadId,
+                    uploads.find((u) => u.id === uploadId)?.created_at,
+                  )}
                   {selectedNormalizationRunId
                     ? ` · Standardizasyon Çalışması #${selectedNormalizationRunId}`
                     : ""}{" "}

@@ -15,6 +15,7 @@ import InstitutionDbConnectorPanel from "../../components/feature/InstitutionDbC
 import { useJobPolling } from "../../hooks/useJobPolling";
 import { JobStatusBanner } from "../../components/feature/JobStatusBanner";
 import { FlowNav } from "../../components/feature/FlowNav";
+import { formatUploadIdWithDate } from "../../utils/formatUploadDate";
 
 type SourceType = "excel" | "csv" | "api" | "institution";
 
@@ -167,7 +168,9 @@ export default function VeriYukleme() {
           <div className="ui-card p-5">
             <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Yükleme No</p>
             <p className="mt-1 text-2xl font-bold tabular-nums tracking-tight text-slate-900">
-              {result ? `#${result.upload_id}` : "—"}
+              {result?.upload_id
+                ? formatUploadIdWithDate(result.upload_id, new Date().toISOString())
+                : "—"}
             </p>
           </div>
         </div>
@@ -178,7 +181,7 @@ export default function VeriYukleme() {
           <div>
               <p className="text-sm font-semibold text-primary-950">Bu adımda yalnızca ilk veri alınır</p>
               <p className="mt-0.5 text-xs font-medium text-primary-900/80">
-                Dosyanız sisteme kaydedilir. Standardizasyon ve benzer kayıt tarama adımları
+                Dosyanız sisteme kaydedilir. Standardizasyon ve mükerrer tespit adımları
                 bir sonraki ekranda devam eder.
               </p>
           </div>
@@ -284,7 +287,10 @@ export default function VeriYukleme() {
 
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
               {[
-                { label: "Yükleme No", value: String(result.upload_id) },
+                {
+                  label: "Yükleme No",
+                  value: formatUploadIdWithDate(result.upload_id!, new Date().toISOString()),
+                },
                 { label: "Toplam Kayıt", value: String(result.total_records) },
                 { label: "Kaynak", value: formatSourceLabel(result.source_type) },
                 { label: "Kolon Sayısı", value: String(result.source_columns.length) },

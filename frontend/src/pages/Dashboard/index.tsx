@@ -1,360 +1,309 @@
-import { useCallback, useEffect, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { useEffect, useMemo, useState } from "react";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 
 import DashboardLayout from "../../components/feature/DashboardLayout";
+import { FlowNav } from "../../components/feature/FlowNav";
 import Header from "../../components/feature/Header";
+import { resolveActiveUploadId, useDashboardData } from "../../hooks/useDashboardData";
+import { useUploadPipelineStatus } from "../../hooks/useUploadPipelineStatus";
+import type { UploadPipelineStatus } from "../../services/api";
 import { withUploadContext } from "../../utils/uploadContextNav";
 import {
-  getMatches,
-  getReportDataQuality,
-  getReportOverview,
-  getReportReviewSummary,
-  listUploads,
-  type AdminPendingMatch,
-  type ReportDataQuality,
-  type ReportOverview,
-  type ReportReviewSummary,
-  type UploadItem,
-} from "../../services/api";
+  formatUploadDate,
+  formatUploadIdWithDate,
+  formatUploadOptionLabel,
+} from "../../utils/formatUploadDate";
 
-type LoadState<T> = {
-  data: T | null;
-  loading: boolean;
-  error: boolean;
-};
-
-function initialState<T>(): LoadState<T> {
-  return { data: null, loading: true, error: false };
-}
+type FlowStep = "upload" | "standardize" | "detect" | "review" | "reports";
 
 function formatNumber(value: number | undefined | null): string {
   return Number(value || 0).toLocaleString("tr-TR");
 }
 
-function formatDate(value: string | null | undefined): string {
-  if (!value) return "-";
-  try {
-    return new Date(value).toLocaleString("tr-TR", {
-      dateStyle: "short",
-      timeStyle: "short",
-    });
-  } catch {
-    return value;
-  }
+function formatSyncTime(date: Date | null): string {
+  if (!date) return "—";
+  return date.toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" });
 }
 
-function formatUploadStageLabel(stage: string | null | undefined, status: string | null | undefined): string {
+function formatUploadStageLabel(
+  stage: string | null | undefined,
+  status: string | null | undefined,
+): string {
   const value = (stage || status || "").toLowerCase();
   if (!value) return "Beklemede";
   if (value.includes("normalize")) return "Standardize edildi";
-  if (value.includes("detect")) return "Benzer kayıt tarandı";
-  if (value.includes("review")) return "İnceleme bekliyor";
-  if (value.includes("export")) return "Hazır veri oluşturuldu";
-  if (value.includes("complete")) return "Yükleme tamamlandı";
+  if (value.includes("detect")) return "Tarama yapıldı";
+  if (value.includes("review")) return "İnceleme";
+  if (value.includes("export") || value.includes("complete")) return "Tamamlandı";
   if (value.includes("process")) return "İşleniyor";
-  if (value.includes("fail") || value.includes("error")) return "Hata oluştu";
-  if (value.includes("upload")) return "Dosya yüklendi";
-  return stage || status || "-";
+  if (value.includes("fail") || value.includes("error")) return "Hata";
+  if (value.includes("upload")) return "Yüklendi";
+  return stage || status || "—";
 }
 
-function formatReviewGroupLabel(groupId: string | null | undefined): string {
-  if (!groupId) return "İnceleme grubu";
-  if (groupId.startsWith("match_")) return `Aday eşleşme ${groupId.replace("match_", "#")}`;
-  return `Kayıt grubu ${groupId}`;
+function deriveFlowStep(
+  pipeline: UploadPipelineStatus | null,
+  pendingGroupCount: number,
+): FlowStep {
+  if (!pipeline) return "upload";
+  if (!pipeline.has_normalized_records) return "standardize";
+  if (!pipeline.has_detection_run) return "detect";
+  if (pendingGroupCount > 0 || pipeline.can_review) return "review";
+  return "reports";
 }
 
-function SectionMessage({ loading, error }: { loading: boolean; error: boolean }) {
-  if (loading) {
-    return (
-        <div className="py-10 text-center text-sm font-medium text-slate-500">
-          <i className="ri-loader-4-line mb-3 block animate-spin text-2xl text-primary-500" />
-          Veriler yükleniyor...
-      </div>
-    );
-  }
-  if (error) {
-    return (
-        <div className="py-8 text-center text-sm font-medium text-danger-700">Veriler alınamadı</div>
-    );
-  }
-  return null;
+function workflowStatusLabel(
+  pipeline: UploadPipelineStatus | null,
+  pendingTotal: number,
+  ready: boolean,
+): string | null {
+  if (!ready || !pipeline) return null;
+  if (!pipeline.has_normalized_records) return "Sıradaki adım: standardize";
+  if (!pipeline.has_detection_run) return "Sıradaki adım: mükerrer tespit";
+  if (pendingTotal > 0) return `${formatNumber(pendingTotal)} grup inceleme bekliyor`;
+  return "İnceleme tamam — hazır veri kullanılabilir";
 }
 
-function SummaryCard({
-  label,
-  value,
-  tone,
-  icon,
-  to,
-}: {
-  label: string;
-  value: string;
-  tone: "blue" | "yellow" | "green" | "purple";
-  icon: string;
-  to?: string;
-}) {
-  const toneClass = {
-    blue: "border-primary-200/80 bg-gradient-to-br from-primary-50 to-cyan-50/80 text-primary-900 shadow-sm",
-    yellow: "border-amber-200/80 bg-gradient-to-br from-amber-50 to-orange-50/60 text-amber-950 shadow-sm",
-    green: "border-emerald-200/80 bg-gradient-to-br from-emerald-50 to-teal-50/70 text-emerald-950 shadow-sm",
-    purple: "border-violet-200/80 bg-gradient-to-br from-violet-50 to-indigo-50/70 text-violet-950 shadow-sm",
-  }[tone];
-  const content = (
-    <div
-      className={`rounded-2xl border p-5 transition-all duration-200 ${toneClass} ${to ? "hover:-translate-y-0.5 hover:shadow-card-lg" : ""}`}
-    >
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-xs font-semibold uppercase tracking-wide opacity-90">{label}</span>
-        <i className={`${icon} text-xl opacity-90`} />
-      </div>
-      <div className="mt-3 text-3xl font-bold tabular-nums tracking-tight">{value}</div>
-    </div>
-  );
-  return to ? <Link to={to}>{content}</Link> : content;
-}
-
-function QualityBar({ label, value }: { label: string; value: number }) {
-  const color =
-    value < 60 ? "bg-gradient-to-r from-rose-400 to-amber-400" : value <= 85 ? "bg-gradient-to-r from-amber-400 to-primary-400" : "bg-gradient-to-r from-emerald-400 to-teal-500";
-  return (
-    <div>
-      <div className="mb-1.5 flex items-center justify-between text-xs">
-        <span className="font-semibold text-slate-700">{label}</span>
-        <span className="font-bold tabular-nums text-slate-900">%{value.toFixed(1)}</span>
-      </div>
-      <div className="h-2.5 overflow-hidden rounded-full bg-slate-200/80 shadow-inner">
-        <div className={`h-full rounded-full ${color}`} style={{ width: `${Math.min(value, 100)}%` }} />
-      </div>
-    </div>
-  );
-}
-
-function scoreTone(score: number): string {
-  if (score > 0.8) return "border border-emerald-200 bg-emerald-50 text-emerald-900";
-  if (score >= 0.55) return "border border-amber-200 bg-amber-50 text-amber-950";
-  return "border border-slate-200 bg-slate-100 text-slate-700";
+function parseUrlUploadId(raw: string | null): number | null {
+  const parsed = raw ? Number(raw) : NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
 export default function Dashboard() {
   const navigate = useNavigate();
-  const [overview, setOverview] = useState<LoadState<ReportOverview>>(initialState);
-  const [uploads, setUploads] = useState<LoadState<UploadItem[]>>(initialState);
-  const [pending, setPending] = useState<LoadState<AdminPendingMatch[]>>(initialState);
-  const [quality, setQuality] = useState<LoadState<ReportDataQuality>>(initialState);
-  const [reviews, setReviews] = useState<LoadState<ReportReviewSummary>>(initialState);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const urlUploadId = parseUrlUploadId(searchParams.get("upload_id"));
+  const [dataUploadId, setDataUploadId] = useState<number | null>(urlUploadId);
 
-  const loadOverview = useCallback(async () => {
-    setOverview((prev) => ({ ...prev, loading: true, error: false }));
-    try {
-      const data = await getReportOverview();
-      setOverview({ data, loading: false, error: !data.success });
-    } catch {
-      setOverview({ data: null, loading: false, error: true });
-    }
-  }, []);
+  const { uploads, pendingTotal, pendingLoading, lastSyncedAt, refreshing, refresh } =
+    useDashboardData(dataUploadId);
 
-  const loadUploads = useCallback(async () => {
-    setUploads((prev) => ({ ...prev, loading: true, error: false }));
-    try {
-      const data = await listUploads(5);
-      setUploads({ data: data.uploads || [], loading: false, error: false });
-    } catch {
-      setUploads({ data: null, loading: false, error: true });
-    }
-  }, []);
-
-  const loadPending = useCallback(async () => {
-    setPending((prev) => ({ ...prev, loading: true, error: false }));
-    try {
-      const data = await getMatches({ decision: "pending", limit: 5 });
-      setPending({ data: data.matches || [], loading: false, error: false });
-    } catch {
-      setPending({ data: null, loading: false, error: true });
-    }
-  }, []);
-
-  const loadQuality = useCallback(async () => {
-    setQuality((prev) => ({ ...prev, loading: true, error: false }));
-    try {
-      const data = await getReportDataQuality();
-      setQuality({ data, loading: false, error: !data.success });
-    } catch {
-      setQuality({ data: null, loading: false, error: true });
-    }
-  }, []);
-
-  const loadReviews = useCallback(async () => {
-    setReviews((prev) => ({ ...prev, loading: true, error: false }));
-    try {
-      const data = await getReportReviewSummary();
-      setReviews({ data, loading: false, error: !data.success });
-    } catch {
-      setReviews({ data: null, loading: false, error: true });
-    }
-  }, []);
+  const activeUploadId = useMemo(() => {
+    if (!uploads.data?.length) return urlUploadId;
+    return resolveActiveUploadId(uploads.data, urlUploadId);
+  }, [uploads.data, urlUploadId]);
 
   useEffect(() => {
-    loadOverview();
-    const timer = window.setInterval(loadOverview, 60_000);
-    return () => window.clearInterval(timer);
-  }, [loadOverview]);
+    if (activeUploadId !== dataUploadId) {
+      setDataUploadId(activeUploadId);
+    }
+  }, [activeUploadId, dataUploadId]);
+
+  const { status: pipeline, loading: pipelineLoading } = useUploadPipelineStatus(activeUploadId);
 
   useEffect(() => {
-    loadUploads();
-    loadPending();
-    loadQuality();
-    loadReviews();
-  }, [loadPending, loadQuality, loadReviews, loadUploads]);
+    if (uploads.loading || !uploads.data?.length || activeUploadId === null) return;
+    if (urlUploadId === activeUploadId) return;
+    setSearchParams(
+      (p) => {
+        p.set("upload_id", String(activeUploadId));
+        return p;
+      },
+      { replace: true },
+    );
+  }, [
+    activeUploadId,
+    urlUploadId,
+    uploads.loading,
+    uploads.data,
+    setSearchParams,
+  ]);
 
-  const latestUpload = uploads.data?.[0] ?? null;
-  const totalNormalized = overview.data?.total_normalized_records || 0;
-  const totalCandidates = overview.data?.total_match_candidates || 0;
-  const duplicateRate = totalNormalized > 0 ? (totalCandidates / totalNormalized) * 100 : 0;
+  const activeUpload = useMemo(
+    () => uploads.data?.find((u) => u.id === activeUploadId) ?? null,
+    [uploads.data, activeUploadId],
+  );
 
-  const pipeline = [
-    { label: "Yükleme", to: "/veri-yukleme", count: latestUpload?.total_records || 0, date: latestUpload?.created_at },
-    {
-      label: "Standardize Et",
-      to: latestUpload
-        ? `/veri-normalizasyon?upload_id=${latestUpload.id}`
-        : withUploadContext("/veri-normalizasyon"),
-      count: latestUpload?.latest_normalization_run_id ? latestUpload.total_records : 0,
-      date: latestUpload?.completed_at || latestUpload?.created_at,
-    },
-    {
-      label: "Benzer Kayıt Tarama",
-      to: latestUpload
-        ? `/mukerrer-tespit?upload_id=${latestUpload.id}`
-        : withUploadContext("/mukerrer-tespit"),
-      count: totalCandidates,
-      date: latestUpload?.created_at,
-    },
-    {
-      label: "İnceleme Kuyruğu",
-      to: latestUpload
-        ? `/mukerrer-kayitlar?upload_id=${latestUpload.id}&decision=pending`
-        : withUploadContext("/mukerrer-kayitlar?decision=pending"),
-      count: overview.data?.pending || 0,
-      date: latestUpload?.created_at,
-    },
-    {
-      label: "Hazır Veri",
-      to: latestUpload
-        ? `/temiz-veri-seti?upload_id=${latestUpload.id}`
-        : withUploadContext("/temiz-veri-seti"),
-      count: totalNormalized,
-      date: latestUpload?.completed_at || latestUpload?.created_at,
-    },
-  ];
+  const flowStep = deriveFlowStep(pipeline, pendingTotal);
+  const pipelineReady = !pipelineLoading && !pendingLoading;
+  const statusHint = workflowStatusLabel(pipeline, pendingTotal, pipelineReady);
+
+  const reviewLink =
+    activeUploadId !== null
+      ? `/mukerrer-kayitlar?upload_id=${activeUploadId}&decision=pending`
+      : withUploadContext("/mukerrer-kayitlar?decision=pending");
+
+  const nextStepPath = useMemo(() => {
+    if (activeUploadId === null) return "/veri-yukleme";
+    if (!pipeline?.has_normalized_records) {
+      return `/veri-normalizasyon?upload_id=${activeUploadId}`;
+    }
+    if (!pipeline?.has_detection_run) {
+      return `/mukerrer-tespit?upload_id=${activeUploadId}`;
+    }
+    if (pendingTotal > 0) return reviewLink;
+    return `/temiz-veri-seti?upload_id=${activeUploadId}`;
+  }, [activeUploadId, pipeline, pendingTotal, reviewLink]);
+
+  const nextStepLabel = useMemo(() => {
+    if (activeUploadId === null) return "Veri yükle";
+    if (!pipeline?.has_normalized_records) return "Standardize et";
+    if (!pipeline?.has_detection_run) return "Mükerrer tespit çalıştır";
+    if (pendingTotal > 0) return `${formatNumber(pendingTotal)} grup incele`;
+    return "Hazır veriyi görüntüle";
+  }, [activeUploadId, pipeline, pendingTotal]);
+
+  const selectUpload = (raw: string) => {
+    const id = Number(raw);
+    if (!Number.isFinite(id) || id <= 0) return;
+    localStorage.setItem("lastDetectUploadId", String(id));
+    localStorage.setItem("lastUploadId", String(id));
+    setSearchParams((p) => {
+      p.set("upload_id", String(id));
+      return p;
+    });
+  };
 
   return (
     <DashboardLayout>
       <Header
         title="Genel Bakış"
-        subtitle="Yüklemeler, inceleme yoğunluğu ve veri kalitesi tek ekranda"
+        subtitle="Aktif dosya ve iş akışı"
         actions={
-          <button
-            onClick={() => {
-              loadOverview();
-              loadUploads();
-              loadPending();
-              loadQuality();
-              loadReviews();
-            }}
-            className="ui-btn-secondary"
-          >
-            <i className="ri-refresh-line" />
-            Yenile
-          </button>
+          <div className="flex items-center gap-3">
+            {lastSyncedAt ? (
+              <span className="hidden text-xs text-slate-500 sm:inline">
+                Güncellendi: {formatSyncTime(lastSyncedAt)}
+              </span>
+            ) : null}
+            <button
+              type="button"
+              onClick={() => void refresh(activeUploadId)}
+              disabled={refreshing}
+              className="ui-btn-secondary"
+            >
+              <i className={`ri-refresh-line ${refreshing ? "animate-spin" : ""}`} aria-hidden />
+              Yenile
+            </button>
+          </div>
         }
       />
 
       <div className="flex-1 space-y-6 overflow-y-auto p-6 lg:p-8">
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          {overview.error ? (
-            <div className="col-span-full rounded-2xl border border-danger-200 bg-danger-50 p-4 text-sm font-medium text-danger-700 shadow-sm">
-              Veriler alınamadı
+        <section className="ui-card overflow-hidden shadow-card-lg">
+          <div className="flex flex-col gap-4 border-b border-slate-100 p-5 sm:flex-row sm:items-center sm:justify-between">
+            <div className="min-w-0 flex-1">
+              {uploads.loading ? (
+                <p className="text-sm text-slate-500">Yükleniyor…</p>
+              ) : activeUpload ? (
+                <>
+                  <label
+                    htmlFor="dashboard-upload-select"
+                    className="mb-1.5 block text-xs font-medium text-slate-600"
+                  >
+                    Yükleme Seçin
+                  </label>
+                  <select
+                    id="dashboard-upload-select"
+                    value={activeUploadId ?? ""}
+                    onChange={(e) => selectUpload(e.target.value)}
+                    className="w-full max-w-md cursor-pointer rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-900 focus:border-primary-400 focus:outline-none focus:ring-2 focus:ring-primary-500/20"
+                  >
+                    {uploads.data!.map((u) => (
+                      <option key={u.id} value={u.id}>
+                        {formatUploadOptionLabel(u)}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="mt-1.5 text-sm text-slate-500">
+                    {formatNumber(activeUpload.total_records)} kayıt ·{" "}
+                    {formatUploadStageLabel(activeUpload.processing_stage, activeUpload.status)} ·{" "}
+                    {formatUploadDate(activeUpload.created_at)}
+                  </p>
+                  {statusHint ? (
+                    <p className="mt-1 text-xs font-medium text-primary-700">{statusHint}</p>
+                  ) : !pipelineReady ? (
+                    <p className="mt-1 text-xs text-slate-400">Durum güncelleniyor…</p>
+                  ) : null}
+                </>
+              ) : (
+                <>
+                  <h2 className="text-lg font-semibold text-slate-900">Henüz yükleme yok</h2>
+                  <p className="mt-1 text-sm text-slate-500">Başlamak için veri dosyası yükleyin.</p>
+                </>
+              )}
+            </div>
+
+            <button
+              type="button"
+              onClick={() => navigate(activeUpload ? nextStepPath : "/veri-yukleme")}
+              disabled={uploads.loading}
+              className="ui-btn-primary w-full shrink-0 sm:w-auto"
+            >
+              {activeUpload ? nextStepLabel : "Veri yükle"}
+              <i className="ri-arrow-right-line text-lg" aria-hidden />
+            </button>
+          </div>
+
+          {activeUploadId !== null && !uploads.loading && (
+            <div className="p-4 sm:p-5">
+              <FlowNav uploadId={activeUploadId} step={flowStep} />
+            </div>
+          )}
+        </section>
+
+        <section className="ui-card overflow-hidden shadow-card">
+          <div className="border-b border-slate-100 px-5 py-3">
+            <h3 className="text-sm font-semibold text-slate-900">Son yüklemeler</h3>
+          </div>
+
+          {uploads.loading ? (
+            <p className="py-10 text-center text-sm text-slate-500">Yükleniyor…</p>
+          ) : uploads.error ? (
+            <div className="py-10 text-center">
+              <p className="text-sm text-danger-700">Yüklemeler alınamadı</p>
+              <button
+                type="button"
+                onClick={() => void refresh(activeUploadId)}
+                className="ui-btn-secondary mt-3 text-xs"
+              >
+                Tekrar dene
+              </button>
             </div>
           ) : (
-            <>
-              <SummaryCard label="Hazır Kayıt" value={overview.loading ? "..." : formatNumber(totalNormalized)} tone="blue" icon="ri-database-2-line" />
-              <SummaryCard
-                label="Bekleyen İnceleme"
-                value={overview.loading ? "..." : formatNumber(overview.data?.pending)}
-                tone="yellow"
-                icon="ri-time-line"
-                to={
-                  latestUpload
-                    ? `/mukerrer-kayitlar?upload_id=${latestUpload.id}&decision=pending`
-                    : withUploadContext("/mukerrer-kayitlar?decision=pending")
-                }
-              />
-               <SummaryCard label="Onaylanan Karar" value={overview.loading ? "..." : formatNumber(overview.data?.approved)} tone="green" icon="ri-checkbox-circle-line" />
-               <SummaryCard label="Benzerlik Oranı" value={overview.loading ? "..." : `%${duplicateRate.toFixed(1)}`} tone="purple" icon="ri-percent-line" />
-            </>
-          )}
-        </div>
-
-        <div className="ui-card p-6 shadow-card-lg">
-          <div className="mb-4 text-sm font-semibold tracking-tight text-slate-900">İş Akışı Özeti</div>
-          <SectionMessage loading={uploads.loading || overview.loading} error={uploads.error || overview.error} />
-          {!uploads.loading && !overview.loading && !uploads.error && !overview.error && (
-            <div className="grid grid-cols-1 gap-3 md:grid-cols-5">
-              {pipeline.map((step, index) => (
-                <button
-                  key={step.label}
-                  onClick={() => navigate(step.to)}
-                  className="cursor-pointer rounded-2xl border border-slate-200/90 bg-slate-50/80 p-4 text-left shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:border-primary-200 hover:bg-white hover:shadow-card"
-                >
-                  <div className="flex items-center justify-between text-sm font-semibold text-slate-900">
-                    <span>{step.label}</span>
-                    {index < pipeline.length - 1 && <i className="ri-arrow-right-line text-slate-300" />}
-                  </div>
-                  <div className="mt-2 text-xs font-medium text-slate-500">{formatDate(step.date)}</div>
-                  <div className="mt-1 text-xs font-semibold text-slate-700">{formatNumber(step.count)} kayıt</div>
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-
-        <div className="grid grid-cols-1 gap-5 xl:grid-cols-5">
-          <div className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-card xl:col-span-3">
-            <div className="border-b border-slate-100 bg-slate-50/50 px-5 py-4 text-sm font-semibold tracking-tight text-slate-900">
-              Son Yüklemeler
-            </div>
-            <SectionMessage loading={uploads.loading} error={uploads.error} />
-            {!uploads.loading && !uploads.error && (
-              <div className="overflow-x-auto">
-                <table className="w-full text-xs">
-                  <thead>
-                    <tr className="border-b border-slate-100 bg-slate-50/90">
-                      <th className="px-4 py-3.5 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
-                        Dosya adı
-                      </th>
-                      <th className="px-4 py-3.5 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
-                        Kayıt
-                      </th>
-                      <th className="px-4 py-3.5 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
-                        Durum
-                      </th>
-                      <th className="px-4 py-3.5 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
-                        Tarih
-                      </th>
-                      <th className="px-4 py-3.5 text-right text-xs font-semibold uppercase tracking-wide text-slate-500">
-                        İşlem
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-50">
-                    {(uploads.data || []).map((upload) => (
-                      <tr key={upload.id} className="transition-colors hover:bg-primary-50/40">
-                        <td className="px-4 py-3.5 font-medium text-slate-900">{upload.file_name}</td>
-                        <td className="px-4 py-3.5 tabular-nums text-slate-600">{formatNumber(upload.total_records)}</td>
-                        <td className="px-4 py-3.5 text-slate-600">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-slate-100 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    <th className="px-5 py-3">Dosya</th>
+                    <th className="px-4 py-3">Kayıt</th>
+                    <th className="px-4 py-3">Durum</th>
+                    <th className="px-4 py-3 text-right">Devam</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-50">
+                  {(uploads.data || []).map((upload) => {
+                    const isActive = upload.id === activeUploadId;
+                    return (
+                      <tr
+                        key={upload.id}
+                        className={isActive ? "bg-primary-50/60" : "hover:bg-slate-50/80"}
+                      >
+                        <td className="px-5 py-3">
+                          <button
+                            type="button"
+                            onClick={() => selectUpload(String(upload.id))}
+                            className={`max-w-[320px] truncate text-left font-medium ${
+                              isActive
+                                ? "text-primary-800"
+                                : "text-slate-900 hover:text-primary-700"
+                            }`}
+                          >
+                            {formatUploadIdWithDate(upload.id, upload.created_at)} —{" "}
+                            {upload.file_name}
+                            {isActive ? (
+                              <span className="ml-2 text-[10px] font-semibold text-primary-600">
+                                (aktif)
+                              </span>
+                            ) : null}
+                          </button>
+                        </td>
+                        <td className="px-4 py-3 tabular-nums text-slate-600">
+                          {formatNumber(upload.total_records)}
+                        </td>
+                        <td className="px-4 py-3 text-slate-600">
                           {formatUploadStageLabel(upload.processing_stage, upload.status)}
                         </td>
-                        <td className="px-4 py-3.5 text-slate-500">{formatDate(upload.created_at)}</td>
                         <td className="px-4 py-3 text-right">
                           <Link
                             to={
@@ -362,102 +311,31 @@ export default function Dashboard() {
                                 ? `/mukerrer-tespit?upload_id=${upload.id}`
                                 : `/veri-normalizasyon?upload_id=${upload.id}`
                             }
-                            className="inline-flex items-center gap-1 rounded-lg bg-gradient-to-r from-primary-600 to-primary-700 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:from-primary-500 hover:to-primary-600"
+                            className="text-xs font-semibold text-primary-700 hover:underline"
                           >
-                            {upload.latest_normalization_run_id ? "Benzerleri Tara" : "Standardize Et"}
+                            {upload.latest_normalization_run_id ? "Tarama" : "Standardize"}
                           </Link>
                         </td>
                       </tr>
-                    ))}
-                    {(uploads.data || []).length === 0 && (
-                      <tr>
-                        <td colSpan={5} className="px-5 py-12 text-center text-sm font-medium text-slate-400">
-                          Yükleme bulunamadı.
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
-
-          <div className="rounded-2xl border border-slate-200/80 bg-white shadow-card xl:col-span-2">
-            <div className="border-b border-slate-100 bg-slate-50/50 px-5 py-4 text-sm font-semibold tracking-tight text-slate-900">
-              Bekleyen İncelemeler
+                    );
+                  })}
+                  {(uploads.data || []).length === 0 && (
+                    <tr>
+                      <td colSpan={4} className="px-5 py-10 text-center text-slate-400">
+                        <Link
+                          to="/veri-yukleme"
+                          className="font-semibold text-primary-700 hover:underline"
+                        >
+                          Veri yükle
+                        </Link>
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
             </div>
-            <SectionMessage loading={pending.loading} error={pending.error} />
-            {!pending.loading && !pending.error && (
-              <div className="divide-y divide-gray-50">
-                {(pending.data || []).map((match) => {
-                  const score = Number(match.confidence ?? match.score ?? 0);
-                  return (
-                    <div key={match.id} className="space-y-3 px-5 py-4">
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0 text-xs font-medium text-gray-800">
-                          <span className="block truncate">{match.donor1_name || "-"}</span>
-                          <span className="text-gray-400">↔</span>
-                          <span className="block truncate">{match.donor2_name || "-"}</span>
-                        </div>
-                        <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${scoreTone(score)}`}>%{(score * 100).toFixed(1)}</span>
-                      </div>
-                      <Link
-                        to={withUploadContext(`/mukerrer-kayitlar?group_id=match_${match.id}`)}
-                        className="inline-flex items-center gap-1 text-xs font-semibold text-primary-700 hover:text-primary-600 hover:underline"
-                      >
-                        İncele <i className="ri-arrow-right-line" />
-                      </Link>
-                    </div>
-                  );
-                })}
-                {(pending.data || []).length === 0 && (
-                  <div className="py-10 text-center text-sm font-medium text-slate-400">Bekleyen inceleme yok.</div>
-                )}
-              </div>
-            )}
-          </div>
-        </div>
-
-        <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
-          <div className="ui-card p-6 shadow-card-lg">
-            <h3 className="mb-5 text-sm font-semibold tracking-tight text-slate-900">Veri Kalitesi Özeti</h3>
-            <SectionMessage loading={quality.loading} error={quality.error} />
-            {!quality.loading && !quality.error && quality.data && (
-              <div className="space-y-4">
-                <QualityBar label="TC doluluğu" value={quality.data.tc_fill_rate ?? quality.data.validity_rate ?? 0} />
-                <QualityBar label="Telefon doluluğu" value={quality.data.phone_fill_rate ?? 0} />
-                <QualityBar label="E-mail doluluğu" value={quality.data.email_fill_rate ?? 0} />
-              </div>
-            )}
-          </div>
-
-          <div className="rounded-2xl border border-slate-200/80 bg-white shadow-card">
-            <div className="border-b border-slate-100 bg-slate-50/50 px-5 py-4 text-sm font-semibold tracking-tight text-slate-900">
-              Son İnceleme Kararları
-            </div>
-            <SectionMessage loading={reviews.loading} error={reviews.error} />
-            {!reviews.loading && !reviews.error && (
-              <div className="divide-y divide-gray-50">
-                {(reviews.data?.recent_reviews || []).map((review) => {
-                  const approved = review.decision === "approved";
-                  return (
-                    <div key={review.id} className="grid grid-cols-[1fr_auto_auto] items-center gap-3 px-5 py-3 text-xs">
-                      <div>
-                        <div className="font-medium text-gray-800">{review.user || "Sistem"}</div>
-                        <div className="text-gray-400">{formatReviewGroupLabel(review.group_id)}</div>
-                      </div>
-                      <span className={approved ? "font-semibold text-emerald-700" : "font-semibold text-danger-700"}>
-                        {approved ? "✓ Onay" : "✗ Red"}
-                      </span>
-                      <span className="text-gray-400">{formatDate(review.date)}</span>
-                    </div>
-                  );
-                })}
-                {(reviews.data?.recent_reviews || []).length === 0 && <div className="py-8 text-center text-sm text-gray-400">Karar bulunamadı.</div>}
-              </div>
-            )}
-          </div>
-        </div>
+          )}
+        </section>
       </div>
     </DashboardLayout>
   );
