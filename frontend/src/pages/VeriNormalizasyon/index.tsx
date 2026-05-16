@@ -16,6 +16,7 @@ import {
 import { useJobPolling } from "../../hooks/useJobPolling";
 import { JobStatusBanner } from "../../components/feature/JobStatusBanner";
 import { FlowNav } from "../../components/feature/FlowNav";
+import { formatUploadOptionLabel } from "../../utils/formatUploadDate";
 
 const TARGET_FIELD_OPTIONS = [
   { value: "", label: "— eşleştirme yok —" },
@@ -314,8 +315,10 @@ export default function VeriNormalizasyon() {
             >
               {uploads.map((upload) => (
                 <option key={upload.id} value={upload.id}>
-                  #{upload.id} — {upload.file_name} ({upload.total_records} kayıt
-                  · {formatUploadStageLabel(upload.processing_stage, upload.status)})
+                  {formatUploadOptionLabel(
+                    upload,
+                    ` · ${formatUploadStageLabel(upload.processing_stage, upload.status)}`,
+                  )}
                 </option>
               ))}
             </select>
@@ -485,7 +488,7 @@ export default function VeriNormalizasyon() {
                 }
                 className="flex cursor-pointer items-center gap-2 whitespace-nowrap rounded-lg border border-gray-200 px-5 py-2.5 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50"
               >
-                <i className="ri-radar-line" /> Benzer Kayıtları Bul
+                <i className="ri-radar-line" /> Mükerrer Tespit Çalıştır
               </button>
             </div>
           </div>

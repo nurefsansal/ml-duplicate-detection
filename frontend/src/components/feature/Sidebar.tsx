@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 
+import BrandMark, { BrandIcon } from "./BrandMark";
 import { withUploadContext } from "../../utils/uploadContextNav";
 
 const navItems = [
@@ -9,7 +10,7 @@ const navItems = [
   { path: "/ham-veri", icon: "ri-table-2", label: "Yüklenen Veri" },
   { path: "/veri-normalizasyon", icon: "ri-filter-3-line", label: "Standardize Et" },
   { path: "/temiz-veri-seti", icon: "ri-table-line", label: "Hazır Veri" },
-  { path: "/mukerrer-tespit", icon: "ri-search-eye-line", label: "Benzer Kayıtları Bul" },
+  { path: "/mukerrer-tespit", icon: "ri-search-eye-line", label: "Mükerrer Tespit" },
   { path: "/mukerrer-kayitlar", icon: "ri-file-copy-2-line", label: "İnceleme ve Birleştirme" },
   { path: "/ayarlar", icon: "ri-settings-4-line", label: "Ayarlar" },
   { path: "/raporlar", icon: "ri-bar-chart-box-line", label: "Raporlar" },
@@ -31,27 +32,9 @@ export default function Sidebar() {
       <div
         className={`relative flex items-center border-b border-slate-800/80 py-5 ${collapsed ? "justify-center px-2" : "px-5"}`}
       >
-        {!collapsed && (
-          <div className="flex flex-1 items-center gap-3">
-            <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-primary-500 to-indigo-600 shadow-lg shadow-primary-900/40">
-              <i className="ri-stack-line text-lg text-white" aria-hidden />
-            </div>
-            <div className="min-w-0">
-              <p className="text-sm font-semibold leading-tight tracking-tight text-white">
-                Kayıt Kalite Sistemi
-              </p>
-              <p className="mt-0.5 text-[11px] font-medium text-slate-500">
-                Veri hazırlama ve inceleme paneli
-              </p>
-            </div>
-          </div>
-        )}
+        {!collapsed && <BrandMark variant="sidebar" className="flex-1" />}
 
-        {collapsed && (
-          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-primary-500 to-indigo-600 shadow-lg">
-            <i className="ri-stack-line text-lg text-white" />
-          </div>
-        )}
+        {collapsed && <BrandIcon />}
 
         {!collapsed && (
           <button

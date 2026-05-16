@@ -7,8 +7,11 @@ import { useRequireUploadId } from "../../hooks/useRequireUploadId";
 import {
   getRawRecords,
   getUploadColumns,
+  listUploads,
   type RawRecordItem,
+  type UploadItem,
 } from "../../services/api";
+import { formatUploadIdWithDate } from "../../utils/formatUploadDate";
 
 export default function HamVeri() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -25,8 +28,19 @@ export default function HamVeri() {
   const [totalPages, setTotalPages] = useState(1);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [uploadMeta, setUploadMeta] = useState<UploadItem | null>(null);
 
   const visibleColumns = useMemo(() => columns.slice(0, 25), [columns]);
+
+  useEffect(() => {
+    if (requiredId === null) return;
+    listUploads(50)
+      .then((d) => {
+        const found = (d.uploads ?? []).find((u) => u.id === requiredId) ?? null;
+        setUploadMeta(found);
+      })
+      .catch(() => setUploadMeta(null));
+  }, [requiredId]);
 
   const fetchData = useCallback(async () => {
     if (requiredId === null || !Number.isFinite(uploadId) || uploadId <= 0) return;
@@ -87,7 +101,7 @@ export default function HamVeri() {
           <div className="rounded-xl border border-gray-100 bg-white p-4">
             <p className="text-xs text-gray-400">Yükleme No</p>
             <p className="mt-1 text-lg font-bold text-gray-900">
-              #{uploadId}
+              {formatUploadIdWithDate(uploadId, uploadMeta?.created_at)}
             </p>
           </div>
           <div className="rounded-xl border border-gray-100 bg-white p-4">

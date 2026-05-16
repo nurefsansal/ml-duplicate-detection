@@ -11,6 +11,7 @@ import {
   type UploadWithMergeItem,
   type DuplicateGroupRecord,
 } from "../../services/api";
+import { formatUploadDate } from "../../utils/formatUploadDate";
 
 const reportTabs = [
   {
@@ -21,20 +22,6 @@ const reportTabs = [
   },
 ];
 
-function formatUploadDate(iso: string | null | undefined): string {
-  if (!iso) return "—";
-  try {
-    return new Date(iso).toLocaleString("tr-TR", {
-      day: "2-digit",
-      month: "2-digit",
-      year: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-  } catch {
-    return iso;
-  }
-}
 
 function MergeTransitionBanner({ group }: { group: MuhatapMergeReportGroup }) {
   const gr = group.golden_record;

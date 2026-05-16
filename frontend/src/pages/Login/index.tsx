@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 
+import BrandMark from "../../components/feature/BrandMark";
 import { login } from "../../services/api";
 
 export default function Login() {
@@ -25,54 +26,68 @@ export default function Login() {
   };
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-gray-50 p-6">
-      <form
-        onSubmit={onSubmit}
-        className="w-full max-w-md rounded-2xl border border-gray-100 bg-white p-6 shadow-sm"
-      >
-        <h1 className="text-xl font-semibold text-gray-900">Giriş Yap</h1>
-        <p className="mt-1 text-sm text-gray-500">
-          Yönetim ekranlarına erişmek için oturum açın.
-        </p>
-
-        <div className="mt-4 space-y-3">
-          <div>
-            <label className="mb-1 block text-xs font-medium text-gray-700">
-              Kullanıcı Adı
-            </label>
-            <input
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-red-400 focus:outline-none"
-            />
-          </div>
-          <div>
-            <label className="mb-1 block text-xs font-medium text-gray-700">
-              Şifre
-            </label>
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-red-400 focus:outline-none"
-            />
-          </div>
+    <div className="flex min-h-screen bg-surface">
+      <div className="hidden flex-1 flex-col justify-between bg-gradient-to-br from-slate-950 via-slate-900 to-indigo-950 p-10 lg:flex">
+        <BrandMark variant="sidebar" />
+        <div className="max-w-md">
+          <p className="text-3xl font-semibold leading-snug tracking-tight text-white">
+            Benzersiz kayıt.
+            <br />
+            <span className="text-primary-400">Her kişi için tek profil.</span>
+          </p>
+          <p className="mt-4 text-sm leading-relaxed text-slate-400">
+            UniRecord (Unique Record), mükerrer kayıtları tespit eder, incelemenizi yönetir ve
+            her muhatap için birleştirilmiş tek bir golden kayıt oluşturur.
+          </p>
         </div>
+        <p className="text-xs text-slate-600">© UniRecord</p>
+      </div>
 
-        {error && (
-          <div className="mt-3 rounded-lg border border-red-100 bg-red-50 px-3 py-2 text-xs text-red-700">
-            {error}
+      <div className="flex flex-1 items-center justify-center p-6">
+        <form onSubmit={onSubmit} className="ui-card w-full max-w-md p-8 shadow-card-lg">
+          <div className="mb-6 lg:hidden">
+            <BrandMark variant="login" />
           </div>
-        )}
 
-        <button
-          type="submit"
-          disabled={loading}
-          className="mt-4 w-full rounded-lg bg-red-600 py-2.5 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-60"
-        >
-          {loading ? "Giriş yapılıyor..." : "Giriş Yap"}
-        </button>
-      </form>
+          <h1 className="text-xl font-semibold text-slate-900">Giriş Yap</h1>
+          <p className="mt-1 text-sm text-slate-500">Yönetim paneline erişmek için oturum açın.</p>
+
+          <motion>
+          <div className="mt-6 space-y-4">
+            <div>
+              <label className="mb-1.5 block text-xs font-medium text-slate-700">
+                Kullanıcı Adı
+              </label>
+              <input
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                autoComplete="username"
+                className="ui-focus-ring w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm"
+              />
+            </div>
+            <div>
+              <label className="mb-1.5 block text-xs font-medium text-slate-700">Şifre</label>
+              <input
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                autoComplete="current-password"
+                className="ui-focus-ring w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm"
+              />
+            </div>
+          </div>
+
+          {error && (
+            <div className="mt-4 rounded-xl border border-danger-200 bg-danger-50 px-3 py-2.5 text-xs text-danger-700">
+              {error}
+            </div>
+          )}
+
+          <button type="submit" disabled={loading} className="ui-btn-primary ui-focus-ring mt-6 w-full">
+            {loading ? "Giriş yapılıyor..." : "Giriş Yap"}
+          </button>
+        </form>
+      </div>
     </div>
   );
 }

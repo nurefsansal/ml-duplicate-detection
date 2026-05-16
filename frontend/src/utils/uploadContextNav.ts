@@ -1,4 +1,5 @@
 const PATHS_NEEDING_UPLOAD = new Set([
+  "/",
   "/ham-veri",
   "/veri-normalizasyon",
   "/temiz-veri-seti",

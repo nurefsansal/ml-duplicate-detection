@@ -11,6 +11,10 @@ import {
   type NormalizedRecordDb,
   type UploadItem,
 } from "../../services/api";
+import {
+  formatUploadIdWithDate,
+  formatUploadOptionLabel,
+} from "../../utils/formatUploadDate";
 
 function Badge({ ok }: { ok: boolean }) {
   return ok ? (
@@ -47,13 +51,13 @@ export default function TemizVeriSeti() {
   const navigate = useNavigate();
   const uploadId = useRequireUploadId();
 
+  const [uploads, setUploads] = useState<UploadItem[]>([]);
   const [records, setRecords] = useState<NormalizedRecordDb[]>([]);
   const [total, setTotal] = useState(0);
   const [totalPages, setTotalPages] = useState(1);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
-  const [uploads, setUploads] = useState<UploadItem[]>([]);
   const [search, setSearch] = useState("");
   const [filterValid, setFilterValid] = useState<"" | "true" | "false">("");
   const [hasMissingTc, setHasMissingTc] = useState(false);
@@ -147,7 +151,7 @@ export default function TemizVeriSeti() {
             onClick={() => navigate(`/mukerrer-tespit?upload_id=${uploadId}`)}
             className="flex items-center gap-2 bg-red-600 text-white text-sm font-medium px-5 py-2 rounded-lg hover:bg-red-700 cursor-pointer transition-colors whitespace-nowrap"
           >
-            <i className="ri-radar-line"></i> Benzer Kayıt Taramasına Dön
+            <i className="ri-radar-line"></i> Mükerrer Tespit Ekranına Dön
           </button>
         }
       />
@@ -180,7 +184,10 @@ export default function TemizVeriSeti() {
           <div className="bg-white rounded-xl p-4 border border-gray-100">
             <p className="text-xs text-gray-400">Seçili Yükleme</p>
             <p className="text-sm font-semibold text-gray-900 mt-1">
-              #{uploadId}
+              {formatUploadIdWithDate(
+                uploadId ?? 0,
+                uploads.find((u) => u.id === uploadId)?.created_at,
+              )}
             </p>
           </div>
         </div>
@@ -206,7 +213,9 @@ export default function TemizVeriSeti() {
                 className="border border-gray-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:border-red-400"
               >
                 {uploads.map((u) => (
-                  <option key={u.id} value={u.id}>#{u.id} — {u.file_name} ({u.total_records} kayıt)</option>
+                  <option key={u.id} value={u.id}>
+                    {formatUploadOptionLabel(u)}
+                  </option>
                 ))}
               </select>
             </div>
@@ -391,7 +400,12 @@ export default function TemizVeriSeti() {
                       <td className="px-4 py-3 text-gray-600 font-mono">{r.clean_tc || "-"}</td>
                       <td className="px-4 py-3 text-gray-600">{r.clean_city || "-"}</td>
                       <td className="px-4 py-3 text-gray-600 font-mono">{r.clean_muhatap_no || "-"}</td>
-                      <td className="px-4 py-3 text-gray-400">#{r.upload_id}</td>
+                      <td className="px-4 py-3 text-gray-400">
+                        {formatUploadIdWithDate(
+                          r.upload_id,
+                          uploads.find((u) => u.id === r.upload_id)?.created_at,
+                        )}
+                      </td>
                       <td className="px-4 py-3">
                         <SourceBadge source={r.source} label={r.source_label} />
                       </td>

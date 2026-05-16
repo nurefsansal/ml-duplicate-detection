@@ -11,7 +11,7 @@ const STEP_META: Array<{
 }> = [
   { id: "upload", label: "Veri Yükle", stepNum: 1, icon: "ri-upload-cloud-2-line" },
   { id: "standardize", label: "Standardize Et", stepNum: 2, icon: "ri-filter-3-line" },
-  { id: "detect", label: "Benzer Kayıtları Bul", stepNum: 3, icon: "ri-search-eye-line" },
+  { id: "detect", label: "Mükerrer Tespit Çalıştır", stepNum: 3, icon: "ri-search-eye-line" },
   { id: "review", label: "İncele ve Birleştir", stepNum: 4, icon: "ri-file-copy-2-line" },
   { id: "reports", label: "Raporlar", stepNum: 5, icon: "ri-bar-chart-box-line" },
 ];
@@ -26,7 +26,7 @@ const STEP_ORDER: Record<FlowStep, number> = {
 
 const NEXT_ACTION: Partial<Record<FlowStep, { label: string; target: FlowStep }>> = {
   upload: { label: "Sonraki Adım: Standardize Et", target: "standardize" },
-  standardize: { label: "Sonraki Adım: Benzer Kayıtları Bul", target: "detect" },
+  standardize: { label: "Sonraki Adım: Mükerrer Tespit Çalıştır", target: "detect" },
   detect: { label: "Sonraki Adım: İncele ve Birleştir", target: "review" },
   review: { label: "Sonraki Adım: Raporlar", target: "reports" },
 };
@@ -39,7 +39,7 @@ export function FlowNav(props: {
   const navigate = useNavigate();
   const uploadId = props.uploadId ?? null;
   const currentOrder = STEP_ORDER[props.step];
-  const { canReview, loading: pipelineLoading } = useUploadPipelineStatus(uploadId);
+  const { canReview } = useUploadPipelineStatus(uploadId);
 
   const go = (path: string) => navigate(path);
 
@@ -85,16 +85,6 @@ export function FlowNav(props: {
         </div>
       </div>
 
-      {uploadId !== null && !canReview && !pipelineLoading && props.step !== "detect" ? (
-        <div className="mb-4 flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-900">
-          <i className="ri-information-line mt-0.5 text-base" aria-hidden />
-          <span>
-            İnceleme ekranına geçmeden önce bu dosya için{" "}
-            <strong>benzer kayıt taramasını</strong> çalıştırın.
-          </span>
-        </div>
-      ) : null}
-
       <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
         <div className="flex min-w-0 flex-1 flex-wrap items-stretch gap-2 md:gap-3">
           {STEP_META.map((s, idx) => {
@@ -110,7 +100,7 @@ export function FlowNav(props: {
                   disabled={!enabled}
                   title={
                     needsDetection && !enabled && uploadId !== null
-                      ? "Önce benzer kayıt taramasını tamamlayın"
+                      ? "Önce mükerrer tespiti tamamlayın"
                       : undefined
                   }
                   aria-current={active ? "step" : undefined}
@@ -168,7 +158,7 @@ export function FlowNav(props: {
               disabled={!nextEnabled}
               title={
                 nextTarget === "review" && !canReview
-                  ? "Önce benzer kayıt taramasını tamamlayın"
+                  ? "Önce mükerrer tespiti tamamlayın"
                   : undefined
               }
               onClick={() => nextEnabled && go(pathFor(nextAction.target))}
