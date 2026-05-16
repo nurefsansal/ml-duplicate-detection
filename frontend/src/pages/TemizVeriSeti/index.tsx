@@ -27,7 +27,7 @@ function Badge({ ok }: { ok: boolean }) {
 function SourceBadge({ source, label }: { source?: string; label?: string }) {
   const display =
     label ||
-    (source === "entity" ? "Golden Record" : "Tekil Temiz Kayıt");
+    (source === "entity" ? "Birleştirilmiş Kayıt" : "Tekil Kayıt");
   if (source === "entity") {
     return (
       <span className="inline-flex items-center gap-1 rounded-full bg-blue-50 px-2 py-0.5 text-[11px] font-medium text-blue-700">
@@ -86,7 +86,7 @@ export default function TemizVeriSeti() {
       setTotal(data.total ?? 0);
       setTotalPages(data.total_pages ?? 1);
     } catch {
-      setError("Veriler yüklenemedi. Backend bağlantısını kontrol edin.");
+      setError("Veriler yüklenemedi. Lütfen bağlantıyı yeniden kontrol edin.");
     } finally {
       setLoading(false);
     }
@@ -128,10 +128,10 @@ export default function TemizVeriSeti() {
       <DashboardLayout>
         <Header
           title="Temiz Veri Seti"
-          subtitle="Birleştirilmiş golden record + tekil temiz kayıtlar — operasyonel çıktı"
+          subtitle="Birleştirilmiş ve tekil kayıtları tek tabloda görüntüleyin"
         />
         <div className="flex-1 p-6 text-sm text-gray-600">
-          Yükleme seçilmedi; Veri Yükleme sayfasına yönlendiriliyorsunuz…
+          Yükleme seçilmedi. Veri Yükleme sayfasına yönlendiriliyorsunuz…
         </div>
       </DashboardLayout>
     );
@@ -141,40 +141,14 @@ export default function TemizVeriSeti() {
     <DashboardLayout>
       <Header
         title="Temiz Veri Seti"
-        subtitle="Birleştirilmiş golden record + tekil temiz kayıtlar — operasyonel çıktı"
+        subtitle="Birleştirilmiş ve tekil kayıtları tek tabloda görüntüleyin"
         actions={
-          <div className="flex items-center gap-3">
-            <a
-              href={exportUrlCsv}
-              target="_blank"
-              rel="noreferrer"
-              className="flex items-center gap-2 border border-gray-200 text-gray-700 text-sm font-medium px-4 py-2 rounded-lg hover:bg-gray-50 transition-colors whitespace-nowrap"
-            >
-              <i className="ri-download-2-line"></i> CSV
-            </a>
-            <a
-              href={exportUrlXlsx}
-              target="_blank"
-              rel="noreferrer"
-              className="flex items-center gap-2 border border-gray-200 text-gray-700 text-sm font-medium px-4 py-2 rounded-lg hover:bg-gray-50 transition-colors whitespace-nowrap"
-            >
-              <i className="ri-file-excel-2-line"></i> XLSX
-            </a>
-            <a
-              href={exportUrlJson}
-              target="_blank"
-              rel="noreferrer"
-              className="flex items-center gap-2 border border-gray-200 text-gray-700 text-sm font-medium px-4 py-2 rounded-lg hover:bg-gray-50 transition-colors whitespace-nowrap"
-            >
-              <i className="ri-braces-line"></i> JSON
-            </a>
-            <button
-              onClick={() => navigate(`/mukerrer-tespit?upload_id=${uploadId}`)}
-              className="flex items-center gap-2 bg-red-600 text-white text-sm font-medium px-5 py-2 rounded-lg hover:bg-red-700 cursor-pointer transition-colors whitespace-nowrap"
-            >
-              <i className="ri-radar-line"></i> Mükerrer Tespite Git
-            </button>
-          </div>
+          <button
+            onClick={() => navigate(`/mukerrer-tespit?upload_id=${uploadId}`)}
+            className="flex items-center gap-2 bg-red-600 text-white text-sm font-medium px-5 py-2 rounded-lg hover:bg-red-700 cursor-pointer transition-colors whitespace-nowrap"
+          >
+            <i className="ri-radar-line"></i> Benzer Kayıt Taramasına Dön
+          </button>
         }
       />
 
@@ -186,13 +160,12 @@ export default function TemizVeriSeti() {
         />
 
         <div className="rounded-xl border border-green-100 bg-green-50/80 p-4 text-sm text-green-900">
-          <p className="font-medium">Son kullanıma hazır veri</p>
-          <p className="mt-1 text-xs text-green-800">
-            Bu tablo yönetici onayı sonrası oluşan <strong>Golden Record</strong> satırlarını ve
-            mükerrer olmayan <strong>Tekil Temiz Kayıt</strong> satırlarını birlikte listeler. Dışa
-            aktarılan dosyalar aynı kolonları içerir (<strong>clean_muhatap_no</strong>,{" "}
-            <strong>source_label</strong> dahil).
-          </p>
+            <p className="font-medium">Kullanıma hazır veri</p>
+            <p className="mt-1 text-xs text-green-800">
+              Bu tabloda onay sonrası oluşan <strong>birleştirilmiş kayıtlar</strong> ile tek başına
+              kalan <strong>tekil kayıtlar</strong> birlikte gösterilir. İndirilen dosyalar da aynı
+              alanları içerir.
+            </p>
         </div>
         {/* Stat cards */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
@@ -205,7 +178,7 @@ export default function TemizVeriSeti() {
             <p className="text-2xl font-bold text-gray-900 mt-1">{page} / {totalPages}</p>
           </div>
           <div className="bg-white rounded-xl p-4 border border-gray-100">
-            <p className="text-xs text-gray-400">Seçili Upload</p>
+            <p className="text-xs text-gray-400">Seçili Yükleme</p>
             <p className="text-sm font-semibold text-gray-900 mt-1">
               #{uploadId}
             </p>
@@ -217,7 +190,7 @@ export default function TemizVeriSeti() {
           <form onSubmit={handleSearch} className="flex flex-wrap items-end gap-3">
             {/* Upload filter */}
             <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">Upload</label>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Yükleme</label>
               <select
                 value={uploadId}
                 onChange={(e) => {
@@ -275,14 +248,14 @@ export default function TemizVeriSeti() {
 
             {/* Search */}
             <div className="flex-1 min-w-[200px]">
-              <label className="block text-xs font-medium text-gray-600 mb-1">Arama</label>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Kayıt Ara</label>
               <div className="relative">
                 <i className="ri-search-line absolute left-3 top-1/2 -translate-y-1/2 text-sm text-gray-400" />
                 <input
                   type="text"
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
-                  placeholder="Ad, e-posta, TC, telefon…"
+                  placeholder="Ad, e-posta, TC veya telefon ile ara…"
                   className="w-full border border-gray-200 rounded-lg pl-9 pr-3 py-2 text-sm focus:outline-none focus:border-red-400"
                 />
               </div>
@@ -307,7 +280,7 @@ export default function TemizVeriSeti() {
 
             {/* Missing field filters */}
             <div className="w-full border-t border-gray-100 pt-3 flex flex-wrap gap-3">
-              <p className="text-xs font-medium text-gray-500 self-center">Eksik alan:</p>
+              <p className="text-xs font-medium text-gray-500 self-center">Eksik bilgi:</p>
               {[
                 { label: "TC", state: hasMissingTc, set: setHasMissingTc },
                 { label: "Telefon", state: hasMissingPhone, set: setHasMissingPhone },
@@ -331,6 +304,41 @@ export default function TemizVeriSeti() {
           </form>
         </div>
 
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-gray-100 bg-white px-4 py-3">
+          <div>
+            <p className="text-xs font-medium text-gray-700">Dışa aktar</p>
+            <p className="text-[11px] text-gray-400">
+              Seçili yükleme için temiz veri setini indirin
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <a
+              href={exportUrlCsv}
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-center gap-1.5 border border-gray-200 text-gray-700 text-sm font-medium px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors whitespace-nowrap"
+            >
+              <i className="ri-download-2-line"></i> CSV
+            </a>
+            <a
+              href={exportUrlXlsx}
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-center gap-1.5 border border-gray-200 text-gray-700 text-sm font-medium px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors whitespace-nowrap"
+            >
+              <i className="ri-file-excel-2-line"></i> XLSX
+            </a>
+            <a
+              href={exportUrlJson}
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-center gap-1.5 border border-gray-200 text-gray-700 text-sm font-medium px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors whitespace-nowrap"
+            >
+              <i className="ri-braces-line"></i> JSON
+            </a>
+          </div>
+        </div>
+
         {error && (
           <div className="rounded-xl border border-red-100 bg-red-50 p-4 flex items-center gap-3">
             <i className="ri-error-warning-fill text-red-600 text-lg" />
@@ -344,16 +352,16 @@ export default function TemizVeriSeti() {
             <table className="w-full text-xs">
               <thead>
                 <tr className="bg-gray-50/70 border-b border-gray-100">
-                  <th className="px-4 py-3 text-left font-medium text-gray-400">ID</th>
+                  <th className="px-4 py-3 text-left font-medium text-gray-400">Kayıt No</th>
                   <th className="px-4 py-3 text-left font-medium text-gray-400">Ad Soyad</th>
                   <th className="px-4 py-3 text-left font-medium text-gray-400">E-posta</th>
                   <th className="px-4 py-3 text-left font-medium text-gray-400">Telefon</th>
                   <th className="px-4 py-3 text-left font-medium text-gray-400">TC</th>
                   <th className="px-4 py-3 text-left font-medium text-gray-400">Şehir</th>
                   <th className="px-4 py-3 text-left font-medium text-gray-400">Muhatap No</th>
-                  <th className="px-4 py-3 text-left font-medium text-gray-400">Upload</th>
-                  <th className="px-4 py-3 text-left font-medium text-gray-400">Kaynak türü</th>
-                  <th className="px-4 py-3 text-left font-medium text-gray-400">Durum</th>
+                  <th className="px-4 py-3 text-left font-medium text-gray-400">Yükleme No</th>
+                  <th className="px-4 py-3 text-left font-medium text-gray-400">Kayıt Türü</th>
+                  <th className="px-4 py-3 text-left font-medium text-gray-400">Geçerlilik</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-50">
@@ -361,14 +369,14 @@ export default function TemizVeriSeti() {
                   <tr>
                     <td colSpan={10} className="px-5 py-10 text-center text-gray-400">
                       <i className="ri-loader-4-line animate-spin text-xl block mb-2" />
-                      Yükleniyor…
+                      Kayıtlar yükleniyor…
                     </td>
                   </tr>
                 ) : records.length === 0 ? (
                   <tr>
                     <td colSpan={10} className="px-5 py-10 text-center text-gray-400">
-                      Kayıt bulunamadı.
-                      {total === 0 && " Önce Veri Yükleme veya Veri Standardizasyon adımını tamamlayın."}
+                      Gösterilecek kayıt bulunamadı.
+                      {total === 0 && " Önce veri yükleme ve standardizasyon adımlarını tamamlayın."}
                     </td>
                   </tr>
                 ) : (

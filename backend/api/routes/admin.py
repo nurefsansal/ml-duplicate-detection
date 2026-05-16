@@ -140,6 +140,9 @@ class MergeIntoEntityRequest(BaseModel):
 
 class RemoveMergeMemberRequest(BaseModel):
     upload_id: int
+
+
+class GoldenRecordUpdateRequest(BaseModel):
     """Entity canonical_data alanini guncelleme istegi."""
 
     fields: dict[str, Any] = Field(default_factory=dict)

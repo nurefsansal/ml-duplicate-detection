@@ -9,10 +9,10 @@ const STEP_META: Array<{
   stepNum: number;
   icon: string;
 }> = [
-  { id: "upload", label: "Yükle", stepNum: 1, icon: "ri-upload-cloud-2-line" },
+  { id: "upload", label: "Veri Yükle", stepNum: 1, icon: "ri-upload-cloud-2-line" },
   { id: "standardize", label: "Standardize Et", stepNum: 2, icon: "ri-filter-3-line" },
-  { id: "detect", label: "Mükerrer Tespit", stepNum: 3, icon: "ri-search-eye-line" },
-  { id: "review", label: "İncele & Birleştir", stepNum: 4, icon: "ri-file-copy-2-line" },
+  { id: "detect", label: "Benzer Kayıtları Bul", stepNum: 3, icon: "ri-search-eye-line" },
+  { id: "review", label: "İncele ve Birleştir", stepNum: 4, icon: "ri-file-copy-2-line" },
   { id: "reports", label: "Raporlar", stepNum: 5, icon: "ri-bar-chart-box-line" },
 ];
 
@@ -25,10 +25,10 @@ const STEP_ORDER: Record<FlowStep, number> = {
 };
 
 const NEXT_ACTION: Partial<Record<FlowStep, { label: string; target: FlowStep }>> = {
-  upload: { label: "Sonraki: Standardizasyon", target: "standardize" },
-  standardize: { label: "Sonraki: Mükerrer Tespit", target: "detect" },
-  detect: { label: "Sonraki: İncele & Birleştir", target: "review" },
-  review: { label: "Sonraki: Raporlar", target: "reports" },
+  upload: { label: "Sonraki Adım: Standardize Et", target: "standardize" },
+  standardize: { label: "Sonraki Adım: Benzer Kayıtları Bul", target: "detect" },
+  detect: { label: "Sonraki Adım: İncele ve Birleştir", target: "review" },
+  review: { label: "Sonraki Adım: Raporlar", target: "reports" },
 };
 
 export function FlowNav(props: {
@@ -78,9 +78,9 @@ export function FlowNav(props: {
     <div className="ui-card overflow-hidden p-5 shadow-card-lg">
       <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
         <div>
-          <p className="text-[11px] font-semibold uppercase tracking-wider text-primary-700">Pipeline</p>
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-primary-700">İş Akışı</p>
           <p className="mt-0.5 text-sm font-medium text-slate-600">
-            Ham veriden raporlamaya rehber akış
+            Veriyi adım adım hazırlayın ve sonuçlara ilerleyin
           </p>
         </div>
       </div>
@@ -89,8 +89,8 @@ export function FlowNav(props: {
         <div className="mb-4 flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-900">
           <i className="ri-information-line mt-0.5 text-base" aria-hidden />
           <span>
-            İnceleme adımı için önce bu dosyada{" "}
-            <strong>Mükerrer Tespit</strong> çalıştırılmalıdır.
+            İnceleme ekranına geçmeden önce bu dosya için{" "}
+            <strong>benzer kayıt taramasını</strong> çalıştırın.
           </span>
         </div>
       ) : null}
@@ -110,7 +110,7 @@ export function FlowNav(props: {
                   disabled={!enabled}
                   title={
                     needsDetection && !enabled && uploadId !== null
-                      ? "Önce Mükerrer Tespit adımını tamamlayın"
+                      ? "Önce benzer kayıt taramasını tamamlayın"
                       : undefined
                   }
                   aria-current={active ? "step" : undefined}
@@ -168,7 +168,7 @@ export function FlowNav(props: {
               disabled={!nextEnabled}
               title={
                 nextTarget === "review" && !canReview
-                  ? "Önce Mükerrer Tespit adımını tamamlayın"
+                  ? "Önce benzer kayıt taramasını tamamlayın"
                   : undefined
               }
               onClick={() => nextEnabled && go(pathFor(nextAction.target))}

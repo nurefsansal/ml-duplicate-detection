@@ -223,7 +223,7 @@ export default function Raporlar() {
     <DashboardLayout>
       <Header
         title="Raporlar"
-        subtitle="Muhatap birleştirme ve temiz veri seti çıktıları"
+        subtitle="Birleştirme sonuçlarını görüntüleyin ve çıktıları indirin"
         actions={
           <button
             type="button"
@@ -261,18 +261,17 @@ export default function Raporlar() {
               {uploadsLoading ? (
                 <p className="text-sm text-gray-500">
                   <i className="ri-loader-4-line animate-spin mr-2" />
-                  Birleştirme yapılmış dosyalar yükleniyor…
+                  Birleştirilmiş dosyalar yükleniyor…
                 </p>
               ) : mergeUploads.length === 0 ? (
                 <p className="text-sm text-gray-500">
-                  Henüz muhatap birleştirmesi yapılmış dosya yok. Mükerrer kayıtlarda farklı
-                  muhatap kodlu bir grubu onaylayıp Kaydet ile birleştirdikten sonra burada
-                  görünür.
+                  Henüz birleştirilmiş dosya yok. İnceleme ekranında grubu onaylayıp kaydettikten
+                  sonra burada görüntülenir.
                 </p>
               ) : (
                 <div>
                   <label className="mb-1.5 block text-xs font-medium text-gray-600">
-                    İncelenip birleştirilmiş yükleme
+                    Birleştirme yapılmış yükleme
                   </label>
                   <select
                     value={selectedUploadId ?? ""}
@@ -295,8 +294,8 @@ export default function Raporlar() {
                 {reportTabs[0].label}
               </h3>
               <p className="text-xs text-gray-500 mb-4">
-                Seçilen dosyadaki onaylı muhatap birleştirmeleri. Her satır tek hedef muhatap
-                koduna indirgenmiş kişiyi temsil eder.
+                 Seçtiğiniz dosyadaki onaylı birleştirmeler burada listelenir. Her satır,
+                 tek bir hedef muhatap altında toplanmış kaydı temsil eder.
               </p>
 
               {mergeReportLoading ? (
@@ -312,7 +311,7 @@ export default function Raporlar() {
                 <>
                   {mergeReportMeta && (
                     <p className="text-xs text-gray-600 mb-4">
-                      Birleştirilmiş grup: <strong>{mergeReportMeta.totalAll}</strong>
+                      Birleştirilmiş grup sayısı: <strong>{mergeReportMeta.totalAll}</strong>
                       {selectedUpload ? (
                         <>
                           {" "}
@@ -323,7 +322,7 @@ export default function Raporlar() {
                   )}
                   {mergeReportGroups.length === 0 ? (
                     <p className="text-sm text-gray-500 py-6">
-                      Bu dosya için kayıtlı birleşim detayı yok.
+                      Bu dosya için gösterilecek birleştirme detayı yok.
                     </p>
                   ) : (
                     <div className="space-y-8 max-h-[640px] overflow-y-auto pr-1">
@@ -349,7 +348,7 @@ export default function Raporlar() {
                                   {g.group_id}
                                 </p>
                                 <p className="text-[11px] text-gray-500 mt-0.5">
-                                  Entity #{g.entity_id ?? "—"} · Skor %
+                                  Birleştirilmiş kayıt #{g.entity_id ?? "—"} · Benzerlik %
                                   {(Number(g.group_score || 0) * 100).toFixed(1)}
                                 </p>
                               </div>
@@ -393,7 +392,7 @@ export default function Raporlar() {
                             {excluded.length > 0 ? (
                               <>
                                 <p className="text-[11px] font-semibold text-amber-800 mb-2 mt-4">
-                                  Birleşime dahil edilmeyen kayıtlar
+                                  Dışarıda bırakılan kayıtlar
                                 </p>
                                 <div className="overflow-x-auto rounded-lg border border-amber-100 bg-amber-50/40">
                                   <table className="w-full min-w-[520px] text-[10px]">
@@ -439,10 +438,10 @@ export default function Raporlar() {
 
           <div className="space-y-4">
             <div className="bg-white rounded-xl p-5 border border-gray-100">
-              <h3 className="text-sm font-semibold text-gray-900 mb-3">Dışa Aktarma</h3>
+              <h3 className="text-sm font-semibold text-gray-900 mb-3">İndirilebilir Çıktılar</h3>
               <p className="text-xs text-gray-500 mb-4">
-                Seçili dosya için operasyonel çıktılar. Temiz veri seti birleştirilmiş tek
-                muhatap kodlu satırları içerir.
+                Seçili dosya için hazır çıktılar. Temiz veri seti, birleştirme sonrası oluşan
+                son kayıtları içerir.
               </p>
               <div className="space-y-2">
                 <button
@@ -456,7 +455,7 @@ export default function Raporlar() {
                       exporting === "clean" ? "ri-loader-4-line animate-spin" : "ri-file-excel-2-line"
                     }
                   />
-                  Temiz veri seti (CSV)
+                  Temiz veri setini indir (CSV)
                 </button>
                 <button
                   type="button"
@@ -469,7 +468,7 @@ export default function Raporlar() {
                       exporting === "pdf" ? "ri-loader-4-line animate-spin" : "ri-file-pdf-2-line"
                     }
                   />
-                  Muhatap birleştirme (PDF)
+                  Birleştirme raporunu indir (PDF)
                 </button>
               </div>
             </div>

@@ -553,8 +553,8 @@ export default function MukerrerKayitlar() {
     return (
       <DashboardLayout>
         <Header
-          title="Mükerrer Kayıtlar"
-          subtitle="Grupları inceleyin, seçerek birleştirin; kalan kayıtlar bekleyen grupta kalır"
+          title="İnceleme ve Birleştirme"
+          subtitle="Benzer kayıt gruplarını inceleyin ve birleştirme kararını verin"
         />
         <div className="flex-1 p-6 text-sm text-gray-600">
           Yükleme seçilmedi; Veri Yükleme sayfasına yönlendiriliyorsunuz…
@@ -567,18 +567,18 @@ export default function MukerrerKayitlar() {
     return (
       <DashboardLayout>
         <Header
-          title="Mükerrer Kayıtlar"
-          subtitle="Önce mükerrer tespiti tamamlanmalı"
+          title="İnceleme ve Birleştirme"
+          subtitle="Önce benzer kayıt taramasını tamamlayın"
         />
         <div className="flex-1 space-y-5 overflow-y-auto p-6">
           <FlowNav step="review" uploadId={uploadId} canGoNext={false} />
           <div className="rounded-2xl border border-amber-200 bg-amber-50 p-6 text-center">
             <i className="ri-radar-line mb-3 block text-3xl text-amber-600" />
             <p className="text-sm font-semibold text-amber-900">
-              Bu dosya için henüz mükerrer tespiti yapılmamış
+              Bu dosya için henüz benzer kayıt taraması yapılmamış
             </p>
             <p className="mt-2 text-xs text-amber-800">
-              İnceleme ve birleştirme adımına geçmeden önce Mükerrer Tespit çalıştırın.
+              İnceleme ekranına geçmeden önce benzer kayıt taramasını başlatın.
             </p>
             <button
               type="button"
@@ -586,7 +586,7 @@ export default function MukerrerKayitlar() {
               className="mt-4 inline-flex cursor-pointer items-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700"
             >
               <i className="ri-play-line" />
-              Mükerrer Tespit&apos;e git
+              Benzer Kayıt Tarama Ekranına Git
             </button>
           </div>
         </div>
@@ -597,8 +597,8 @@ export default function MukerrerKayitlar() {
   return (
     <DashboardLayout>
       <Header
-        title="Mükerrer Kayıtlar"
-        subtitle="Grupları inceleyin, seçerek birleştirin; kalan kayıtlar bekleyen grupta kalır"
+        title="İnceleme ve Birleştirme"
+        subtitle="Benzer kayıt gruplarını inceleyin ve birleştirme kararını verin"
         actions={
           <button
             onClick={() => fetchGroups()}
@@ -616,9 +616,9 @@ export default function MukerrerKayitlar() {
 
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-gray-100 bg-white p-4">
           <div className="text-sm text-gray-700">
-            <span className="font-semibold text-gray-900">Birleştirme özeti</span>
+            <span className="font-semibold text-gray-900">İnceleme özeti</span>
             <span className="ml-2 text-xs text-gray-500">
-              Bekleyen: {decisionFilter === "pending" ? total : "—"} · Onaylı kayıtlar raporda
+              Bekleyen: {decisionFilter === "pending" ? total : "—"} · Birleştirilen kayıtlar raporda
             </span>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -628,7 +628,7 @@ export default function MukerrerKayitlar() {
               className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
             >
               <i className="ri-bar-chart-box-line" />
-              Tam rapor
+              Ayrıntılı rapor
             </button>
             <button
               type="button"
@@ -653,7 +653,7 @@ export default function MukerrerKayitlar() {
               className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-700 disabled:opacity-60"
             >
               <i className={mergePdfBusy ? "ri-loader-4-line animate-spin" : "ri-file-pdf-2-line"} />
-              PDF indir
+              PDF olarak indir
             </button>
           </div>
         </div>
@@ -674,7 +674,7 @@ export default function MukerrerKayitlar() {
             </p>
           </div>
           <div className="rounded-xl border border-gray-100 bg-white p-4">
-            <p className="text-xs text-gray-400">Önizleme</p>
+            <p className="text-xs text-gray-400">Sayfada Göster</p>
             <select
               value={pageSize}
               onChange={(e) => {
@@ -729,7 +729,7 @@ export default function MukerrerKayitlar() {
               decisionFilter === "pending",
             )}`}
           >
-            Bekliyor
+            İnceleme Bekliyor
           </button>
           <button
             onClick={() => {
@@ -744,11 +744,11 @@ export default function MukerrerKayitlar() {
               decisionFilter === "approved",
             )}`}
           >
-            Onaylandı
+            Birleştirildi
           </button>
         </div>
         <p className="text-[11px] text-gray-500">
-          Gruplar yalnızca <strong>farklı muhatap kodlu</strong> kayıtları kapsar.
+          Bu liste yalnızca <strong>farklı muhatap kodlu</strong> kayıt gruplarını gösterir.
         </p>
 
         <div className="relative w-full">
@@ -757,7 +757,7 @@ export default function MukerrerKayitlar() {
             type="text"
             value={search}
             onChange={(event) => setSearch(event.target.value)}
-            placeholder="Group ID, ad, tc, telefon, email ara..."
+            placeholder="Grup no, ad, TC, telefon veya e-posta ile ara..."
             className="w-full rounded-lg border border-gray-200 py-2.5 pl-9 pr-4 text-sm focus:border-red-400 focus:outline-none focus:ring-1 focus:ring-red-100"
           />
         </div>
@@ -768,14 +768,14 @@ export default function MukerrerKayitlar() {
             onClick={() => goPage(Math.max(1, page - 1))}
             className="rounded-lg border border-gray-200 px-4 py-2 text-sm text-gray-700 disabled:opacity-50"
           >
-            Önceki
+            Geri
           </button>
           <button
             disabled={page >= totalPages}
             onClick={() => goPage(Math.min(totalPages, page + 1))}
             className="rounded-lg border border-gray-200 px-4 py-2 text-sm text-gray-700 disabled:opacity-50"
           >
-            Sonraki
+            İleri
           </button>
         </div>
 
@@ -788,7 +788,7 @@ export default function MukerrerKayitlar() {
         <div className="overflow-hidden rounded-xl border border-gray-100 bg-white">
           <div className="border-b border-gray-50 px-5 py-4">
             <h3 className="text-sm font-semibold text-gray-900">
-              Mükerrer gruplar ({decisionFilter === "pending" ? "bekliyor" : "onaylandı"})
+              Kayıt grupları ({decisionFilter === "pending" ? "inceleme bekliyor" : "birleştirildi"})
             </h3>
           </div>
           <div className="overflow-x-auto">
@@ -797,16 +797,15 @@ export default function MukerrerKayitlar() {
                 Bu filtre için mükerrer grup bulunmuyor.
               </div>
             ) : (
-              <table className="w-full min-w-[1040px] text-xs">
+              <table className="w-full min-w-[960px] text-xs">
               <thead>
                 <tr className="border-b border-gray-100 bg-gray-50/70">
-                  <th className="px-4 py-3 text-left font-medium text-gray-400">Group ID</th>
+                  <th className="px-4 py-3 text-left font-medium text-gray-400">Grup No</th>
                   <th className="px-4 py-3 text-left font-medium text-gray-400">Kayıt Sayısı</th>
-                  <th className="px-4 py-3 text-left font-medium text-gray-400">Eşleşme</th>
-                  <th className="px-4 py-3 text-left font-medium text-gray-400">Skor</th>
-                  <th className="px-4 py-3 text-left font-medium text-gray-400">Golden Record</th>
+                  <th className="px-4 py-3 text-left font-medium text-gray-400">Benzerlik</th>
+                  <th className="px-4 py-3 text-left font-medium text-gray-400">Birleştirilmiş Kayıt</th>
                   <th className="px-4 py-3 text-left font-medium text-gray-400">Muhatap Kodları</th>
-                  <th className="px-4 py-3 text-center font-medium text-gray-400">İşlem</th>
+                  <th className="px-4 py-3 text-center font-medium text-gray-400">Aksiyon</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-50">
@@ -831,15 +830,14 @@ export default function MukerrerKayitlar() {
                       ? "text-gray-800 font-medium"
                       : "";
 
-                  return (
-                    <tr key={group.group_id} className="transition-colors hover:bg-gray-50/50">
-                      <td className="px-4 py-3.5 font-medium text-gray-800">{group.group_id}</td>
-                      <td className="px-4 py-3.5 text-gray-600">{group.record_ids.length}</td>
-                      <td className="px-4 py-3.5 text-gray-600">{group.match_count}</td>
-                      <td className="px-4 py-3.5 text-gray-600">{pct(group.group_score)}</td>
-                      <td className="px-4 py-3.5 text-gray-700">
-                        {group.golden_record.clean_name || "-"}
-                      </td>
+                    return (
+                      <tr key={group.group_id} className="transition-colors hover:bg-gray-50/50">
+                        <td className="px-4 py-3.5 font-medium text-gray-800">{group.group_id}</td>
+                        <td className="px-4 py-3.5 text-gray-600">{group.record_ids.length}</td>
+                        <td className="px-4 py-3.5 text-gray-600">{pct(group.group_score)}</td>
+                        <td className="px-4 py-3.5 text-gray-700">
+                          {group.golden_record.clean_name || "-"}
+                        </td>
                       <td className={`px-4 py-3.5 ${muhatapCellClass}`}>
                         <div className="flex flex-wrap items-center gap-2">
                           {showConflictBadge && (
@@ -863,7 +861,7 @@ export default function MukerrerKayitlar() {
                           onClick={() => setDetailGroup(group)}
                           className="cursor-pointer text-xs font-medium text-red-600 hover:underline"
                         >
-                          Detay
+                          İncele
                         </button>
                       </td>
                     </tr>
@@ -925,7 +923,7 @@ export default function MukerrerKayitlar() {
                   />
                   <span>
                     En az {mergeMinReviewers} ayrı inceleme onayı tamamlandı
-                    (Ayarlar: mukerrer_merge_min_reviewers)
+                    (Ayarlar sayfasındaki onay kuralı)
                   </span>
                 </label>
               ) : null}
@@ -948,9 +946,9 @@ export default function MukerrerKayitlar() {
         }
         leftExtra={
           <div>
-            <div className="mb-3 text-xs font-semibold text-gray-700">
-              Golden Record düzenle
-            </div>
+              <div className="mb-3 text-xs font-semibold text-gray-700">
+                Birleştirilmiş kayıt alanlarını düzenle
+              </div>
             <div className="grid grid-cols-1 gap-2 text-[11px] md:grid-cols-2">
               {goldenFields.map(({ key, label }) => {
                 const changed =

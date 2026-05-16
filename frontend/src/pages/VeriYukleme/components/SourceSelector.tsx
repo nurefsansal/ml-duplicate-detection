@@ -1,6 +1,6 @@
 interface SourceSelectorProps {
   selected: string;
-  onChange: (source: "excel" | "csv" | "api" | "manuel" | "institution") => void;
+  onChange: (source: "excel" | "csv" | "api" | "institution") => void;
 }
 
 const sources = [
@@ -15,29 +15,22 @@ const sources = [
     id: "csv",
     icon: "ri-file-text-line",
     label: "CSV",
-    desc: "Virgüllü ayrılmış",
+    desc: "Virgülle ayrılmış dosya",
     color: "blue",
   },
   {
     id: "api",
     icon: "ri-code-s-slash-line",
     label: "API",
-    desc: "REST endpoint",
+    desc: "Servis bağlantısı",
     color: "purple",
   },
   {
     id: "institution",
     icon: "ri-database-2-line",
-    label: "Kurum DB",
-    desc: "Ayarlar > Kurum DB",
+    label: "Kurum Veritabanı",
+    desc: "PostgreSQL tablodan içe aktar",
     color: "teal",
-  },
-  {
-    id: "manuel",
-    icon: "ri-keyboard-line",
-    label: "Manuel",
-    desc: "Form ile giriş",
-    color: "orange",
   },
 ] as const;
 
@@ -74,7 +67,7 @@ export default function SourceSelector({
   onChange,
 }: SourceSelectorProps) {
   return (
-    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+    <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
       {sources.map((src) => {
         const isSelected = selected === src.id;
         const c = colorClasses[src.color as keyof typeof colorClasses];
@@ -82,30 +75,30 @@ export default function SourceSelector({
           <button
             key={src.id}
             onClick={() => onChange(src.id)}
-            className={`p-4 rounded-xl border-2 text-left transition-all duration-150 cursor-pointer ${
+            className={`cursor-pointer rounded-xl border-2 p-4 text-left transition-all duration-150 ${
               isSelected
                 ? `${c.border} border-opacity-100`
                 : "border-gray-100 bg-white hover:border-gray-200"
             }`}
           >
             <div
-              className={`w-9 h-9 rounded-lg flex items-center justify-center mb-3 ${isSelected ? c.icon : "bg-gray-100 text-gray-500"}`}
+              className={`mb-3 flex h-9 w-9 items-center justify-center rounded-lg ${isSelected ? c.icon : "bg-gray-100 text-gray-500"}`}
             >
-              <i className={`${src.icon} text-lg`}></i>
+              <i className={`${src.icon} text-lg`} />
             </div>
             <p
               className={`text-sm font-semibold ${isSelected ? c.text : "text-gray-700"}`}
             >
               {src.label}
             </p>
-            <p className="text-xs text-gray-400 mt-0.5">{src.desc}</p>
+            <p className="mt-0.5 text-xs text-gray-400">{src.desc}</p>
             {isSelected && (
-              <div className="flex items-center gap-1 mt-2">
+              <div className="mt-2 flex items-center gap-1">
                 <div
-                  className={`w-1.5 h-1.5 rounded-full ${isSelected ? c.icon.split(" ")[1] : ""} bg-current`}
-                ></div>
+                  className={`h-1.5 w-1.5 rounded-full ${isSelected ? c.icon.split(" ")[1] : ""} bg-current`}
+                />
                 <span className={`text-[10px] font-medium ${c.text}`}>
-                  Seçildi
+                  Seçili
                 </span>
               </div>
             )}

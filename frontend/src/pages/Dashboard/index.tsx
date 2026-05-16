@@ -43,18 +43,38 @@ function formatDate(value: string | null | undefined): string {
   }
 }
 
+function formatUploadStageLabel(stage: string | null | undefined, status: string | null | undefined): string {
+  const value = (stage || status || "").toLowerCase();
+  if (!value) return "Beklemede";
+  if (value.includes("normalize")) return "Standardize edildi";
+  if (value.includes("detect")) return "Benzer kayıt tarandı";
+  if (value.includes("review")) return "İnceleme bekliyor";
+  if (value.includes("export")) return "Hazır veri oluşturuldu";
+  if (value.includes("complete")) return "Yükleme tamamlandı";
+  if (value.includes("process")) return "İşleniyor";
+  if (value.includes("fail") || value.includes("error")) return "Hata oluştu";
+  if (value.includes("upload")) return "Dosya yüklendi";
+  return stage || status || "-";
+}
+
+function formatReviewGroupLabel(groupId: string | null | undefined): string {
+  if (!groupId) return "İnceleme grubu";
+  if (groupId.startsWith("match_")) return `Aday eşleşme ${groupId.replace("match_", "#")}`;
+  return `Kayıt grubu ${groupId}`;
+}
+
 function SectionMessage({ loading, error }: { loading: boolean; error: boolean }) {
   if (loading) {
     return (
-      <div className="py-10 text-center text-sm font-medium text-slate-500">
-        <i className="ri-loader-4-line mb-3 block animate-spin text-2xl text-primary-500" />
-        Yükleniyor...
+        <div className="py-10 text-center text-sm font-medium text-slate-500">
+          <i className="ri-loader-4-line mb-3 block animate-spin text-2xl text-primary-500" />
+          Veriler yükleniyor...
       </div>
     );
   }
   if (error) {
     return (
-      <div className="py-8 text-center text-sm font-medium text-danger-700">Veri yüklenemedi</div>
+        <div className="py-8 text-center text-sm font-medium text-danger-700">Veriler alınamadı</div>
     );
   }
   return null;
@@ -194,7 +214,7 @@ export default function Dashboard() {
   const pipeline = [
     { label: "Yükleme", to: "/veri-yukleme", count: latestUpload?.total_records || 0, date: latestUpload?.created_at },
     {
-      label: "Standardizasyon",
+      label: "Standardize Et",
       to: latestUpload
         ? `/veri-normalizasyon?upload_id=${latestUpload.id}`
         : withUploadContext("/veri-normalizasyon"),
@@ -202,7 +222,7 @@ export default function Dashboard() {
       date: latestUpload?.completed_at || latestUpload?.created_at,
     },
     {
-      label: "Mükerrer Tespit",
+      label: "Benzer Kayıt Tarama",
       to: latestUpload
         ? `/mukerrer-tespit?upload_id=${latestUpload.id}`
         : withUploadContext("/mukerrer-tespit"),
@@ -210,7 +230,7 @@ export default function Dashboard() {
       date: latestUpload?.created_at,
     },
     {
-      label: "İnceleme",
+      label: "İnceleme Kuyruğu",
       to: latestUpload
         ? `/mukerrer-kayitlar?upload_id=${latestUpload.id}&decision=pending`
         : withUploadContext("/mukerrer-kayitlar?decision=pending"),
@@ -218,7 +238,7 @@ export default function Dashboard() {
       date: latestUpload?.created_at,
     },
     {
-      label: "Temiz Export",
+      label: "Hazır Veri",
       to: latestUpload
         ? `/temiz-veri-seti?upload_id=${latestUpload.id}`
         : withUploadContext("/temiz-veri-seti"),
@@ -230,8 +250,8 @@ export default function Dashboard() {
   return (
     <DashboardLayout>
       <Header
-        title="Dashboard"
-        subtitle="Kayıt akışı, inceleme yükü ve veri kalitesi"
+        title="Genel Bakış"
+        subtitle="Yüklemeler, inceleme yoğunluğu ve veri kalitesi tek ekranda"
         actions={
           <button
             onClick={() => {
@@ -253,11 +273,11 @@ export default function Dashboard() {
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
           {overview.error ? (
             <div className="col-span-full rounded-2xl border border-danger-200 bg-danger-50 p-4 text-sm font-medium text-danger-700 shadow-sm">
-              Veri yüklenemedi
+              Veriler alınamadı
             </div>
           ) : (
             <>
-              <SummaryCard label="Toplam Kayıt" value={overview.loading ? "..." : formatNumber(totalNormalized)} tone="blue" icon="ri-database-2-line" />
+              <SummaryCard label="Hazır Kayıt" value={overview.loading ? "..." : formatNumber(totalNormalized)} tone="blue" icon="ri-database-2-line" />
               <SummaryCard
                 label="Bekleyen İnceleme"
                 value={overview.loading ? "..." : formatNumber(overview.data?.pending)}
@@ -269,14 +289,14 @@ export default function Dashboard() {
                     : withUploadContext("/mukerrer-kayitlar?decision=pending")
                 }
               />
-              <SummaryCard label="Onaylanan" value={overview.loading ? "..." : formatNumber(overview.data?.approved)} tone="green" icon="ri-checkbox-circle-line" />
-              <SummaryCard label="Mükerrer Oran" value={overview.loading ? "..." : `%${duplicateRate.toFixed(1)}`} tone="purple" icon="ri-percent-line" />
+               <SummaryCard label="Onaylanan Karar" value={overview.loading ? "..." : formatNumber(overview.data?.approved)} tone="green" icon="ri-checkbox-circle-line" />
+               <SummaryCard label="Benzerlik Oranı" value={overview.loading ? "..." : `%${duplicateRate.toFixed(1)}`} tone="purple" icon="ri-percent-line" />
             </>
           )}
         </div>
 
         <div className="ui-card p-6 shadow-card-lg">
-          <div className="mb-4 text-sm font-semibold tracking-tight text-slate-900">Pipeline Durumu</div>
+          <div className="mb-4 text-sm font-semibold tracking-tight text-slate-900">İş Akışı Özeti</div>
           <SectionMessage loading={uploads.loading || overview.loading} error={uploads.error || overview.error} />
           {!uploads.loading && !overview.loading && !uploads.error && !overview.error && (
             <div className="grid grid-cols-1 gap-3 md:grid-cols-5">
@@ -331,7 +351,9 @@ export default function Dashboard() {
                       <tr key={upload.id} className="transition-colors hover:bg-primary-50/40">
                         <td className="px-4 py-3.5 font-medium text-slate-900">{upload.file_name}</td>
                         <td className="px-4 py-3.5 tabular-nums text-slate-600">{formatNumber(upload.total_records)}</td>
-                        <td className="px-4 py-3.5 text-slate-600">{upload.processing_stage || upload.status}</td>
+                        <td className="px-4 py-3.5 text-slate-600">
+                          {formatUploadStageLabel(upload.processing_stage, upload.status)}
+                        </td>
                         <td className="px-4 py-3.5 text-slate-500">{formatDate(upload.created_at)}</td>
                         <td className="px-4 py-3 text-right">
                           <Link
@@ -342,7 +364,7 @@ export default function Dashboard() {
                             }
                             className="inline-flex items-center gap-1 rounded-lg bg-gradient-to-r from-primary-600 to-primary-700 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:from-primary-500 hover:to-primary-600"
                           >
-                            {upload.latest_normalization_run_id ? "Mükerrer Tespit" : "Normalize Et"}
+                            {upload.latest_normalization_run_id ? "Benzerleri Tara" : "Standardize Et"}
                           </Link>
                         </td>
                       </tr>
@@ -411,7 +433,7 @@ export default function Dashboard() {
 
           <div className="rounded-2xl border border-slate-200/80 bg-white shadow-card">
             <div className="border-b border-slate-100 bg-slate-50/50 px-5 py-4 text-sm font-semibold tracking-tight text-slate-900">
-              Son Kararlar
+              Son İnceleme Kararları
             </div>
             <SectionMessage loading={reviews.loading} error={reviews.error} />
             {!reviews.loading && !reviews.error && (
@@ -421,8 +443,8 @@ export default function Dashboard() {
                   return (
                     <div key={review.id} className="grid grid-cols-[1fr_auto_auto] items-center gap-3 px-5 py-3 text-xs">
                       <div>
-                        <div className="font-medium text-gray-800">{review.user || "system"}</div>
-                        <div className="text-gray-400">{review.group_id}</div>
+                        <div className="font-medium text-gray-800">{review.user || "Sistem"}</div>
+                        <div className="text-gray-400">{formatReviewGroupLabel(review.group_id)}</div>
                       </div>
                       <span className={approved ? "font-semibold text-emerald-700" : "font-semibold text-danger-700"}>
                         {approved ? "✓ Onay" : "✗ Red"}

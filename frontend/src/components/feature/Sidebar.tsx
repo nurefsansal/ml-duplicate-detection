@@ -4,13 +4,13 @@ import { NavLink, useLocation } from "react-router-dom";
 import { withUploadContext } from "../../utils/uploadContextNav";
 
 const navItems = [
-  { path: "/", icon: "ri-dashboard-3-line", label: "Dashboard" },
+  { path: "/", icon: "ri-dashboard-3-line", label: "Genel Bakış" },
   { path: "/veri-yukleme", icon: "ri-upload-cloud-2-line", label: "Veri Yükleme" },
-  { path: "/ham-veri", icon: "ri-table-2", label: "Ham Veri" },
-  { path: "/veri-normalizasyon", icon: "ri-filter-3-line", label: "Veri Standardizasyon" },
-  { path: "/temiz-veri-seti", icon: "ri-table-line", label: "Temiz Veri Seti" },
-  { path: "/mukerrer-tespit", icon: "ri-search-eye-line", label: "Mükerrer Tespit" },
-  { path: "/mukerrer-kayitlar", icon: "ri-file-copy-2-line", label: "Mükerrer Kayıtlar" },
+  { path: "/ham-veri", icon: "ri-table-2", label: "Yüklenen Veri" },
+  { path: "/veri-normalizasyon", icon: "ri-filter-3-line", label: "Standardize Et" },
+  { path: "/temiz-veri-seti", icon: "ri-table-line", label: "Hazır Veri" },
+  { path: "/mukerrer-tespit", icon: "ri-search-eye-line", label: "Benzer Kayıtları Bul" },
+  { path: "/mukerrer-kayitlar", icon: "ri-file-copy-2-line", label: "İnceleme ve Birleştirme" },
   { path: "/ayarlar", icon: "ri-settings-4-line", label: "Ayarlar" },
   { path: "/raporlar", icon: "ri-bar-chart-box-line", label: "Raporlar" },
 ];
@@ -38,10 +38,10 @@ export default function Sidebar() {
             </div>
             <div className="min-w-0">
               <p className="text-sm font-semibold leading-tight tracking-tight text-white">
-                Kayıt Tespit Sistemi
+                Kayıt Kalite Sistemi
               </p>
               <p className="mt-0.5 text-[11px] font-medium text-slate-500">
-                Veri kalite platformu
+                Veri hazırlama ve inceleme paneli
               </p>
             </div>
           </div>
